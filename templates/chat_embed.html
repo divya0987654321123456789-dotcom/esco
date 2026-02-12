@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Chats - ESCO Suite</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
+    <link rel="stylesheet" href="{{ url_for('static', filename='light_theme_overrides.css') }}">
+</head>
+<body class="bg-slate-50 text-slate-900 h-full">
+  <div class="h-[calc(100vh-0px)] flex flex-col">
+    <div class="p-3 border-b border-slate-200 bg-white flex items-center justify-between">
+      <div class="min-w-0">
+        <div class="text-xs text-slate-500">Chats</div>
+        <div class="font-bold text-slate-900 truncate">Room: {{ active_room_label }}</div>
+      </div>
+      <div class="text-xs text-slate-500">Realtime</div>
+    </div>
+
+    <div class="flex-1 p-3">
+      <div class="grid grid-cols-1 lg:grid-cols-4 gap-3 h-full">
+        <div class="bg-white border border-slate-200 rounded-xl overflow-hidden">
+          <div class="p-3 border-b border-slate-200 font-semibold text-sm">Rooms</div>
+          <div class="p-2 space-y-1 overflow-auto max-h-[calc(100vh-160px)]">
+            {% for r in rooms %}
+              <button type="button"
+                      class="w-full text-left px-3 py-2 rounded-lg hover:bg-slate-100 text-sm {{ 'bg-slate-100 font-semibold' if r.key == active_room else '' }}"
+                      data-room="{{ r.key }}">
+                <i class="fas fa-comments mr-2 text-slate-500"></i>{{ r.label }}
+              </button>
+            {% endfor %}
+          </div>
+        </div>
+
+        <div class="lg:col-span-3 bg-white border border-slate-200 rounded-xl overflow-hidden flex flex-col">
+          <div id="chatLog" class="flex-1 overflow-y-auto p-4 space-y-3 bg-slate-50">
+            <div class="text-sm text-slate-500 italic">Loading…</div>
+          </div>
+
+          <div class="p-4 border-t border-slate-200">
+            <div id="chatStatus" class="hidden text-xs mb-2"></div>
+            <div class="flex items-center gap-2">
+              <input id="chatFile" type="file" class="hidden" />
+              <button id="chatAttach" type="button"
+                      class="px-3 py-2 border border-slate-300 rounded-lg text-slate-700 hover:bg-slate-50"
+                      title="Attach file/image">
+                <i class="fas fa-paperclip"></i>
+              </button>
+              <input id="chatInput" type="text"
+                     class="flex-1 px-3 py-2 border border-slate-300 rounded-lg text-sm"
+                     placeholder="Type a message and press Enter…" />
+              <button id="chatSend" type="button"
+                      class="px-4 py-2 bg-slate-900 hover:bg-black text-white rounded-lg text-sm">
+                Send
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const socket = (typeof io !== 'undefined') ? io() : null;
+    let currentRoom = "{{ (active_room or 'all')|e }}";
+    const csrfToken = "{{ csrf_token() }}";
+    let socketReady = false;
+
+    function esc(s) {
+      return String(s || '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
+
+    function setStatus(msg, kind) {
+      const el = document.getElementById('chatStatus');
+      if (!el) return;
+      if (!msg) {
+        el.classList.add('hidden');
+        el.textContent = '';
+        return;
+      }
+      el.classList.remove('hidden');
+      el.classList.toggle('text-rose-700', kind === 'error');
+      el.classList.toggle('text-slate-600', kind !== 'error');
+      el.textContent = msg;
+    }
+
+    function renderMessages(messages) {
+      const wrap = document.getElementById('chatLog');
+      wrap.innerHTML = '';
+      if (!messages || !messages.length) {
+        wrap.innerHTML = '<div class="text-sm text-slate-500 italic">No messages yet.</div>';
+        return;
+      }
+      messages.forEach(m => {
+        const div = document.createElement('div');
+        div.className = 'bg-white border border-slate-200 rounded-lg p-3';
+        const attachmentUrl = m.attachment_url || null;
+        const attachmentName = m.attachment_name || null;
+        const mime = (m.attachment_mime || '').toLowerCase();
+        const isImg = attachmentUrl && (mime.startsWith('image/') || /\.(png|jpe?g|gif|webp|svg)$/i.test(String(attachmentName || attachmentUrl)));
+        div.innerHTML = `
+          <div class="flex items-center justify-between text-xs text-slate-500">
+            <span class="font-semibold text-slate-700">${esc(m.user_name || m.user_email || 'User')}</span>
+            <span>${esc(m.created_at || '')}</span>
+          </div>
+          ${(m.message ? `<div class="text-sm text-slate-800 mt-1 whitespace-pre-wrap">${esc(m.message)}</div>` : '')}
+          ${attachmentUrl ? (
+            isImg
+              ? `<div class="mt-2"><a href="${esc(attachmentUrl)}" target="_blank" class="inline-block"><img src="${esc(attachmentUrl)}" class="max-h-64 rounded-lg border border-slate-200" /></a></div>`
+              : `<div class="mt-2"><a href="${esc(attachmentUrl)}" target="_blank" class="text-sm text-blue-700 underline"><i class="fas fa-file mr-1"></i>${esc(attachmentName || 'Attachment')}</a></div>`
+          ) : ''}
+        `;
+        wrap.appendChild(div);
+      });
+      wrap.scrollTop = wrap.scrollHeight;
+    }
+
+    async function loadHistory(room) {
+      try {
+        const r = await fetch(`/api/chats/${encodeURIComponent(room)}`, { credentials: 'same-origin' });
+        const d = await r.json().catch(() => null);
+        if (!r.ok) throw new Error((d && (d.message || d.error)) || ('HTTP ' + r.status));
+        renderMessages((d && d.messages) ? d.messages : []);
+        setStatus('', 'ok');
+      } catch (e) {
+        renderMessages([]);
+        setStatus('Failed to load messages: ' + (e && e.message ? e.message : 'Unknown error'), 'error');
+      }
+    }
+
+    function joinRoom(room) {
+      currentRoom = room;
+      loadHistory(room);
+      try {
+        localStorage.setItem('activeChatRoom', room);
+        localStorage.removeItem('chatUnread:' + room);
+      } catch (e) {}
+      if (socket && socketReady) socket.emit('team_chat_join_room', { room });
+    }
+
+    document.addEventListener('click', (e) => {
+      const btn = e.target.closest ? e.target.closest('[data-room]') : null;
+      if (!btn) return;
+      const room = btn.getAttribute('data-room');
+      if (!room) return;
+      joinRoom(room);
+      document.querySelectorAll('[data-room]').forEach(b => b.classList.remove('bg-slate-100','font-semibold'));
+      btn.classList.add('bg-slate-100','font-semibold');
+    });
+
+    async function sendMessage() {
+      const input = document.getElementById('chatInput');
+      const msg = (input.value || '').trim();
+      const fileInput = document.getElementById('chatFile');
+      const file = (fileInput && fileInput.files && fileInput.files[0]) ? fileInput.files[0] : null;
+      if (!msg && !file) return;
+      setStatus('Sending…', 'ok');
+      try {
+        if (file) {
+          const fd = new FormData();
+          fd.append('room', currentRoom);
+          fd.append('message', msg);
+          fd.append('_csrf_token', csrfToken);
+          fd.append('file', file);
+          const res = await fetch('/api/chats/send', { method: 'POST', credentials: 'same-origin', headers: { 'X-CSRF-Token': csrfToken }, body: fd });
+          const d = await res.json().catch(() => null);
+          if (!res.ok || !d || !d.success) throw new Error((d && (d.message || d.error)) || ('HTTP ' + res.status));
+        } else {
+          const res = await fetch('/api/chats/send', {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+            body: JSON.stringify({ room: currentRoom, message: msg, _csrf_token: csrfToken })
+          });
+          const d = await res.json().catch(() => null);
+          if (!res.ok || !d || !d.success) throw new Error((d && (d.message || d.error)) || ('HTTP ' + res.status));
+        }
+        input.value = '';
+        if (fileInput) fileInput.value = '';
+        setStatus('', 'ok');
+        loadHistory(currentRoom);
+      } catch (err) {
+        setStatus('Send failed: ' + (err && err.message ? err.message : 'Unknown error') + ' (try refresh)', 'error');
+      }
+    }
+
+    document.getElementById('chatSend').addEventListener('click', sendMessage);
+    document.getElementById('chatInput').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') sendMessage();
+    });
+    document.getElementById('chatAttach').addEventListener('click', () => {
+      const fi = document.getElementById('chatFile');
+      if (fi) fi.click();
+    });
+    document.getElementById('chatFile').addEventListener('change', () => {
+      const fi = document.getElementById('chatFile');
+      const f = (fi && fi.files && fi.files[0]) ? fi.files[0] : null;
+      if (f) setStatus('Attached: ' + f.name, 'ok');
+    });
+
+    if (socket) {
+      socket.on('connect', () => {
+        socketReady = true;
+        socket.emit('team_chat_join_room', { room: currentRoom });
+      });
+      socket.on('disconnect', () => { socketReady = false; });
+      socket.on('team_chat_message', (payload) => {
+        if (!payload || payload.room !== currentRoom) return;
+        loadHistory(currentRoom);
+      });
+      socket.on('top_admin_chat_message', (payload) => {
+        if (!payload || payload.room !== currentRoom) return;
+        loadHistory(currentRoom);
+      });
+    }
+
+    joinRoom(currentRoom);
+    setInterval(() => {
+      if (!socket || !socketReady) loadHistory(currentRoom);
+    }, 5000);
+  </script>
+</body>
+</html>
+
+

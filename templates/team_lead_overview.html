@@ -1,0 +1,608 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ team_display_name }} - Team Lead Overview</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
+    <link rel="stylesheet" href="{{ url_for('static', filename='light_theme_overrides.css') }}">
+</head>
+<body class="bg-gray-50 text-gray-800">
+    {% set _ro = (read_only if read_only is defined else false) %}
+    <div class="flex h-screen">
+        {% include 'sidebar.html' %}
+
+        <main class="flex-1 p-8 overflow-y-auto">
+            <div class="flex items-center justify-between mb-6">
+                <h2 class="text-2xl font-bold text-gray-900">{{ team_display_name }} Dashboard</h2>
+                <div class="flex items-center space-x-4">
+                    {% if _ro and (viewer_is_top_admin|default(false)) %}
+                      <a href="{{ url_for('top_admin_overview') }}" class="bg-gray-900 text-white px-4 py-2 rounded-lg hover:bg-black transition-colors">
+                          <i class="fas fa-arrow-left mr-2"></i>Back to Overview
+                      </a>
+                      <span class="px-3 py-2 rounded-lg bg-amber-100 text-amber-800 text-sm font-semibold border border-amber-200">
+                        Read-only
+                      </span>
+                    {% else %}
+                      {% if check_module_access('team_management') or is_admin %}
+                      <a href="/team/{{ team }}/employees" class="bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 transition-colors">
+                          <i class="fas fa-users mr-2"></i>Manage Employees
+                      </a>
+                      {% endif %}
+                    {% endif %}
+                </div>
+            </div>
+
+            <!-- Team Stats Cards -->
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+                <div class="bg-white p-6 rounded-lg shadow-md">
+                    <div class="flex items-center">
+                        <div class="p-3 rounded-full bg-blue-100 text-blue-600">
+                            <i class="fas fa-clipboard-list text-xl"></i>
+                        </div>
+                        <div class="ml-4">
+                            <p class="text-sm font-medium text-gray-600">Total Bids</p>
+                            <p class="text-2xl font-bold text-gray-900">{{ total_bids }}</p>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="bg-white p-6 rounded-lg shadow-md">
+                    <div class="flex items-center">
+                        <div class="p-3 rounded-full bg-green-100 text-green-600">
+                            <i class="fas fa-check-circle text-xl"></i>
+                        </div>
+                        <div class="ml-4">
+                            <p class="text-sm font-medium text-gray-600">Completed</p>
+                            <p class="text-2xl font-bold text-gray-900">{{ completed_bids }}</p>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="bg-white p-6 rounded-lg shadow-md">
+                    <div class="flex items-center">
+                        <div class="p-3 rounded-full bg-yellow-100 text-yellow-600">
+                            <i class="fas fa-clock text-xl"></i>
+                        </div>
+                        <div class="ml-4">
+                            <p class="text-sm font-medium text-gray-600">In Progress</p>
+                            <p class="text-2xl font-bold text-gray-900">{{ in_progress_bids }}</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Assigned Bids Table -->
+            <div class="bg-white text-gray-900 p-6 rounded-lg shadow-md">
+                <div class="flex items-center justify-between mb-4">
+                    <h3 class="text-lg font-semibold">Assigned Bids</h3>
+                </div>
+                <div class="overflow-x-auto">
+                    <table class="min-w-full whitespace-nowrap">
+                        <thead class="text-xs uppercase tracking-wider text-gray-900 border-b border-gray-700">
+                            <tr class="bg-gray-300">
+                                <th class="px-4 py-3 text-left">Task Name
+                                    <i class="fa-solid fa-sort ml-1 opacity-50"></i>
+                                </th>
+                                <th class="px-4 py-3 text-left">Assignment
+                                    <i class="fa-solid fa-sort ml-1 opacity-50"></i>
+                                </th>
+                                <th class="px-4 py-3 text-left">Start date
+                                    <i class="fa-solid fa-sort ml-1 opacity-50"></i>
+                                </th>
+                                <th class="px-4 py-3 text-left">Due date
+                                    <i class="fa-solid fa-sort ml-1 opacity-50"></i>
+                                </th>
+                                <th class="px-4 py-3 text-left">Bucket
+                                    <i class="fa-solid fa-sort ml-1 opacity-50"></i>
+                                </th>
+                                <th class="px-4 py-3 text-left">State
+                                    <i class="fa-solid fa-sort ml-1 opacity-50"></i>
+                                </th>
+                                <th class="px-4 py-3 text-left">Progress
+                                    <i class="fa-solid fa-sort ml-1 opacity-50"></i>
+                                </th>
+                                <th class="px-4 py-3 text-left">Priority
+                                    <i class="fa-solid fa-sort ml-1 opacity-50"></i>
+                                </th>
+                                <th class="px-4 py-3 text-left">Submission
+                                    <i class="fa-solid fa-sort ml-1 opacity-50"></i>
+                                </th>
+                                <th class="px-4 py-3 text-left">Result
+                                    <i class="fa-solid fa-sort ml-1 opacity-50"></i>
+                                </th>
+                                <th class="px-4 py-3 text-right">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody class="text-sm text-gray-900">
+                            {% for bid in bids %}
+                            <tr class="odd:bg-gray-300 even:bg-gray-200 hover:bg-gray-200/80 transition-colors border-b border-gray-700 text-gray-900"
+                                data-bid-row="{{ bid.id }}"
+                                data-current-stage="{{ bid.current_stage }}"
+                                data-person-name="{{ bid.person_name or '' }}"
+                                data-person-email="{{ bid.person_email or '' }}">
+                                <!-- Task Name -->
+                                <td class="px-4 py-4 align-top">
+                                    <div class="font-semibold text-gray-900">{{ bid.name }}</div>
+                                    <div class="text-xs text-gray-600">{{ bid.company or 'N/A' }}</div>
+                                </td>
+                                <!-- Assignment -->
+                                <td class="px-4 py-4 align-top">
+                                    <label class="block text-xs text-gray-600 mb-1">Assign to</label>
+                                    <div class="flex flex-wrap gap-1" data-assignees data-bid-id="{{ bid.id }}">
+                                        {% if bid.assigned_members %}
+                                            {% for m in bid.assigned_members %}
+                                            <span class="inline-flex items-center gap-1 px-2 py-1 rounded-full text-xs bg-blue-100 text-blue-800">
+                                                <span class="w-5 h-5 rounded-full bg-blue-500 text-white flex items-center justify-center text-[10px]">{{ (m.name or 'U')[0]|upper }}</span>
+                                                {{ m.name or m.email or 'User' }}
+                                                {% if not _ro %}
+                                                  <button onclick="removeAssignee({{ bid.id }}, {{ m.id }})" class="ml-1 text-gray-500 hover:text-red-500">&times;</button>
+                                                {% endif %}
+                                            </span>
+                                            {% endfor %}
+                                        {% else %}
+                                            <span class="text-[11px] text-gray-400">Unassigned</span>
+                                        {% endif %}
+                                    </div>
+                                    {% if not _ro %}
+                                      <button type="button" class="mt-1 px-2 py-1 text-xs rounded bg-gray-800 text-white hover:bg-gray-900" data-assignees-btn data-bid-id="{{ bid.id }}">+ Add</button>
+                                    {% endif %}
+                                </td>
+                                <!-- Start date -->
+                                <td class="px-4 py-4 align-top">
+                                    <span class="text-gray-700">{{ bid.in_date or '—' }}</span>
+                                </td>
+                                <!-- Due date -->
+                                <td class="px-4 py-4 align-top">
+                                    <span class="text-gray-900">{{ bid.due_date or 'N/A' }}</span>
+                                </td>
+                                <!-- Bucket (Checklist status, independent of team stage) -->
+                                <td class="px-4 py-4 align-top">
+                                    <span id="bucketLabel_{{ bid.id }}" class="px-2 py-1 rounded-full text-xs bg-indigo-100 text-indigo-700 border border-indigo-200">Ready To Start</span>
+                                </td>
+                                <!-- Current stage (read-only) -->
+                                <td class="px-4 py-4 align-top">
+                                    <span class="px-2 py-1 rounded-full text-xs bg-gray-100 text-gray-700 border border-gray-300">
+                                        {{ (bid.current_stage or 'analyzer')|replace('_',' ')|title }}
+                                    </span>
+                                </td>
+                                <!-- Progress -->
+                                <td class="px-4 py-4 align-top">
+                                    <div class="w-40">
+                                        <div class="w-full h-2 rounded-full bg-gray-200">
+                                            <div id="progressBarRow_{{ bid.id }}"
+                                                class="h-2 rounded-full bg-emerald-500 transition-all duration-300"
+                                                style="width: 0%"></div>
+                                        </div>
+                                        <div class="mt-1 text-[11px] text-gray-600">
+                                            <i class="fa-regular fa-circle-check mr-1 text-emerald-500"></i>
+                                            <span id="progressPctRow_{{ bid.id }}">0%</span>
+                                        </div>
+                                    </div>
+                                </td>
+                                <!-- Priority (placeholder mapping) -->
+                                <td class="px-4 py-4 align-top">
+                                    {% set _prio = 'Medium' %}
+                                    <span class="inline-flex items-center gap-1 px-2 py-1 rounded-full text-xs
+                                                 {% if _prio == 'Important' %} bg-red-600/20 text-red-900 border border-red-600/40
+                                                 {% elif _prio == 'Low' %} bg-gray-600/20 text-gray-900 border border-gray-500/40
+                                                 {% else %} bg-yellow-500/20 text-yellow-900 border border-yellow-600/40 {% endif %}">
+                                        {% if _prio == 'Important' %}
+                                            <i class="fa-solid fa-circle-exclamation"></i>
+                                        {% elif _prio == 'Low' %}
+                                            <i class="fa-solid fa-arrow-down"></i>
+                                        {% else %}
+                                            <i class="fa-solid fa-arrow-right"></i>
+                                        {% endif %}
+                                        {{ _prio }}
+                                    </span>
+                                </td>
+                                <!-- Submission Stage (Submitted / Not Submitted) -->
+                                <td class="px-4 py-4 align-top">
+                                    <select class="px-2 py-1 rounded border border-gray-300 text-xs focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                                            onchange="updateSubmissionStatus({{ bid.id }}, this.value)"
+                                            data-bid-id="{{ bid.id }}"
+                                            {% if _ro %}disabled{% endif %}>
+                                        <option value="Work Progress" {% if not bid.submission_status or bid.submission_status == 'Work Progress' %}selected{% endif %}>Work Progress</option>
+                                        <option value="Submitted" {% if bid.submission_status == 'Submitted' %}selected{% endif %}>Submitted</option>
+                                        <option value="Not Submitted" {% if bid.submission_status == 'Not Submitted' %}selected{% endif %}>Not Submitted</option>
+                                        <option value="On Hold" {% if bid.submission_status == 'On Hold' %}selected{% endif %}>On Hold</option>
+                                    </select>
+                                </td>
+                                <!-- Submitted Result (Won / Lost) -->
+                                <td class="px-4 py-4 align-top">
+                                    <select class="px-2 py-1 rounded border border-gray-300 text-xs focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                                            onchange="updateResultStatus({{ bid.id }}, this.value)"
+                                            data-bid-id="{{ bid.id }}"
+                                            {% if _ro %}disabled{% endif %}>
+                                        <option value="Awaited" {% if not bid.wl_result or bid.wl_result == 'Awaited' or bid.wl_result == 'Pending' %}selected{% endif %}>Awaited</option>
+                                        <option value="WON" {% if bid.wl_result == 'WON' %}selected{% endif %}>Won</option>
+                                        <option value="LOST" {% if bid.wl_result == 'LOST' %}selected{% endif %}>Lost</option>
+                                    </select>
+                                </td>
+                                <!-- Actions -->
+                                <td class="px-4 py-4 align-top">
+                                    <div class="flex items-center justify-end gap-2">
+                                        <button class="px-3 py-1.5 rounded bg-gray-700 hover:bg-gray-600 text-white text-xs"
+                                                data-bid-id="{{ bid.id }}"
+                                                data-bid-name="{{ bid.name|e }}"
+                                                data-company="{{ (bid.company or 'N/A')|e }}"
+                                                data-due-date="{{ (bid.due_date or 'N/A')|e }}"
+                                                data-decision="{{ (bid.wl_result or 'GO')|e }}"
+                                                data-project-status="{{ (bid.project_status or 'ongoing')|e }}"
+                                                data-work-status="{{ (bid.work_status or 'Initiated by BID Analyzer')|e }}"
+                                                data-description="{{ (bid.summary or 'No description available')|e }}"
+                                                onclick="showBidSummaryFromEl(this)"
+                                                title="Summary">
+                                            <i class="fas fa-eye"></i>
+                                        </button>
+                                    </div>
+                                </td>
+                            </tr>
+                            {% endfor %}
+                            {% if bids|length == 0 %}
+                            <tr class="bg-gray-200">
+                                <td colspan="11" class="p-6 text-center text-gray-400">
+                                    <i class="fas fa-inbox text-4xl text-gray-600 mb-2"></i>
+                                    <p>No bids assigned to {{ team_display_name }}</p>
+                                </td>
+                            </tr>
+                            {% endif %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- Team Employees Section -->
+            {% if (check_module_access('team_management') or is_admin) and employees %}
+            <div class="bg-white rounded-lg shadow-md mt-8">
+                <div class="p-6 border-b border-gray-200 flex justify-between items-center">
+                    <div>
+                        <h3 class="text-lg font-semibold">{{ team_display_name }} Team Members</h3>
+                        <p class="text-sm text-gray-500">{{ employees|length }} employees</p>
+                    </div>
+                    <div class="flex space-x-3 text-sm">
+                        <span class="px-3 py-1 bg-yellow-100 text-yellow-800 rounded-full">
+                            {{ employees|sum(attribute='pending_tasks') if employees else 0 }} Pending
+                        </span>
+                        <span class="px-3 py-1 bg-blue-100 text-blue-800 rounded-full">
+                            {{ employees|sum(attribute='in_progress_tasks') if employees else 0 }} In Progress
+                        </span>
+                        <span class="px-3 py-1 bg-green-100 text-green-800 rounded-full">
+                            {{ employees|sum(attribute='completed_tasks') if employees else 0 }} Completed
+                        </span>
+                    </div>
+                </div>
+                <div class="overflow-x-auto">
+                    <table class="w-full">
+                        <thead class="bg-gray-50">
+                            <tr>
+                                <th class="p-3 text-left">Employee</th>
+                                <th class="p-3 text-left">Email</th>
+                                <th class="p-3 text-center">Pending</th>
+                                <th class="p-3 text-center">In Progress</th>
+                                <th class="p-3 text-center">Completed</th>
+                                <th class="p-3 text-center">Total</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for emp in employees %}
+                            <tr class="border-b hover:bg-gray-50">
+                                <td class="p-3">
+                                    <div class="flex items-center">
+                                        <div class="w-10 h-10 rounded-full bg-blue-500 flex items-center justify-center text-white font-semibold mr-3">
+                                            {{ emp.name[0]|upper if emp.name else 'E' }}
+                                        </div>
+                                        <div>
+                                            <div class="font-medium">{{ emp.name }}</div>
+                                            <div class="text-xs text-gray-500">ID: {{ emp.id }}</div>
+                                        </div>
+                                    </div>
+                                </td>
+                                <td class="p-3 text-gray-600">{{ emp.email or 'N/A' }}</td>
+                                <td class="p-3 text-center">
+                                    <span class="px-2 py-1 text-xs rounded-full bg-yellow-100 text-yellow-800">
+                                        {{ emp.pending_tasks or 0 }}
+                                    </span>
+                                </td>
+                                <td class="p-3 text-center">
+                                    <span class="px-2 py-1 text-xs rounded-full bg-blue-100 text-blue-800">
+                                        {{ emp.in_progress_tasks or 0 }}
+                                    </span>
+                                </td>
+                                <td class="p-3 text-center">
+                                    <span class="px-2 py-1 text-xs rounded-full bg-green-100 text-green-800">
+                                        {{ emp.completed_tasks or 0 }}
+                                    </span>
+                                </td>
+                                <td class="p-3 text-center font-semibold">
+                                    {{ (emp.pending_tasks or 0) + (emp.in_progress_tasks or 0) + (emp.completed_tasks or 0) }}
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+            {% endif %}
+        </main>
+    </div>
+
+    <!-- Bid Summary Modal -->
+    <div id="bidSummaryModal" class="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full hidden z-50">
+        <div class="relative top-20 mx-auto p-5 border w-11/12 md:w-3/4 lg:w-1/2 shadow-lg rounded-md bg-white">
+            <div class="mt-3">
+                <div class="flex items-center justify-between mb-4">
+                    <h3 id="modalTitle" class="text-lg font-semibold text-gray-900"></h3>
+                    <button onclick="closeBidSummary()" class="text-gray-400 hover:text-gray-600">
+                        <i class="fas fa-times text-xl"></i>
+                    </button>
+                </div>
+                <div class="grid grid-cols-1 gap-6">
+                    <div>
+                        <h4 class="font-semibold text-gray-700 mb-3">Key Points</h4>
+                        <div class="space-y-2 text-sm">
+                            <div class="flex justify-between">
+                                <span class="font-medium text-gray-600">Company:</span>
+                                <span id="modalCompany" class="text-gray-900"></span>
+                            </div>
+                            <div class="flex justify-between">
+                                <span class="font-medium text-gray-600">Due Date:</span>
+                                <span id="modalDueDate" class="text-gray-900"></span>
+                            </div>
+                            <div class="flex justify-between">
+                                <span class="font-medium text-gray-600">Decision:</span>
+                                <span id="modalDecision" class="text-gray-900"></span>
+                            </div>
+                            <div class="flex justify-between">
+                                <span class="font-medium text-gray-600">Project Status:</span>
+                                <span id="modalProjectStatus" class="text-gray-900"></span>
+                            </div>
+                            <div class="flex justify-between">
+                                <span class="font-medium text-gray-600">Work Status:</span>
+                                <span id="modalWorkStatus" class="text-gray-900"></span>
+                            </div>
+                            <div class="flex justify-between">
+                                <span class="font-medium text-gray-600">Description:</span>
+                                <span id="modalDescription" class="text-gray-900 text-right max-w-xs"></span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="flex justify-end space-x-3 mt-6 pt-4 border-t">
+                    <button onclick="closeBidSummary()" class="px-4 py-2 bg-gray-300 text-gray-700 rounded hover:bg-gray-400">
+                        Close
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Assign Employee Modal -->
+    <div id="assignModal" class="fixed inset-0 bg-black/60 hidden z-50">
+        <div class="relative top-20 mx-auto w-11/12 md:w-96 bg-white rounded shadow-xl">
+            <div class="p-4 border-b flex justify-between items-center">
+                <h4 class="font-semibold">Assign Employee</h4>
+                <button onclick="closeAssignModal()" class="text-gray-500 hover:text-gray-700"><i class="fas fa-times"></i></button>
+            </div>
+            <div class="p-4">
+                <input type="hidden" id="assignBidId">
+                <select id="assignSelect" class="w-full border rounded px-3 py-2">
+                    <option value="">Select employee...</option>
+                    {% for emp in employees %}
+                    <option value="{{ emp.id }}" data-email="{{ emp.email }}">{{ emp.name }}</option>
+                    {% endfor %}
+                </select>
+                <button onclick="submitAssign()" class="mt-4 w-full bg-blue-600 text-white py-2 rounded hover:bg-blue-700">Assign</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const TEAM = '{{ team }}';
+        const TEAM_READ_ONLY = {{ 'true' if _ro else 'false' }};
+        const teamEmployees = {{ employees | tojson | safe }};
+        let bidsData = {{ bids | tojson | safe }};
+
+        // Show bid summary modal
+        function showBidSummaryFromEl(el) {
+            const modal = document.getElementById('bidSummaryModal');
+            document.getElementById('modalTitle').textContent = el.dataset.bidName || 'Bid Details';
+            document.getElementById('modalCompany').textContent = el.dataset.company || 'N/A';
+            document.getElementById('modalDueDate').textContent = el.dataset.dueDate || 'N/A';
+            document.getElementById('modalDecision').textContent = el.dataset.decision || 'N/A';
+            document.getElementById('modalProjectStatus').textContent = el.dataset.projectStatus || 'N/A';
+            document.getElementById('modalWorkStatus').textContent = el.dataset.workStatus || 'N/A';
+            document.getElementById('modalDescription').textContent = el.dataset.description || 'N/A';
+            modal.classList.remove('hidden');
+        }
+
+        function closeBidSummary() {
+            document.getElementById('bidSummaryModal').classList.add('hidden');
+        }
+
+        // Assignment functionality
+        let currentAssignBidId = null;
+
+        document.addEventListener('DOMContentLoaded', function() {
+            if (TEAM_READ_ONLY) {
+                // Don't attach handlers that open assignment modal in read-only mode
+                loadAllAssignments();
+                loadAllBidProgress();
+                return;
+            }
+            // Setup assign buttons
+            document.querySelectorAll('[data-assignees-btn]').forEach(btn => {
+                btn.addEventListener('click', () => {
+                    currentAssignBidId = parseInt(btn.dataset.bidId);
+                    document.getElementById('assignBidId').value = currentAssignBidId;
+                    document.getElementById('assignModal').classList.remove('hidden');
+                });
+            });
+
+            // Load existing assignments for each bid
+            loadAllAssignments();
+            
+            // Load progress for all bids
+            loadAllBidProgress();
+        });
+
+        // Load progress for all bids
+        function loadAllBidProgress() {
+            const bidIds = Array.from(document.querySelectorAll('[data-bid-row]')).map(row => row.dataset.bidRow);
+            bidIds.forEach(id => loadBidProgress(id));
+        }
+
+        function loadBidProgress(bidId) {
+            fetch(`/api/team/${TEAM}/bids/${bidId}/tasks`)
+                .then(response => response.json())
+                .then(data => {
+                    const tasks = data.tasks || [];
+                    let pct = 0;
+                    if (tasks.length > 0) {
+                        const completed = tasks.filter(t => t.status === 'completed').length;
+                        pct = Math.round((completed / tasks.length) * 100);
+                    }
+                    // Update progress bar and percentage
+                    const bar = document.getElementById(`progressBarRow_${bidId}`);
+                    const txt = document.getElementById(`progressPctRow_${bidId}`);
+                    if (bar) bar.style.width = `${pct}%`;
+                    if (txt) txt.textContent = `${pct}%`;
+                    
+                    // Set bucket label based on progress
+                    const lbl = document.getElementById(`bucketLabel_${bidId}`);
+                    if (lbl) {
+                        let text, cls;
+                        if (pct >= 100) { text = 'Completed'; cls = 'bg-emerald-100 text-emerald-700 border border-emerald-200'; }
+                        else if (pct > 0) { text = 'In Progress'; cls = 'bg-amber-100 text-amber-700 border border-amber-200'; }
+                        else { text = 'Ready To Start'; cls = 'bg-indigo-100 text-indigo-700 border border-indigo-200'; }
+                        lbl.textContent = text;
+                        lbl.className = `px-2 py-1 rounded-full text-xs ${cls}`;
+                    }
+                })
+                .catch(err => {
+                    console.error('Error loading bid progress', bidId, err);
+                });
+        }
+
+        // Update submission status
+        function updateSubmissionStatus(bidId, status) {
+            if (TEAM_READ_ONLY) return;
+            fetch(`/api/bid/${bidId}/submission-status`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ status: status })
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (!data.ok) {
+                    alert(data.error || 'Failed to update submission status');
+                }
+            })
+            .catch(err => console.error('Error updating submission status:', err));
+        }
+
+        // Update result status
+        function updateResultStatus(bidId, result) {
+            if (TEAM_READ_ONLY) return;
+            fetch(`/api/bid/${bidId}/result-status`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ result: result })
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (!data.ok) {
+                    alert(data.error || 'Failed to update result status');
+                }
+            })
+            .catch(err => console.error('Error updating result status:', err));
+        }
+
+        function closeAssignModal() {
+            document.getElementById('assignModal').classList.add('hidden');
+        }
+
+        function loadAllAssignments() {
+            // Fetch all assigned members for bids
+            document.querySelectorAll('[data-assignees]').forEach(container => {
+                const bidId = parseInt(container.dataset.bidId);
+                fetch(`/api/bid/${bidId}/assignees`)
+                    .then(r => r.json())
+                    .then(data => {
+                        if (data.ok && data.members) {
+                            renderAssigneeChips(container, bidId, data.members);
+                        } else if (data.assignees) {
+                            renderAssigneeChips(container, bidId, data.assignees);
+                        } else {
+                            container.innerHTML = '<span class="text-[11px] text-gray-400">Unassigned</span>';
+                        }
+                    })
+                    .catch(() => {
+                        container.innerHTML = '<span class="text-[11px] text-gray-400">Unassigned</span>';
+                    });
+            });
+        }
+
+        function renderAssigneeChips(container, bidId, members) {
+            if (!members || members.length === 0) {
+                container.innerHTML = '<span class="text-[11px] text-gray-400">Unassigned</span>';
+                return;
+            }
+            container.innerHTML = members.map(m => `
+                <span class="inline-flex items-center gap-1 px-2 py-1 rounded-full text-xs bg-blue-100 text-blue-800">
+                    <span class="w-5 h-5 rounded-full bg-blue-500 text-white flex items-center justify-center text-[10px]">${(m.name || 'U')[0].toUpperCase()}</span>
+                    ${m.name || m.email || 'User'}
+                    ${TEAM_READ_ONLY ? '' : `<button onclick="removeAssignee(${bidId}, ${m.id || m.employee_id})" class="ml-1 text-gray-500 hover:text-red-500">&times;</button>`}
+                </span>
+            `).join('');
+        }
+
+        function submitAssign() {
+            if (TEAM_READ_ONLY) return;
+            const bidId = parseInt(document.getElementById('assignBidId').value);
+            const select = document.getElementById('assignSelect');
+            const empId = parseInt(select.value);
+
+            if (!empId) return alert('Please select an employee');
+
+            // Use the team assign API endpoint
+            fetch(`/api/team/${TEAM}/assign`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ g_id: bidId, employee_ids: [empId] })
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.ok) {
+                    closeAssignModal();
+                    loadAllAssignments();
+                } else {
+                    alert(data.error || 'Failed to assign');
+                }
+            })
+            .catch(err => alert('Error: ' + err));
+        }
+
+        function removeAssignee(bidId, empId) {
+            if (TEAM_READ_ONLY) return;
+            if (!confirm('Remove this assignment?')) return;
+            fetch(`/api/team/${TEAM}/unassign`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ g_id: bidId, employee_id: empId })
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.ok) {
+                    loadAllAssignments();
+                }
+            })
+            .catch(() => {});
+        }
+    </script>
+</body>
+</html>
+

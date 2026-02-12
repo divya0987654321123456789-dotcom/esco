@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bid Analyzer</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    <script src="https://cdn.socket.io/4.5.0/socket.io.min.js"></script>
+</head>
+<body class="bg-gray-100">
+    <div class="flex h-screen">
+        <!-- Sidebar -->
+        <div class="w-64 bg-gray-800 text-white">
+            <div class="p-6">
+                <h1 class="text-2xl font-bold">ESCO Suite</h1>
+                <p class="text-gray-400 text-sm">Bid Management System</p>
+            </div>
+            <nav class="mt-8">
+                <a href="{{ url_for('master_dashboard') }}" class="block py-3 px-6 text-gray-300 hover:bg-gray-700 hover:text-white">
+                    <i class="fas fa-tachometer-alt mr-3"></i>Master Dashboard
+                </a>
+                <a href="{{ url_for('company_dashboard', company_name='ikio') }}" class="block py-3 px-6 text-gray-300 hover:bg-gray-700 hover:text-white">
+                    <i class="fas fa-building mr-3"></i>IKIO
+                </a>
+                
+                <a href="{{ url_for('bid_analyzer') }}" class="block py-3 px-6 bg-gray-700 text-white">
+                    <i class="fas fa-chart-line mr-3"></i>Bid Analyzer
+                </a>
+                <a href="{{ url_for('databases') }}" class="block py-3 px-6 text-gray-300 hover:bg-gray-700 hover:text-white">
+                    <i class="fas fa-database mr-3"></i>Databases
+                </a>
+                <a href="{{ url_for('users_admin') }}" class="block py-3 px-6 text-gray-300 hover:bg-gray-700 hover:text-white">
+                    <i class="fas fa-users mr-3"></i>Users
+                </a>
+                <a href="{{ url_for('logs_page') }}" class="block py-3 px-6 text-gray-300 hover:bg-gray-700 hover:text-white">
+                    <i class="fas fa-list mr-3"></i>Logs
+                </a>
+                <a href="{{ url_for('logout') }}" class="block py-3 px-6 text-gray-300 hover:bg-gray-700 hover:text-white">
+                    <i class="fas fa-sign-out-alt mr-3"></i>Logout
+                </a>
+            </nav>
+        </div>
+
+        <!-- Main Content -->
+        <main class="flex-1 p-8 overflow-y-auto">
+            <div class="mb-8">
+                <h2 class="text-3xl font-bold text-gray-900 mb-2">Bid Analyzer</h2>
+                <p class="text-gray-600">Comprehensive bid analysis and tracking</p>
+            </div>
+
+            <!-- Bid Statistics Cards -->
+            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
+                <div class="bg-white p-6 rounded-lg shadow-md">
+                    <h4 class="text-gray-500 text-sm font-medium mb-2">Total Bids</h4>
+                    <p class="text-3xl font-bold text-gray-900">{{ data.total_bids }}</p>
+                </div>
+                <div class="bg-white p-6 rounded-lg shadow-md">
+                    <h4 class="text-gray-500 text-sm font-medium mb-2">Bids GO</h4>
+                    <p class="text-3xl font-bold text-green-600">{{ data.bids_go }}</p>
+                </div>
+                <div class="bg-white p-6 rounded-lg shadow-md">
+                    <h4 class="text-gray-500 text-sm font-medium mb-2">Bids NO-GO</h4>
+                    <p class="text-3xl font-bold text-red-600">{{ data.bids_no_go }}</p>
+                </div>
+                <div class="bg-white p-6 rounded-lg shadow-md">
+                    <h4 class="text-gray-500 text-sm font-medium mb-2">Bids Submitted</h4>
+                    <p class="text-3xl font-bold text-blue-600">{{ data.bids_submitted }}</p>
+                </div>
+                <div class="bg-white p-6 rounded-lg shadow-md">
+                    <h4 class="text-gray-500 text-sm font-medium mb-2">Bids Won</h4>
+                    <p class="text-3xl font-bold text-green-600">{{ data.bids_won }}</p>
+                </div>
+                <div class="bg-white p-6 rounded-lg shadow-md">
+                    <h4 class="text-gray-500 text-sm font-medium mb-2">Bids Lost</h4>
+                    <p class="text-3xl font-bold text-red-600">{{ data.bids_lost }}</p>
+                </div>
+            </div>
+
+            <!-- Bids Table -->
+            <div class="bg-white rounded-lg shadow-md">
+                <div class="p-6 border-b border-gray-200">
+                    <h3 class="text-lg font-semibold text-gray-900">All Bids</h3>
+                </div>
+                <div class="overflow-x-auto">
+                    <table class="min-w-full divide-y divide-gray-200">
+                        <thead class="bg-gray-50">
+                            <tr>
+                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Bid Name</th>
+                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Current Stage</th>
+                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Assigned User</th>
+                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
+                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody class="bg-white divide-y divide-gray-200">
+                            {% for bid in bids %}
+                            <tr>
+                                <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">{{ bid.name }}</td>
+                                <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{{ bid.current_stage|title }}</td>
+                                <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{{ bid.user.email if bid.user else 'Unassigned' }}</td>
+                                <td class="px-6 py-4 whitespace-nowrap">
+                                    <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full 
+                                        {% if bid.current_stage == 'won' %}bg-green-100 text-green-800
+                                        {% elif bid.current_stage == 'lost' %}bg-red-100 text-red-800
+                                        {% elif bid.current_stage == 'submitted' %}bg-blue-100 text-blue-800
+                                        {% else %}bg-gray-100 text-gray-800{% endif %}">
+                                        {{ bid.current_stage|title }}
+                                    </span>
+                                </td>
+                                <td class="px-6 py-4 whitespace-nowrap text-sm font-medium">
+                                    <button class="text-indigo-600 hover:text-indigo-900">View Details</button>
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </main>
+    </div>
+</body>
+</html>

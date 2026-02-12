@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ bid.b_name }} - Checklist</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link rel="stylesheet" href="{{ url_for('static', filename='light_theme_overrides.css') }}">
+</head>
+<body class="bg-gray-50 text-gray-800">
+    <div class="flex h-screen">
+        {% set _role_norm = (user_role or '') | lower | replace('_', ' ') %}
+        {% set _is_team_lead_view = _role_norm in ['teamlead', 'team lead', 'team_lead'] %}
+        {% set _force_team_lead_sidebar = force_team_lead_sidebar|default(false) %}
+        {% if _role_norm == 'business manager' or (_role_norm == 'manager' and active_department_key == 'business') %}
+            {% include 'sidebar.html' %}
+        {% elif _is_team_lead_view or _force_team_lead_sidebar %}
+            {% set sidebar_mode = 'team_lead' %}
+            {% include 'sidebar.html' %}
+        {% else %}
+            {% include 'sidebar.html' %}
+        {% endif %}
+
+        <main class="flex-1 p-8 overflow-y-auto">
+            <div class="flex items-center justify-between mb-6">
+                <div>
+                    <h2 class="text-2xl font-bold text-gray-900">{{ bid.b_name }} - Checklist</h2>
+                    <p class="text-sm text-gray-600">Company: {{ bid.company or 'N/A' }} | Due: {{ bid.due_date or 'N/A' }}</p>
+                </div>
+                <a href="/dashboard/{{ team }}" class="bg-gray-600 text-white px-4 py-2 rounded-lg hover:bg-gray-700 transition-colors">
+                    <i class="fas fa-arrow-left mr-2"></i>Back to Dashboard
+                </a>
+            </div>
+            {% if assigned_team_leads %}
+            <div class="bg-white border border-gray-200 rounded-lg p-5 mb-6 shadow-sm flex flex-wrap gap-2 text-sm">
+                <span class="font-semibold text-gray-900">Assigned Team Leads:</span>
+                {% for tl in assigned_team_leads %}
+                <span class="inline-flex items-center gap-2 rounded-full bg-blue-50 text-blue-800 px-3 py-1 text-xs font-semibold">
+                    <span>{{ tl.name or tl.team_lead }}</span>
+                    <button type="button"
+                            class="text-blue-600 hover:text-blue-900 leading-none"
+                            aria-label="Remove {{ tl.name or tl.team_lead }}"
+                            onclick="unassignTeamLead({{ tl.team_lead | tojson }})">
+                        &times;
+                    </button>
+                </span>
+                {% endfor %}
+            </div>
+            {% endif %}
+
+            <!-- Tasks List -->
+            <div class="bg-white rounded-lg shadow-md">
+                <div class="p-6 border-b border-gray-200">
+                    <h3 class="text-lg font-semibold">Task Checklist</h3>
+                </div>
+                <div class="overflow-x-auto">
+                    <table class="w-full">
+                        <thead class="bg-gray-50">
+                            <tr>
+                                <th class="p-3 text-left">Task</th>
+                                <th class="p-3 text-left">Assigned To</th>
+                                <th class="p-3 text-left">Priority</th>
+                                <th class="p-3 text-left">Due Date</th>
+                                <th class="p-3 text-left">Status</th>
+                                <th class="p-3 text-left">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for task in checklist_items %}
+                            <tr class="border-b hover:bg-gray-50">
+                                <td class="p-3">
+                                    <div>
+                                        <div class="font-medium">{{ task.task_name }}</div>
+                                        {% if task.description %}
+                                        <div class="text-sm text-gray-600">{{ task.description }}</div>
+                                        {% endif %}
+                                        {% if task.attachment_path %}
+                                        {% set parts = task.attachment_path.split('/') %}
+                                        <div class="text-sm mt-1">
+                                            <a class="text-blue-600 hover:underline" href="/attachments/checklists/{{ task.g_id }}/{{ parts[-1] }}" target="_blank">
+                                                <i class="fas fa-paperclip mr-1"></i>Attachment
+                                            </a>
+                                        </div>
+                                        {% endif %}
+                                    </div>
+                                </td>
+                                <td class="p-3">
+                                    {% if task.assigned_employee_name %}
+                                        <span class="px-2 py-1 text-xs bg-blue-100 text-blue-800 rounded-full">
+                                            {{ task.assigned_employee_name }}
+                                        </span>
+                                    {% elif team_leads %}
+                                        <div class="flex items-center gap-2">
+                                            <select class="assign-select px-2 py-1 border border-gray-200 rounded text-[12px]" data-task-id="{{ task.id }}">
+                                                <option value="">Assign Team Lead</option>
+                                                {% for tl in team_leads %}
+                                                <option value="{{ tl.email }}">{{ tl.name or tl.email }}</option>
+                                                {% endfor %}
+                                            </select>
+                                            <button type="button" class="px-2 py-1 text-xs bg-indigo-600 text-white rounded hover:bg-indigo-700" onclick="assignTaskToTeamLead({{ task.id }}, '{{ team }}')">Assign</button>
+                                        </div>
+                                    {% else %}
+                                        <span class="text-gray-500">Unassigned</span>
+                                    {% endif %}
+                                </td>
+                                <td class="p-3">
+                                    <span class="px-2 py-1 text-xs rounded-full 
+                                        {% if task.priority == 'urgent' %}bg-red-100 text-red-800
+                                        {% elif task.priority == 'high' %}bg-orange-100 text-orange-800
+                                        {% elif task.priority == 'medium' %}bg-yellow-100 text-yellow-800
+                                        {% else %}bg-green-100 text-green-800{% endif %}">
+                                        {{ task.priority|title }}
+                                    </span>
+                                </td>
+                                <td class="p-3">
+                                    {% if task.due_date %}
+                                    {{ task.due_date.strftime('%Y-%m-%d %H:%M') if task.due_date else 'N/A' }}
+                                    {% else %}
+                                    N/A
+                                    {% endif %}
+                                </td>
+                                <td class="p-3">
+                                    <span class="px-2 py-1 text-xs rounded-full 
+                                        {% if task.status == 'completed' %}bg-green-100 text-green-800
+                                        {% elif task.status == 'in_progress' %}bg-blue-100 text-blue-800
+                                        {% else %}bg-gray-100 text-gray-800{% endif %}">
+                                        {{ task.status|title }}
+                                    </span>
+                                </td>
+                                <td class="p-3">
+                                    <div class="flex flex-wrap items-center gap-2">
+                                        <select data-status-select data-task-id="{{ task.id }}" class="px-2 py-1 text-xs border border-gray-200 rounded">
+                                            {% set _statuses = ['pending','in_progress','completed'] %}
+                                            {% for status in _statuses %}
+                                            <option value="{{ status }}" {% if (task.status or 'pending') == status %}selected{% endif %}>{{ status.replace('_',' ') | title }}</option>
+                                            {% endfor %}
+                                        </select>
+                                        <button class="px-2 py-1 text-xs bg-blue-600 text-white rounded hover:bg-blue-700" onclick="updateTaskStatusFromSelect(this, {{ task.id }})">
+                                            Update
+                                        </button>
+                                        <button class="px-2 py-1 text-xs bg-gray-600 text-white rounded hover:bg-gray-700" onclick="showTaskDetails({{ task.id }}, {{ task.task_name|tojson }}, {{ (task.description or '')|tojson }}, {{ (task.status|default('pending'))|tojson }})">
+                                            View
+                                        </button>
+                                        <button class="px-2 py-1 text-xs bg-rose-600 text-white rounded hover:bg-rose-700" onclick="deleteChecklistTask({{ task.id }})">
+                                            Delete
+                                        </button>
+                                    </div>
+                                </td>
+                            </tr>
+                            {% endfor %}
+                            {% if checklist_items|length == 0 %}
+                            <tr>
+                                <td colspan="6" class="p-6 text-center text-gray-500">
+                                    <i class="fas fa-tasks text-4xl text-gray-300 mb-2"></i>
+                                    <p>No tasks created yet for this bid</p>
+                                </td>
+                            </tr>
+                            {% endif %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- Add Task Form -->
+            <div class="bg-white p-6 rounded-lg shadow-md mb-8">
+                <h3 class="text-lg font-semibold mb-4">Add New Task</h3>
+                <form method="POST" enctype="multipart/form-data" action="/team/{{ team }}/bids/{{ bid.g_id }}/checklist/create" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+                    <div>
+                        <label for="task_name" class="block text-sm font-medium text-gray-700 mb-2">Task Name</label>
+                        <input type="text" id="task_name" name="task_name" required 
+                               class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500">
+                    </div>
+                    {% set _role_lower = (user_role or '')|lower %}
+                    {% set _is_business_manager = _role_lower == 'business manager' %}
+                    <div>
+                        <label for="assigned_to" class="block text-sm font-medium text-gray-700 mb-2">
+                            Assign To {{ 'Team Lead' if _is_business_manager else '' }}
+                        </label>
+                        <select id="assigned_to" name="assigned_to" 
+                                class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500">
+                            <option value="">{% if _is_business_manager %}Select Team Lead{% else %}Select Employee{% endif %}</option>
+                            {% if _is_business_manager %}
+                                {% for tl in team_leads %}
+                                <option value="{{ tl.email }}">{{ tl.name or tl.email }}</option>
+                                {% endfor %}
+                            {% else %}
+                                {% for employee in team_employees %}
+                                <option value="{{ employee.id }}">{{ employee.name }}</option>
+                                {% endfor %}
+                            {% endif %}
+                        </select>
+                    </div>
+                    <div>
+                        <label for="priority" class="block text-sm font-medium text-gray-700 mb-2">Priority</label>
+                        <select id="priority" name="priority" 
+                                class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500">
+                            <option value="low">Low</option>
+                            <option value="medium" selected>Medium</option>
+                            <option value="high">High</option>
+                            <option value="urgent">Urgent</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label for="due_date" class="block text-sm font-medium text-gray-700 mb-2">Due Date</label>
+                        <input type="datetime-local" id="due_date" name="due_date" 
+                               class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500">
+                    </div>
+                    <div class="md:col-span-2 lg:col-span-4">
+                        <label for="description" class="block text-sm font-medium text-gray-700 mb-2">Description</label>
+                        <textarea id="description" name="description" rows="3" 
+                                  class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500" 
+                                  placeholder="Task description..."></textarea>
+                    </div>
+                    <div>
+                        <label for="attachment" class="block text-sm font-medium text-gray-700 mb-2">Attachment (optional)</label>
+                        <input type="file" id="attachment" name="attachment" class="w-full px-3 py-2 border border-gray-300 rounded-md">
+                    </div>
+                    <div class="md:col-span-2 lg:col-span-4">
+                        <button type="submit" class="bg-green-600 text-white px-6 py-2 rounded-lg hover:bg-green-700 transition-colors">
+                            <i class="fas fa-plus mr-2"></i>Add Task
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </main>
+    </div>
+
+    <script>
+        function updateTaskStatus(taskId, newStatus) {
+            const formData = new FormData();
+            formData.append('status', newStatus);
+            
+            fetch(`/task/${taskId}/update_status`, {
+                method: 'POST',
+                body: formData
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    location.reload();
+                } else {
+                    alert('Error updating task status: ' + data.error);
+                }
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                alert('Error updating task status');
+            });
+        }
+
+        function updateTaskStatusFromSelect(button, taskId) {
+            const select = button.closest('td')?.querySelector('[data-status-select]');
+            const status = select ? select.value : null;
+            if (!status) return;
+            updateTaskStatus(taskId, status);
+        }
+        function showTaskDetails(taskId, taskName, description, status) {
+            alert(`Task: ${taskName}\nDescription: ${description}\nStatus: ${status}`);
+        }
+
+        async function assignTaskToTeamLead(taskId, stage) {
+            const select = document.querySelector(`[data-task-id="${taskId}"]`);
+            const email = select ? select.value : '';
+            if (!email) return alert('Select a team lead to assign.');
+            try {
+                const response = await fetch(`/task/${taskId}/assign-team-lead`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ email, stage }),
+                    credentials: 'include'
+                });
+                const data = await response.json().catch(() => ({}));
+                if (!response.ok || !data.success) {
+                    throw new Error((data && (data.error || data.message)) || 'Failed to assign team lead');
+                }
+                location.reload();
+            } catch (err) {
+                alert(err.message || 'Assignment failed');
+            }
+        }
+
+        const TEAM_KEY = {{ team | tojson }};
+        const BID_ID = {{ bid.g_id | default(0) }};
+
+        async function deleteChecklistTask(taskId) {
+            if (!taskId) return;
+            if (!confirm('Delete this checklist task?')) return;
+            try {
+                const response = await fetch(`/task/${taskId}/delete`, { method: 'POST' });
+                const data = await response.json().catch(() => ({}));
+                if (response.ok && data.success) {
+                    location.reload();
+                    return;
+                }
+                throw new Error((data && (data.error || data.message)) || 'Unable to delete task');
+            } catch (err) {
+                alert(err.message || 'Delete failed');
+            }
+        }
+
+        async function unassignTeamLead(email) {
+            if (!email) return;
+            if (!confirm(`Remove ${email} from this bid?`)) return;
+            try {
+                const response = await fetch(`/api/team/${TEAM_KEY}/unassign-team-lead`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ g_id: BID_ID, team_lead_email: email })
+                });
+                const data = await response.json().catch(() => ({}));
+                if (response.ok && data.ok) {
+                    location.reload();
+                    return;
+                }
+                throw new Error((data && (data.error || data.message)) || 'Unable to remove team lead');
+            } catch (err) {
+                alert(err.message || 'Unable to update assignment');
+            }
+        }
+    </script>
+</body>
+</html>

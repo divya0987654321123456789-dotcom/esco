@@ -1,0 +1,406 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ page_title or 'Team Lead Dashboard' }} - ESCO</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link rel="stylesheet" href="{{ url_for('static', filename='light_theme_overrides.css') }}">
+</head>
+<body class="bg-gray-50 text-gray-800">
+    <div class="flex h-screen">
+        {% set team = team_filter or 'business' %}
+        {% set hide_notifications = true %}
+        {% include 'sidebar.html' %}
+
+        <main class="flex-1 p-8 overflow-y-auto">
+            <div class="flex items-center justify-between mb-6">
+                <div>
+                    <h2 class="text-2xl font-bold text-gray-900">{{ page_title or 'Team Lead Dashboard' }}</h2>
+                    <p class="text-sm text-gray-600">
+                        {% if team_filter %}
+                            Managing {{ team_names.get(team_filter, team_filter)|title }} team members and their tasks
+                        {% else %}
+                            Manage all team members and their tasks
+                        {% endif %}
+                    </p>
+                </div>
+                <div class="flex items-center gap-3">
+                    {% include '_bm_notification_bell.html' %}
+                    {% if team_filter %}
+                    <a href="{{ url_for('team_lead_dashboard') }}" class="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 transition-colors text-sm">
+                        <i class="fas fa-arrow-left mr-2"></i>View All Teams
+                    </a>
+                    {% endif %}
+                </div>
+            </div>
+
+            <!-- Assigned Bids -->
+            {% if team_filter %}
+            <div class="bg-white rounded-lg shadow-md mb-8">
+                <div class="p-6 border-b border-gray-200 flex justify-between items-center">
+                    <div>
+                        <h3 class="text-lg font-semibold">Assigned Bids</h3>
+                        <p class="text-sm text-gray-600">Bids assigned to your team members</p>
+                    </div>
+                    <div class="flex space-x-2 text-xs">
+                        <span class="px-3 py-1 bg-yellow-100 text-yellow-800 rounded-full">Pending</span>
+                        <span class="px-3 py-1 bg-blue-100 text-blue-800 rounded-full">In Progress</span>
+                        <span class="px-3 py-1 bg-green-100 text-green-800 rounded-full">Completed</span>
+                    </div>
+                </div>
+                <div class="overflow-x-auto">
+                    <table class="w-full">
+                        <thead class="bg-gray-50">
+                            <tr>
+                                <th class="p-3 text-left">Bid Name</th>
+                                <th class="p-3 text-left">Employee Assign</th>
+                                <th class="p-3 text-left">Bid Due Date</th>
+                                <th class="p-3 text-left">Task Completion Date</th>
+                                <th class="p-3 text-left">Status</th>
+                                <th class="p-3 text-left">State</th>
+                                <th class="p-3 text-left">Progress</th>
+                                <th class="p-3 text-left">Priority</th>
+                                <th class="p-3 text-left">Submission</th>
+                                <th class="p-3 text-left">Summary</th>
+                                {% if team_filter == 'business' %}
+                                <th class="p-3 text-left">Proposal Making</th>
+                                {% endif %}
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% if assigned_bids %}
+                                {% for bid in assigned_bids %}
+                                <tr class="border-b hover:bg-gray-50">
+                                    <td class="p-3 font-semibold text-gray-800">{{ bid.b_name or 'N/A' }}</td>
+                                    <td class="p-3 text-gray-700">
+                                        <div class="font-medium">{{ bid.person_name or 'Unassigned' }}</div>
+                                        <div class="text-xs text-gray-500">{{ bid.assignee_email or '' }}</div>
+                                        <form method="POST" action="{{ url_for('team_lead_assign_bid') }}" class="mt-2 flex items-center gap-2">
+                                            <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+                                            <input type="hidden" name="g_id" value="{{ bid.g_id }}">
+                                            <input type="hidden" name="team" value="{{ team_filter }}">
+                                            <select name="employee_id" class="border border-gray-200 rounded px-2 py-1 text-xs bg-white">
+                                                <option value="">Select employee</option>
+                                                {% for emp in employees %}
+                                                    <option value="{{ emp.id }}">{{ emp.name }}</option>
+                                                {% endfor %}
+                                            </select>
+                                            <button type="submit" class="px-2 py-1 text-xs bg-blue-600 text-white rounded hover:bg-blue-700">Assign</button>
+                                        </form>
+                                    </td>
+                                    <td class="p-3 text-sm text-gray-700">{{ bid.bid_due_date or 'N/A' }}</td>
+                                    <td class="p-3 text-sm text-gray-700">{{ bid.task_completion_date or 'N/A' }}</td>
+                                    <td class="p-3">
+                                        <span class="px-2 py-1 text-xs rounded-full {% if bid.derived_status and bid.derived_status|lower == 'completed' %}bg-green-100 text-green-800{% elif bid.derived_status and bid.derived_status|lower == 'in_progress' %}bg-blue-100 text-blue-800{% else %}bg-yellow-100 text-yellow-800{% endif %}">
+                                            {{ (bid.derived_status or 'pending')|replace('_',' ')|title }}
+                                        </span>
+                                    </td>
+                                    <td class="p-3 text-sm text-gray-700 capitalize">{{ bid.state or 'N/A' }}</td>
+                                    <td class="p-3 text-sm text-gray-700">{{ bid.display_progress }}%</td>
+                                    <td class="p-3">
+                                        <span class="px-2 py-1 text-xs rounded-full {% if bid.priority == 'High' %}bg-red-100 text-red-700{% elif bid.priority == 'Medium' %}bg-amber-100 text-amber-700{% else %}bg-slate-100 text-slate-700{% endif %}">
+                                            {{ bid.priority }}
+                                        </span>
+                                    </td>
+                                    <td class="p-3 text-sm text-gray-700">{{ bid.submission_status or 'Work Progress' }}</td>
+                                    <td class="p-3 text-sm text-gray-600 truncate max-w-xs" title="{{ bid.summary }}">{{ bid.summary or '—' }}</td>
+                                    {% if team_filter == 'business' %}
+                                    <td class="p-3 text-sm">
+                                        <a href="{{ url_for('proposals_making') }}" class="inline-flex items-center px-3 py-1 bg-indigo-600 text-white text-xs rounded hover:bg-indigo-700">
+                                            <i class="fas fa-file-signature mr-1"></i> Proposal
+                                        </a>
+                                    </td>
+                                    {% endif %}
+                                </tr>
+                                {% endfor %}
+                            {% else %}
+                                <tr>
+                                    <td colspan="{% if team_filter == 'business' %}11{% else %}10{% endif %}" class="p-6 text-center text-gray-500">
+                                        No bids assigned yet.
+                                    </td>
+                                </tr>
+                            {% endif %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+            {% endif %}
+
+            {% if approval_items and approval_items|length > 0 %}
+            <div class="bg-white rounded-lg shadow-md mb-8">
+                <div class="p-6 border-b border-gray-200 flex justify-between items-center">
+                    <div>
+                        <h3 class="text-lg font-semibold">Pending Approvals</h3>
+                        <p class="text-sm text-gray-600">Comments and uploads awaiting approval</p>
+                    </div>
+                    <div class="text-xs text-gray-500">Total: {{ approval_items|length }}</div>
+                </div>
+                <div class="overflow-x-auto">
+                    <table class="w-full text-sm">
+                        <thead class="bg-gray-50 text-xs uppercase text-gray-500">
+                            <tr>
+                                <th class="text-left p-3">Source</th>
+                                <th class="text-left p-3">Department</th>
+                                <th class="text-left p-3">Task</th>
+                                <th class="text-left p-3">Priority</th>
+                                <th class="text-left p-3">Uploaded By</th>
+                                <th class="text-left p-3">Approval For</th>
+                                <th class="text-left p-3">File / Comment</th>
+                                <th class="text-left p-3">Uploaded</th>
+                                <th class="text-left p-3">Status</th>
+                                <th class="text-left p-3">Action</th>
+                            </tr>
+                        </thead>
+                        <tbody class="divide-y divide-gray-100">
+                            {% for it in approval_items %}
+                            <tr class="hover:bg-gray-50">
+                                <td class="p-3">
+                                    <span class="px-2 py-1 text-xs rounded-full font-semibold {{ 'bg-blue-100 text-blue-800' if it.source=='employee' else 'bg-gray-100 text-gray-700' }}">
+                                        {{ it.source|title }}
+                                    </span>
+                                </td>
+                                <td class="p-3 text-gray-600">{{ (it.department or '—')|replace('_',' ')|title }}</td>
+                                <td class="p-3">
+                                    <div class="font-semibold">{{ it.task_name or ('Task ' ~ it.task_id) }}</div>
+                                    <div class="text-xs text-gray-500">{{ it.bid_name or '—' }}</div>
+                                </td>
+                                <td class="p-3 whitespace-nowrap">
+                                    {% set _prio = (it.priority or 'normal')|lower %}
+                                    {% set _prio_label = _prio if _prio in ['low','medium','high','urgent','normal'] else 'normal' %}
+                                    <span class="px-2 py-1 text-xs rounded-full font-semibold
+                                        {{ 'bg-red-100 text-red-800' if _prio_label=='urgent' else ('bg-orange-100 text-orange-800' if _prio_label=='high' else ('bg-yellow-100 text-yellow-800' if _prio_label=='medium' else 'bg-gray-100 text-gray-700')) }}">
+                                        {{ _prio_label|title }}
+                                    </span>
+                                </td>
+                                <td class="p-3 text-gray-600">{{ it.uploader or '—' }}</td>
+                                <td class="p-3 text-gray-600">{{ (it.approval_target or 'admin')|replace('_',' ')|title }}</td>
+                                <td class="p-3">
+                                    {% if it.source_table == 'task_comments' %}
+                                        <div class="text-gray-900 font-semibold">Approval Request (Comment)</div>
+                                        <div class="text-xs text-gray-600 mt-0.5 whitespace-pre-line">{{ it.comment or '—' }}</div>
+                                        {% if it.task_details_url %}
+                                            <a class="inline-block mt-1 text-xs text-gray-900 underline" href="{{ it.task_details_url }}" target="_blank">View task details</a>
+                                        {% endif %}
+                                    {% else %}
+                                        <a class="text-gray-900 font-semibold underline" href="{{ it.download_url }}" target="_blank">{{ it.original_filename or it.filename }}</a>
+                                        {% if it.description %}
+                                            <div class="text-xs text-gray-500 mt-0.5">{{ it.description }}</div>
+                                        {% endif %}
+                                    {% endif %}
+                                </td>
+                                <td class="p-3 text-gray-600 whitespace-nowrap">{{ it.uploaded_at }}</td>
+                                <td class="p-3 whitespace-nowrap">
+                                    {% set st = (it.status or 'pending')|lower %}
+                                    <span class="px-2 py-1 text-xs rounded-full font-semibold
+                                        {{ 'bg-amber-100 text-amber-800' if st=='pending' else ('bg-emerald-100 text-emerald-800' if st=='approved' else 'bg-rose-100 text-rose-800') }}">
+                                        {{ st|title }}
+                                    </span>
+                                    {% if it.decided_at and st != 'pending' %}
+                                        <div class="text-xs text-gray-500 mt-0.5">Decided: {{ it.decided_at }}</div>
+                                    {% endif %}
+                                </td>
+                                <td class="p-3">
+                                    <div class="flex items-center gap-2">
+                                        {% if st == 'pending' %}
+                                        <button type="button"
+                                                class="px-3 py-2 text-xs bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg"
+                                                data-approve
+                                                data-source-table="{{ it.source_table }}"
+                                                data-source-id="{{ it.source_id }}">
+                                            Approve
+                                        </button>
+                                        <button type="button"
+                                                class="px-3 py-2 text-xs bg-rose-600 hover:bg-rose-700 text-white rounded-lg"
+                                                data-reject
+                                                data-source-table="{{ it.source_table }}"
+                                                data-source-id="{{ it.source_id }}">
+                                            Reject
+                                        </button>
+                                        {% else %}
+                                            <span class="text-xs text-gray-500 italic">No action</span>
+                                        {% endif %}
+                                    </div>
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+            {% endif %}
+
+            <!-- Overall Statistics -->
+            <div class="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
+                <div class="bg-white p-6 rounded-lg shadow-md">
+                    <div class="flex items-center">
+                        <div class="p-3 rounded-full bg-blue-100 text-blue-600">
+                            <i class="fas fa-users text-xl"></i>
+                        </div>
+                        <div class="ml-4">
+                            <p class="text-sm font-medium text-gray-600">Total Employees</p>
+                            <p class="text-2xl font-bold text-gray-900">{{ employees|length }}</p>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="bg-white p-6 rounded-lg shadow-md">
+                    <div class="flex items-center">
+                        <div class="p-3 rounded-full bg-yellow-100 text-yellow-600">
+                            <i class="fas fa-clock text-xl"></i>
+                        </div>
+                        <div class="ml-4">
+                            <p class="text-sm font-medium text-gray-600">Pending Tasks</p>
+                            <p class="text-2xl font-bold text-gray-900">
+                                {{ employees|sum(attribute='pending_tasks') if employees else 0 }}
+                            </p>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="bg-white p-6 rounded-lg shadow-md">
+                    <div class="flex items-center">
+                        <div class="p-3 rounded-full bg-blue-100 text-blue-600">
+                            <i class="fas fa-spinner text-xl"></i>
+                        </div>
+                        <div class="ml-4">
+                            <p class="text-sm font-medium text-gray-600">In Progress</p>
+                            <p class="text-2xl font-bold text-gray-900">
+                                {{ employees|sum(attribute='in_progress_tasks') if employees else 0 }}
+                            </p>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="bg-white p-6 rounded-lg shadow-md">
+                    <div class="flex items-center">
+                        <div class="p-3 rounded-full bg-green-100 text-green-600">
+                            <i class="fas fa-check-circle text-xl"></i>
+                        </div>
+                        <div class="ml-4">
+                            <p class="text-sm font-medium text-gray-600">Completed</p>
+                            <p class="text-2xl font-bold text-gray-900">
+                                {{ employees|sum(attribute='completed_tasks') if employees else 0 }}
+                            </p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Team Members (no department grouping in Team Lead dashboard) -->
+            <div class="bg-white rounded-lg shadow-md mb-6">
+                <div class="p-6 border-b border-gray-200 flex justify-between items-center">
+                    <div>
+                        <h3 class="text-lg font-semibold">Team Members</h3>
+                        <p class="text-sm text-gray-600">
+                            {% if team_filter %}
+                                {{ team_names.get(team_filter, team_filter)|title }} members
+                            {% else %}
+                                All members
+                            {% endif %}
+                        </p>
+                    </div>
+                </div>
+                <div class="overflow-x-auto">
+                    <table class="w-full">
+                        <thead class="bg-gray-50">
+                            <tr>
+                                <th class="p-3 text-left">Member</th>
+                                <th class="p-3 text-left">Email</th>
+                                {% if not team_filter %}
+                                <th class="p-3 text-left">Team</th>
+                                {% endif %}
+                                <th class="p-3 text-center">Pending</th>
+                                <th class="p-3 text-center">In Progress</th>
+                                <th class="p-3 text-center">Completed</th>
+                                <th class="p-3 text-center">Total</th>
+                                <th class="p-3 text-center">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% if employees %}
+                                {% for emp in employees %}
+                                <tr class="border-b hover:bg-gray-50">
+                                    <td class="p-3">
+                                        <div class="flex items-center">
+                                            <div class="w-10 h-10 rounded-full bg-blue-500 flex items-center justify-center text-white font-semibold mr-3">
+                                                {{ emp.name[0]|upper if emp.name else 'E' }}
+                                            </div>
+                                            <div>
+                                                <div class="font-medium">{{ emp.name }}</div>
+                                                <div class="text-xs text-gray-500">ID: {{ emp.id }}</div>
+                                            </div>
+                                        </div>
+                                    </td>
+                                    <td class="p-3 text-gray-600">{{ emp.email or 'N/A' }}</td>
+                                    {% if not team_filter %}
+                                    <td class="p-3 text-gray-700 capitalize">{{ emp.department or '—' }}</td>
+                                    {% endif %}
+                                    <td class="p-3 text-center">
+                                        <span class="px-2 py-1 text-xs rounded-full bg-yellow-100 text-yellow-800">{{ emp.pending_tasks or 0 }}</span>
+                                    </td>
+                                    <td class="p-3 text-center">
+                                        <span class="px-2 py-1 text-xs rounded-full bg-blue-100 text-blue-800">{{ emp.in_progress_tasks or 0 }}</span>
+                                    </td>
+                                    <td class="p-3 text-center">
+                                        <span class="px-2 py-1 text-xs rounded-full bg-green-100 text-green-800">{{ emp.completed_tasks or 0 }}</span>
+                                    </td>
+                                    <td class="p-3 text-center font-semibold">
+                                        {{ (emp.pending_tasks or 0) + (emp.in_progress_tasks or 0) + (emp.completed_tasks or 0) }}
+                                    </td>
+                                    <td class="p-3 text-center">
+                                        <a href="{{ url_for('employee_detail', employee_id=emp.id) }}"
+                                           class="inline-flex items-center px-3 py-1 bg-blue-600 text-white text-sm rounded hover:bg-blue-700 transition-colors">
+                                            <i class="fas fa-eye mr-1"></i> View
+                                        </a>
+                                    </td>
+                                </tr>
+                                {% endfor %}
+                            {% else %}
+                                <tr>
+                                    <td class="p-6 text-center text-gray-500" colspan="{% if not team_filter %}8{% else %}7{% endif %}">
+                                        No members found.
+                                    </td>
+                                </tr>
+                            {% endif %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <script>
+        async function postApprovalAction(action, table, id) {
+            const res = await fetch('/approvals/action', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ action, source_table: table, source_id: id, _csrf_token: '{{ csrf_token() }}' })
+            });
+            const data = await res.json();
+            if (!data || !data.success) throw new Error((data && (data.error || data.message)) || 'Failed');
+        }
+
+        document.addEventListener('click', async (e) => {
+            const btnApprove = e.target.closest ? e.target.closest('[data-approve]') : null;
+            const btnReject = e.target.closest ? e.target.closest('[data-reject]') : null;
+            const btn = btnApprove || btnReject;
+            if (!btn) return;
+            const action = btnApprove ? 'approve' : 'reject';
+            const table = btn.getAttribute('data-source-table');
+            const id = parseInt(btn.getAttribute('data-source-id') || '0', 10);
+            if (!table || !id) return;
+            try {
+                btn.disabled = true;
+                await postApprovalAction(action, table, id);
+                location.reload();
+            } catch (err) {
+                btn.disabled = false;
+                alert('Approval action failed: ' + (err && err.message ? err.message : 'Unknown error'));
+            }
+        });
+    </script>
+</body>
+</html>
+

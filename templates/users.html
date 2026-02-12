@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Manage Users</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link rel="stylesheet" href="{{ url_for('static', filename='light_theme_overrides.css') }}">
+</head>
+<body class="bg-gray-50 text-gray-800 font-sans">
+    <div class="flex h-screen">
+        <aside class="w-64 bg-white p-6 flex flex-col justify-between border-r border-gray-200">
+            <div>
+                <div class="flex items-center mb-10">
+                    <img src="{{ url_for('static', filename='ikio.png') }}" alt="Ikio Logo" class="h-12 w-auto object-contain">
+                </div>
+                <nav>
+                    <ul>
+                        <li class="mb-4"><a href="{{ url_for('logs_page') }}" class="flex items-center p-3 rounded-lg hover:bg-gray-100"><i class="fas fa-history mr-3"></i>Logs</a></li>
+                        <li class="mb-4"><a href="#" class="flex items-center p-3 rounded-lg bg-blue-100 text-blue-600 font-semibold"><i class="fas fa-users-cog mr-3"></i>Users</a></li>
+                    </ul>
+                </nav>
+            </div>
+            <div>
+                 <a href="{{ url_for('logout') }}" class="flex items-center p-3 hover:bg-gray-100 rounded-lg transition-all"><i class="fas fa-sign-out-alt mr-3"></i>Logout</a>
+            </div>
+        </aside>
+        <main class="flex-1 p-8 overflow-y-auto">
+            <header class="flex justify-between items-center mb-8">
+                <h2 class="text-3xl font-bold text-gray-900">User Management</h2>
+            </header>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-8">
+                {% if not (view_only or false) and (can_manage_users or false) %}
+                <div class="bg-white p-6 rounded-lg shadow-md">
+                    <h3 class="text-xl font-semibold mb-4">Create User</h3>
+                    <form method="POST" class="space-y-4">
+                        <div>
+                            <label class="block text-sm font-medium mb-1">Email</label>
+                            <input type="email" name="email" class="w-full border border-gray-300 rounded-md p-2" required />
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium mb-1">Password</label>
+                            <input type="password" name="password" class="w-full border border-gray-300 rounded-md p-2" required />
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium mb-1">Role</label>
+                            <select name="role" class="w-full border border-gray-300 rounded-md p-2">
+                                <option value="admin">Admin</option>
+                                <option value="supervisor">Supervisor</option>
+                                <option value="business dev">Business Dev</option>
+                                <option value="design">Design</option>
+                                <option value="operations">Operations</option>
+                                <option value="engineering">Engineering</option>
+                                <option value="member" selected>Member</option>
+                            </select>
+                        </div>
+                        <button type="submit" class="px-4 py-2 bg-blue-600 text-white rounded-md">Create</button>
+                    </form>
+                </div>
+                {% else %}
+                <div class="bg-white p-6 rounded-lg shadow-md">
+                    <h3 class="text-xl font-semibold mb-2">Create User</h3>
+                    <p class="text-sm text-gray-600">
+                        You have <span class="font-semibold">read-only</span> access to the user directory.
+                        For user creation, use the IT Admin dashboard.
+                    </p>
+                </div>
+                {% endif %}
+                <div class="bg-white p-6 rounded-lg shadow-md">
+                    <h3 class="text-xl font-semibold mb-4">Users</h3>
+                    <div class="overflow-y-auto max-h-[60vh]">
+                        <table class="w-full text-left">
+                            <thead class="sticky top-0 bg-white"><tr class="border-b"><th class="p-2">ID</th><th class="p-2">Email</th><th class="p-2">Role</th><th class="p-2">Admin</th></tr></thead>
+                            <tbody>
+                                {% for u in users %}
+                                <tr class="border-b border-gray-200">
+                                    <td class="p-2">{{ u.id }}</td>
+                                    <td class="p-2">{{ u.email }}</td>
+                                    <td class="p-2">{{ u.role|title }}</td>
+                                    <td class="p-2">{{ 'Yes' if u.is_admin else 'No' }}</td>
+                                </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+</body>
+</html>
+
+

@@ -1,0 +1,3036 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ title or 'Assigned Tasks' }}</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link rel="stylesheet" href="{{ url_for('static', filename='light_theme_overrides.css') }}">
+    <style>
+        .assignedTasksTable th,
+        .assignedTasksTable td { border-bottom: 1px solid #e5e7eb; border-right: 1px solid #e5e7eb; }
+        .assignedTasksTable th:last-child,
+        .assignedTasksTable td:last-child { border-right: 0; }
+        .assignedTasksTable tbody tr:last-child td { border-bottom: 0; }
+        .assignedTasksTable .project-col { width: 150px; max-width: 150px; }
+        .assignedTasksTable .bid-col { width: 260px; max-width: 260px; }
+        .assignedTasksTable .checklist-col { width: 320px; max-width: 320px; }
+        .assignedTasksTable .bid-name {
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .summary-content h3 {
+            font-weight: 700;
+            font-size: 14px;
+            margin-top: 12px;
+            margin-bottom: 6px;
+            color: #111827;
+        }
+        .summary-content p {
+            margin-bottom: 8px;
+            line-height: 1.5;
+            color: #374151;
+        }
+        .summary-content ul {
+            margin: 6px 0 10px 18px;
+            list-style: disc;
+            color: #374151;
+        }
+        .summary-content table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 8px 0 12px;
+            font-size: 12px;
+            color: #374151;
+        }
+        .summary-content th,
+        .summary-content td {
+            border: 1px solid #e5e7eb;
+            padding: 6px 8px;
+            vertical-align: top;
+        }
+        .summary-content th {
+            background: #f9fafb;
+            font-weight: 600;
+            color: #111827;
+        }
+        .checklist-dropdown summary {
+            list-style: none;
+        }
+        .checklist-dropdown summary::-webkit-details-marker {
+            display: none;
+        }
+        .task-notes summary {
+            list-style: none;
+        }
+        .task-notes summary::-webkit-details-marker {
+            display: none;
+        }
+        .approval-dropdown summary {
+            list-style: none;
+        }
+        .approval-dropdown summary::-webkit-details-marker {
+            display: none;
+        }
+        .approval-summary {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            min-height: 18px;
+        }
+        .approval-summary-text {
+            color: #374151;
+            font-weight: 600;
+            font-size: 11px;
+        }
+        .approval-avatar-stack {
+            display: inline-flex;
+            align-items: center;
+        }
+        .approval-avatar {
+            width: 18px;
+            height: 18px;
+            border-radius: 9999px;
+            background: #ecfdf3;
+            color: #047857;
+            font-size: 10px;
+            font-weight: 700;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            margin-left: -4px;
+            border: 1px solid #d1fae5;
+        }
+        .approval-avatar:first-child {
+            margin-left: 0;
+        }
+        .approval-avatar--more {
+            background: #eef2ff;
+            color: #4338ca;
+            border-color: #e0e7ff;
+        }
+        .mention-tag {
+            color: #2563eb;
+            font-weight: 600;
+        }
+        .approval-bell {
+            position: relative;
+            width: 34px;
+            height: 34px;
+            border-radius: 9999px;
+            border: 1px solid #e5e7eb;
+            background: #fff;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            color: #4b5563;
+        }
+        .approval-bell-badge {
+            position: absolute;
+            top: -4px;
+            right: -4px;
+            background: #ef4444;
+            color: #fff;
+            font-size: 10px;
+            font-weight: 700;
+            line-height: 1;
+            padding: 3px 5px;
+            border-radius: 9999px;
+            min-width: 18px;
+            text-align: center;
+        }
+        .revert-modal {
+            position: fixed;
+            inset: 0;
+            z-index: 70;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .revert-modal.hidden { display: none; }
+        .revert-modal__backdrop {
+            position: absolute;
+            inset: 0;
+            background: rgba(15, 23, 42, 0.45);
+            backdrop-filter: blur(2px);
+        }
+        .revert-modal__card {
+            position: relative;
+            width: min(520px, 92vw);
+            background: #fff;
+            border-radius: 14px;
+            border: 1px solid #e5e7eb;
+            box-shadow: 0 20px 40px rgba(15, 23, 42, 0.2);
+            padding: 18px;
+        }
+        .revert-modal__title {
+            font-size: 16px;
+            font-weight: 700;
+            color: #0f172a;
+        }
+        .revert-modal__subtitle {
+            font-size: 12px;
+            color: #6b7280;
+            margin-top: 4px;
+        }
+        .revert-modal__textarea {
+            width: 100%;
+            border: 1px solid #e5e7eb;
+            border-radius: 10px;
+            padding: 10px 12px;
+            font-size: 12px;
+            color: #111827;
+            min-height: 90px;
+            resize: vertical;
+        }
+        .revert-modal__attach {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 8px 10px;
+            border-radius: 10px;
+            border: 1px dashed #cbd5f5;
+            background: #f8fafc;
+        }
+        .revert-modal__attach-btn {
+            width: 34px;
+            height: 34px;
+            border-radius: 10px;
+            border: 1px solid #e5e7eb;
+            background: #fff;
+            color: #4b5563;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .revert-modal__file-name {
+            font-size: 12px;
+            color: #4b5563;
+            word-break: break-all;
+        }
+        .revert-modal__actions {
+            display: flex;
+            align-items: center;
+            justify-content: flex-end;
+            gap: 8px;
+            margin-top: 12px;
+        }
+        .global-topbar__actions {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-right: 12px;
+        }
+        .mention-dropdown {
+            position: absolute;
+            z-index: 60;
+            min-width: 220px;
+            max-width: 360px;
+            background: #fff;
+            border: 1px solid #e5e7eb;
+            border-radius: 10px;
+            box-shadow: 0 10px 25px rgba(0,0,0,0.12);
+            overflow: hidden;
+        }
+        .mention-item {
+            padding: 8px 10px;
+            font-size: 12px;
+            color: #374151;
+            cursor: pointer;
+        }
+        .mention-item:hover { background: #f3f4f6; }
+        .mention-empty { padding: 8px 10px; font-size: 12px; color: #9ca3af; }
+        @media (max-width: 1024px) {
+            .assigned-tasks-page .assigned-main {
+                margin-left: 0;
+            }
+        }
+    </style>
+</head>
+{% set _path_lower = (request.path if request is defined else '')|lower %}
+{% set _is_top_admin_view = _path_lower.startswith('/top-admin') %}
+<body class="bg-gray-50 text-gray-800 assigned-tasks-page with-fixed-sidebar {{ 'has-global-topbar' if _is_top_admin_view else '' }}">
+    <div class="flex h-screen">
+        {% set dept_label = dept_key|replace('_',' ')|title %}
+        {% set topbar_title = title or ('Assigned Tasks - ' ~ dept_label) %}
+        {% set topbar_subtitle = 'Tasks assigned to ' ~ dept_label ~ ' department.' %}
+        {% set role_label = (user_role or (current_user.role if current_user is defined else '') or '') | replace('_',' ') | title %}
+        {% set topbar_right_html %}
+            <div class="flex items-center gap-3">
+                {% if is_employee_view %}
+                    {% include '_employee_notification_bell.html' %}
+                {% else %}
+                    <div class="relative">
+                        <button type="button" class="approval-bell" id="combinedBellBtn" aria-label="Notifications">
+                            <i class="fas fa-bell text-sm"></i>
+                            <span class="approval-bell-badge hidden" id="combinedBellCount">0</span>
+                        </button>
+                        <div id="combinedBellDropdown" class="hidden absolute right-0 mt-2 w-[26rem] max-w-[92vw] rounded-lg border border-gray-200 bg-white shadow-xl z-30">
+                            <div class="flex items-center justify-between px-3 py-2 border-b border-gray-200">
+                                <div class="text-xs font-semibold text-gray-700">Notifications</div>
+                                <button type="button" class="text-xs text-emerald-600 hover:text-emerald-700 font-semibold" id="combinedNotifMarkAll">Mark all</button>
+                            </div>
+                            <div id="combinedNotifList" class="max-h-44 overflow-y-auto p-3 text-xs text-gray-600">
+                                Loading notifications...
+                            </div>
+                            <div class="flex items-center justify-between px-3 py-2 border-t border-gray-200">
+                                <div class="text-xs font-semibold text-gray-700">Approval Log</div>
+                                <button type="button" class="text-gray-400 hover:text-gray-700" data-approval-close>
+                                    <i class="fas fa-times text-[11px]"></i>
+                                </button>
+                            </div>
+                            <div id="combinedApprovalList" class="max-h-56 overflow-y-auto p-3 text-xs text-gray-600">
+                                Loading approvals...
+                            </div>
+                        </div>
+                    </div>
+                {% endif %}
+                <span class="px-3 py-1 rounded-full border border-gray-200 bg-white text-xs font-semibold text-gray-600">Role: {{ role_label }}</span>
+            </div>
+        {% endset %}
+        {% if _is_top_admin_view %}
+        <div class="global-topbar">
+            <div class="global-topbar__title-group">
+                <div class="global-topbar__title">{{ topbar_title }}</div>
+                <div class="global-topbar__subtitle">{{ topbar_subtitle }}</div>
+            </div>
+            <div class="global-topbar__spacer"></div>
+            <div class="global-topbar__actions">
+                {{ topbar_right_html }}
+            </div>
+            <div class="global-topbar__user">
+                <button type="button" class="global-topbar__btn" id="userMenuToggle" aria-haspopup="true" aria-expanded="false">
+                    <span class="global-topbar__avatar">{{ (current_user.full_name or current_user.email or 'U')[0:1]|upper }}</span>
+                    <span class="global-topbar__label">{{ current_user.email or 'User' }}</span>
+                    <i class="fas fa-chevron-down text-xs"></i>
+                </button>
+                <div class="global-topbar__menu hidden" id="userMenuPanel" role="menu" aria-label="User menu">
+                    <div class="global-topbar__menu-header">
+                        <div class="global-topbar__menu-name">{{ current_user.full_name or current_user.email or 'User' }}</div>
+                        <div class="global-topbar__menu-email">{{ current_user.email }}</div>
+                    </div>
+                    <a class="global-topbar__menu-item" href="{{ url_for('user_settings') }}" role="menuitem">
+                        <i class="fas fa-gear"></i>
+                        Settings
+                    </a>
+                    <a class="global-topbar__menu-item" href="{{ url_for('logout') }}" role="menuitem">
+                        <i class="fas fa-arrow-right-from-bracket"></i>
+                        Logout
+                    </a>
+                </div>
+            </div>
+        </div>
+        {% endif %}
+        {% set sidebar_fixed = true %}
+        {% if sidebar_mode == 'manager' %}
+            {% include 'sidebar.html' %}
+        {% elif sidebar_mode == 'employee' %}
+            {% include 'sidebar.html' %}
+        {% else %}
+            {% include 'sidebar.html' %}
+        {% endif %}
+
+        <main class="assigned-main ml-64 flex-1 p-8 overflow-y-auto">
+            {% set _state_names = {
+                'AL': 'Alabama', 'AK': 'Alaska', 'AZ': 'Arizona', 'AR': 'Arkansas', 'CA': 'California',
+                'CO': 'Colorado', 'CT': 'Connecticut', 'DE': 'Delaware', 'DC': 'District of Columbia',
+                'FL': 'Florida', 'GA': 'Georgia', 'HI': 'Hawaii', 'ID': 'Idaho', 'IL': 'Illinois',
+                'IN': 'Indiana', 'IA': 'Iowa', 'KS': 'Kansas', 'KY': 'Kentucky', 'LA': 'Louisiana',
+                'ME': 'Maine', 'MD': 'Maryland', 'MA': 'Massachusetts', 'MI': 'Michigan', 'MN': 'Minnesota',
+                'MS': 'Mississippi', 'MO': 'Missouri', 'MT': 'Montana', 'NE': 'Nebraska', 'NV': 'Nevada',
+                'NH': 'New Hampshire', 'NJ': 'New Jersey', 'NM': 'New Mexico', 'NY': 'New York',
+                'NC': 'North Carolina', 'ND': 'North Dakota', 'OH': 'Ohio', 'OK': 'Oklahoma',
+                'OR': 'Oregon', 'PA': 'Pennsylvania', 'RI': 'Rhode Island', 'SC': 'South Carolina',
+                'SD': 'South Dakota', 'TN': 'Tennessee', 'TX': 'Texas', 'UT': 'Utah', 'VT': 'Vermont',
+                'VA': 'Virginia', 'WA': 'Washington', 'WV': 'West Virginia', 'WI': 'Wisconsin',
+                'WY': 'Wyoming'
+            } %}
+            {% set _allowed_depts = allowed_dept_keys or [dept_key] %}
+            <div class="flex flex-wrap items-center gap-2 mb-4">
+                {% set _active_dept = (dept_key or '')|lower %}
+                {% if 'business' in _allowed_depts %}
+                <button type="button" class="dept-tab px-3 py-1.5 rounded-full border text-xs font-semibold {{ 'bg-emerald-100 text-emerald-700 border-emerald-200' if _active_dept == 'business' else 'border-gray-200 bg-white text-gray-700' }} {{ 'cursor-pointer hover:bg-gray-50' if assigned_tasks_base_url else 'cursor-default' }}" data-team-switch="business">Business</button>
+                {% endif %}
+                {% if 'design' in _allowed_depts %}
+                <button type="button" class="dept-tab px-3 py-1.5 rounded-full border text-xs font-semibold {{ 'bg-emerald-100 text-emerald-700 border-emerald-200' if _active_dept == 'design' else 'border-gray-200 bg-white text-gray-700' }} {{ 'cursor-pointer hover:bg-gray-50' if assigned_tasks_base_url else 'cursor-default' }}" data-team-switch="design">Design</button>
+                {% endif %}
+                {% if 'operations' in _allowed_depts %}
+                <button type="button" class="dept-tab px-3 py-1.5 rounded-full border text-xs font-semibold {{ 'bg-emerald-100 text-emerald-700 border-emerald-200' if _active_dept == 'operations' else 'border-gray-200 bg-white text-gray-700' }} {{ 'cursor-pointer hover:bg-gray-50' if assigned_tasks_base_url else 'cursor-default' }}" data-team-switch="operations">Operations</button>
+                {% endif %}
+                {% if 'engineer' in _allowed_depts %}
+                <button type="button" class="dept-tab px-3 py-1.5 rounded-full border text-xs font-semibold {{ 'bg-emerald-100 text-emerald-700 border-emerald-200' if _active_dept == 'engineer' else 'border-gray-200 bg-white text-gray-700' }} {{ 'cursor-pointer hover:bg-gray-50' if assigned_tasks_base_url else 'cursor-default' }}" data-team-switch="engineer">Site Engineer</button>
+                {% endif %}
+            </div>
+            <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-7 gap-4 mb-6">
+                <div class="bg-white border border-gray-200 rounded-xl p-4 flex items-center justify-between shadow-sm">
+                    <div>
+                        <div class="text-[11px] uppercase text-gray-500 font-semibold">Total Bids</div>
+                        <div class="text-2xl font-bold text-gray-900">{{ kpis.total_bids }}</div>
+                        <div class="text-[11px] text-gray-400 mt-1">Assigned in this department</div>
+                    </div>
+                    <div class="w-10 h-10 rounded-full bg-emerald-50 text-emerald-600 flex items-center justify-center">
+                        <i class="fas fa-briefcase"></i>
+                    </div>
+                </div>
+                <div class="bg-white border border-gray-200 rounded-xl p-4 flex items-center justify-between shadow-sm">
+                    <div>
+                        <div class="text-[11px] uppercase text-gray-500 font-semibold">Total Tasks</div>
+                        <div class="text-2xl font-bold text-gray-900">{{ kpis.total_tasks }}</div>
+                        <div class="text-[11px] text-gray-400 mt-1">Checklist items</div>
+                    </div>
+                    <div class="w-10 h-10 rounded-full bg-emerald-50 text-emerald-600 flex items-center justify-center">
+                        <i class="fas fa-list-check"></i>
+                    </div>
+                </div>
+                <div class="bg-white border border-gray-200 rounded-xl p-4 flex items-center justify-between shadow-sm">
+                    <div>
+                        <div class="text-[11px] uppercase text-gray-500 font-semibold">Pending</div>
+                        <div class="text-2xl font-bold text-gray-900">{{ kpis.pending_tasks }}</div>
+                        <div class="text-[11px] text-gray-400 mt-1">Awaiting action</div>
+                    </div>
+                    <div class="w-10 h-10 rounded-full bg-amber-50 text-amber-600 flex items-center justify-center">
+                        <i class="fas fa-hourglass-half"></i>
+                    </div>
+                </div>
+                <div class="bg-white border border-gray-200 rounded-xl p-4 flex items-center justify-between shadow-sm">
+                    <div>
+                        <div class="text-[11px] uppercase text-gray-500 font-semibold">In Progress</div>
+                        <div class="text-2xl font-bold text-gray-900">{{ kpis.in_progress_tasks }}</div>
+                        <div class="text-[11px] text-gray-400 mt-1">Currently active</div>
+                    </div>
+                    <div class="w-10 h-10 rounded-full bg-sky-50 text-sky-600 flex items-center justify-center">
+                        <i class="fas fa-spinner"></i>
+                    </div>
+                </div>
+                <div class="bg-white border border-gray-200 rounded-xl p-4 flex items-center justify-between shadow-sm">
+                    <div>
+                        <div class="text-[11px] uppercase text-gray-500 font-semibold">Completed</div>
+                        <div class="text-2xl font-bold text-gray-900">{{ kpis.completed_tasks }}</div>
+                        <div class="text-[11px] text-gray-400 mt-1">Finished tasks</div>
+                    </div>
+                    <div class="w-10 h-10 rounded-full bg-emerald-50 text-emerald-600 flex items-center justify-center">
+                        <i class="fas fa-check-circle"></i>
+                    </div>
+                </div>
+                <div class="bg-white border border-gray-200 rounded-xl p-4 flex items-center justify-between shadow-sm">
+                    <div>
+                        <div class="text-[11px] uppercase text-gray-500 font-semibold">Unassigned</div>
+                        <div class="text-2xl font-bold text-gray-900">{{ kpis.unassigned_tasks }}</div>
+                        <div class="text-[11px] text-gray-400 mt-1">Need owner</div>
+                    </div>
+                    <div class="w-10 h-10 rounded-full bg-rose-50 text-rose-600 flex items-center justify-center">
+                        <i class="fas fa-user-slash"></i>
+                    </div>
+                </div>
+                <div class="bg-white border border-gray-200 rounded-xl p-4 flex items-center justify-between shadow-sm">
+                    <div>
+                        <div class="text-[11px] uppercase text-gray-500 font-semibold">Approvals</div>
+                        <div class="text-2xl font-bold text-gray-900">{{ kpis.approvals_pending }}</div>
+                        <div class="text-[11px] text-gray-400 mt-1">Pending review</div>
+                    </div>
+                    <div class="w-10 h-10 rounded-full bg-violet-50 text-violet-600 flex items-center justify-center">
+                        <i class="fas fa-clipboard-check"></i>
+                    </div>
+                </div>
+            </div>
+            <div class="bg-white border border-gray-200 rounded-lg shadow-sm overflow-hidden">
+                <div class="px-4 py-3 border-b border-gray-200 flex items-center justify-between">
+                    <div class="text-sm font-semibold text-gray-900">Assigned Tasks</div>
+                    <div class="text-xs text-gray-500">Showing {{ items|length }} records</div>
+                </div>
+                <div class="overflow-x-auto border-t border-gray-200">
+                    <table class="assignedTasksTable w-full text-left text-sm border-separate border-spacing-0">
+                        <thead class="sticky top-0 bg-gray-50">
+                            <tr>
+                                <th class="p-2 text-left text-gray-600 project-col">IK Project #</th>
+                                <th class="p-2 text-left text-gray-600 bid-col">Bid</th>
+                                <th class="p-2 text-left text-gray-600">Company</th>
+                                <th class="p-2 text-left text-gray-600">Type</th>
+                                <th class="p-2 text-left text-gray-600">Scope of Work</th>
+                                <th class="p-2 text-left text-gray-600">State</th>
+                                <th class="p-2 text-left text-gray-600">Priority</th>
+                            </tr>
+                        </thead>
+                        <tbody class="divide-y divide-gray-200">
+                            {% if items %}
+                                {% for it in items %}
+                                {% set _ik_code = it.ik_project_code or '-' %}
+                                <tr class="hover:bg-gray-50">
+                                    <td class="p-2 whitespace-nowrap">{{ _ik_code }}</td>
+                                    <td class="p-2">
+                                        <div class="flex items-start gap-3">
+                                            <button type="button"
+                                                    class="mt-0.5 w-8 h-8 rounded-full border border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-700 flex items-center justify-center shadow-sm"
+                                                    data-expand-bid="{{ it.g_id }}"
+                                                    aria-expanded="false"
+                                                    title="Open details">
+                                                <i class="fas fa-chevron-right text-[11px] transition-transform" data-expand-icon="{{ it.g_id }}"></i>
+                                            </button>
+                                            <div class="min-w-0">
+                                                <div class="font-semibold text-gray-900 bid-name cursor-pointer" title="{{ it.name or '-' }}" data-expand-bid="{{ it.g_id }}">{{ it.name or '-' }}</div>
+                                                <div class="mt-1 flex flex-wrap gap-2" data-bid-status="{{ it.g_id }}"></div>
+                                                <div class="text-xs text-gray-500">ID: {{ it.g_id }}</div>
+                                                {% if dept_key == 'business' %}
+                                                <button type="button"
+                                                        class="mt-2 inline-flex items-center gap-2 px-2.5 py-1 rounded-full border border-emerald-200 bg-emerald-50 text-emerald-700 text-[11px] font-semibold hover:bg-emerald-100"
+                                                        data-generate-proposal
+                                                        data-bid-id="{{ it.g_id }}"
+                                                        data-bid-name="{{ it.name or '' }}"
+                                                        data-company="{{ it.company or '' }}">
+                                                    <i class="fas fa-wand-magic-sparkles text-[10px]"></i>
+                                                    Generate proposal
+                                                </button>
+                                                {% endif %}
+                                            </div>
+                                        </div>
+                                    </td>
+                                    <td class="p-2">{{ it.company or '-' }}</td>
+                                    <td class="p-2 text-xs text-gray-700">{{ it.type or '-' }}</td>
+                                    <td class="p-2">
+                                        {% set _summary_text = (it.summary or it.scope or '') %}
+                                        {% set _scope_preview = (it.scope or it.summary or '') %}
+                                        <div class="text-xs text-gray-700 leading-relaxed">
+                                            {{ _scope_preview[:120] ~ ('...' if _scope_preview|length > 120 else '') if _scope_preview else '-' }}
+                                        </div>
+                                        {% if _summary_text %}
+                                        <button type="button"
+                                                class="mt-1 text-[11px] text-blue-600 hover:text-blue-700 font-semibold"
+                                                data-summary-toggle
+                                                data-summary-title="{{ it.name|e }}"
+                                                data-summary='{{ _summary_text|tojson }}'
+                                                data-bid-id="{{ it.bid_id or '' }}"
+                                                data-g-id="{{ it.g_id or '' }}">
+                                            View full summary
+                                        </button>
+                                        {% endif %}
+                                    </td>
+                                    {% set _state_key = (it.state or '')|upper %}
+                                    <td class="p-2" data-state-cell>{{ _state_names.get(_state_key, it.state or '-') }}</td>
+                                    <td class="p-2">{{ it.priority|title if it.priority else 'Normal' }}</td>
+                                </tr>
+                                <tr class="hidden bg-gray-50" data-details-row="{{ it.g_id }}">
+                                    <td colspan="7" class="p-4">
+                                        <div class="bg-white border border-gray-200 rounded-lg p-4">
+                                            <div class="grid grid-cols-1 lg:grid-cols-12 gap-4 mb-4">
+                                                <div class="lg:col-span-5 border border-gray-200 rounded-lg p-3">
+                                                    <div class="text-xs font-semibold text-gray-700 uppercase">Project Notes</div>
+                                                    <div class="mt-2 text-xs text-gray-700 whitespace-pre-wrap">{{ it.notes or '-' }}</div>
+                                                </div>
+                                                <div class="lg:col-span-4 border border-gray-200 rounded-lg p-3">
+                                                    {% set _doc_list = (it.rfp_files or []) %}
+                                                    {% if _doc_list %}
+                                                        {% set _doc_count = _doc_list|length %}
+                                                        {% set _doc_preview = _doc_list[:4] %}
+                                                        <div class="flex items-center justify-between mb-2">
+                                                            <div class="text-xs font-semibold text-gray-700 uppercase">Bid Documents</div>
+                                                            <div class="text-[11px] text-gray-500">{{ _doc_count }} files</div>
+                                                        </div>
+                                                        <div class="space-y-1">
+                                                            {% for d in _doc_preview %}
+                                                                {% set _doc_url = d.download_url or url_for('view_rfp_file', file_id=d.id) %}
+                                                                {% set _doc_label = 'Manager' if d.source == 'manager' else ('Task' if d.source == 'task' else 'RFP') %}
+                                                                <div class="flex items-center justify-between gap-2">
+                                                                    <div class="min-w-0 flex items-center gap-2">
+                                                                        <span class="inline-flex items-center px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 text-[10px] font-semibold">{{ _doc_label }}</span>
+                                                                        <a class="text-xs text-blue-600 hover:text-blue-700 truncate"
+                                                                           href="{{ _doc_url }}"
+                                                                           target="_blank"
+                                                                           rel="noopener"
+                                                                           title="{{ d.filename }}">
+                                                                            {{ d.filename }}
+                                                                        </a>
+                                                                    </div>
+                                                                    <div class="flex items-center gap-2 text-[10px] text-gray-400 whitespace-nowrap">
+                                                                        <span>{{ d.uploaded_at or '' }}</span>
+                                                                        <a class="text-[10px] text-blue-600 hover:text-blue-700" href="{{ _doc_url }}" target="_blank" rel="noopener">Open</a>
+                                                                    </div>
+                                                                </div>
+                                                            {% endfor %}
+                                                        </div>
+                                                        {% if _doc_count > 4 %}
+                                                            <details class="mt-2">
+                                                                <summary class="text-[11px] text-blue-600 hover:text-blue-700 cursor-pointer font-semibold">
+                                                                    Show all ({{ _doc_count }})
+                                                                </summary>
+                                                                <div class="mt-2 max-h-40 overflow-y-auto space-y-1 pr-1">
+                                                                    {% for d in _doc_list[4:] %}
+                                                                        {% set _doc_url = d.download_url or url_for('view_rfp_file', file_id=d.id) %}
+                                                                        {% set _doc_label = 'Manager' if d.source == 'manager' else ('Task' if d.source == 'task' else 'RFP') %}
+                                                                        <div class="flex items-center justify-between gap-2">
+                                                                            <div class="min-w-0 flex items-center gap-2">
+                                                                                <span class="inline-flex items-center px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 text-[10px] font-semibold">{{ _doc_label }}</span>
+                                                                                <a class="text-xs text-blue-600 hover:text-blue-700 truncate"
+                                                                                   href="{{ _doc_url }}"
+                                                                                   target="_blank"
+                                                                                   rel="noopener"
+                                                                                   title="{{ d.filename }}">
+                                                                                    {{ d.filename }}
+                                                                                </a>
+                                                                            </div>
+                                                                            <div class="flex items-center gap-2 text-[10px] text-gray-400 whitespace-nowrap">
+                                                                                <span>{{ d.uploaded_at or '' }}</span>
+                                                                                <a class="text-[10px] text-blue-600 hover:text-blue-700" href="{{ _doc_url }}" target="_blank" rel="noopener">Open</a>
+                                                                            </div>
+                                                                        </div>
+                                                                    {% endfor %}
+                                                                </div>
+                                                            </details>
+                                                        {% endif %}
+                                                    {% else %}
+                                                        <div class="text-xs font-semibold text-gray-700 uppercase mb-2">Bid Documents</div>
+                                                        <div class="text-xs text-gray-500">No documents uploaded yet.</div>
+                                                    {% endif %}
+                                                </div>
+                                                <div class="lg:col-span-3 border border-gray-200 rounded-lg p-3 hidden" data-project-activity-panel="{{ it.g_id }}" data-project-activity='{{ it.project_activity|tojson }}'>
+                                                    <div class="flex items-center justify-between">
+                                                        <div class="text-xs font-semibold text-gray-700 uppercase">Project Activity</div>
+                                                        <button type="button" class="text-gray-400 hover:text-gray-700" data-activity-close="{{ it.g_id }}">
+                                                            <i class="fas fa-times text-[12px]"></i>
+                                                        </button>
+                                                    </div>
+                                                    <div class="mt-3 space-y-2 max-h-56 overflow-y-auto" data-project-activity-list="{{ it.g_id }}">
+                                                        <div class="text-xs text-gray-500">Select a bid to load activity.</div>
+                                                    </div>
+                                                    <div class="mt-4 border-t border-gray-200 pt-3">
+                                                        <div class="text-xs font-semibold text-gray-700 mb-2">Add a project comment</div>
+                                                        <textarea class="w-full border border-gray-300 rounded-md px-2 py-2 text-xs" rows="3" placeholder="Write a project update" data-project-comment-input="{{ it.g_id }}"></textarea>
+                                                        <div class="flex justify-end mt-2">
+                                                            <button type="button" class="px-3 py-1.5 rounded-md bg-emerald-100 text-emerald-700 text-xs font-semibold hover:bg-emerald-200" data-project-comment-submit="{{ it.g_id }}">
+                                                                Send
+                                                            </button>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                            <div class="border border-gray-200 rounded-lg p-3">
+                                                <div class="flex items-center justify-between gap-3">
+                                                    <div class="text-sm font-semibold text-gray-900">Tasks (status / type)</div>
+                                                </div>
+                                                <div class="text-xs text-gray-500 mt-1">Use @email to mention teammates in notes.</div>
+                                                <div class="mt-3 overflow-x-auto border border-gray-200 rounded-lg">
+                                                        <table class="w-full text-sm">
+                                                            <thead class="bg-gray-50 text-xs uppercase text-gray-500">
+                                                                <tr>
+                                                                    <th class="text-left p-2">Task Code</th>
+                                                                    <th class="text-left p-2">Task Assign Date</th>
+                                                                    <th class="text-left p-2">Task Due</th>
+                                                                    <th class="text-left p-2">Task</th>
+                                                                    <th class="text-left p-2">Department</th>
+                                                                    <th class="text-left p-2">Assignee</th>
+                                                                    <th class="text-left p-2">Status</th>
+                                                                    <th class="text-left p-2">Priority</th>
+                                                                    <th class="text-left p-2">Actions</th>
+                                                                </tr>
+                                                            </thead>
+                                                            <tbody id="taskRows-{{ it.g_id }}">
+                                                                <tr>
+                                                                    <td colspan="9" class="p-4 text-xs text-gray-500">Open details to load tasks.</td>
+                                                                </tr>
+                                                            </tbody>
+                                                        </table>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </td>
+                                </tr>
+                                {% endfor %}
+                            {% else %}
+                                <tr>
+                                    <td colspan="7" class="px-4 py-6 text-center text-gray-500 text-sm">No assigned tasks found for this department.</td>
+                                </tr>
+                            {% endif %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <!-- Checklist Editor Modal -->
+    <div id="checklistEditorModal" class="fixed inset-0 bg-gray-900 bg-opacity-40 hidden z-40">
+        <div class="flex items-center justify-center min-h-screen p-4">
+            <div class="bg-white rounded-lg shadow-xl w-full max-w-5xl max-h-[90vh] overflow-hidden">
+                <div class="p-4 border-b border-gray-200 flex items-center justify-between gap-3">
+                    <div>
+                        <div class="text-xs text-gray-500">Assigned Checklist</div>
+                        <div id="checklistEditorTitle" class="text-lg font-semibold text-gray-900">Checklist</div>
+                    </div>
+                    <button type="button" class="text-gray-500 hover:text-gray-800" onclick="closeChecklistEditor()">
+                        <i class="fas fa-times"></i>
+                    </button>
+                </div>
+                <div class="p-4 space-y-4 overflow-y-auto max-h-[70vh]">
+                    <div class="rounded-lg border border-blue-100 bg-blue-50 px-3 py-2 text-xs text-blue-800">
+                        <div class="font-semibold">Quick steps</div>
+                        <div>1) Select tasks  2) Choose assignees  3) Click “Assign selected tasks”</div>
+                    </div>
+                    <div class="grid grid-cols-1 md:grid-cols-3 gap-3 items-end">
+                        <div class="editor-team-lead-row">
+                            <label class="block text-xs text-gray-600 mb-1">Assign to team lead</label>
+                            <select id="editorTeamLead" class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm">
+                                <option value="">Select team lead</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label class="block text-xs text-gray-600 mb-1">Assign to employees</label>
+                            <select id="editorEmployees" class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm" multiple>
+                            </select>
+                            <div class="text-[11px] text-gray-500 mt-1">Employees will see these tasks in their dashboard.</div>
+                        </div>
+                        <div class="flex gap-2">
+                            <button type="button" class="px-3 py-2 rounded-md bg-emerald-100 text-emerald-700 text-sm font-semibold hover:bg-emerald-200" onclick="assignSelectedTasks()">
+                                  Assign selected tasks
+                              </button>
+                            <button type="button" class="px-3 py-2 rounded-md bg-gray-100 text-gray-700 text-sm font-semibold hover:bg-gray-200" onclick="toggleSelectAllTasks()">
+                                Toggle all
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="border border-gray-200 rounded-lg overflow-hidden">
+                        <div class="px-3 py-2 bg-gray-50 text-xs text-gray-600">Checklist items (editable). Select tasks, then assign. Save changes to update the manager view.</div>
+                        <div id="checklistEditorBody" class="divide-y divide-gray-200"></div>
+                    </div>
+
+                    <div class="border border-dashed border-gray-300 rounded-lg p-3 bg-gray-50">
+                        <div class="text-xs text-gray-600 mb-2">Add new checklist item</div>
+                        <div class="grid grid-cols-1 md:grid-cols-12 gap-2 items-end">
+                            <div class="md:col-span-4">
+                                <label class="block text-[11px] text-gray-600 mb-1">Task name</label>
+                                <input id="newTaskName" type="text" class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm">
+                            </div>
+                            <div class="md:col-span-3">
+                                <label class="block text-[11px] text-gray-600 mb-1">Notes</label>
+                                <input id="newTaskNotes" type="text" class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm">
+                            </div>
+                            <div class="md:col-span-2">
+                                <label class="block text-[11px] text-gray-600 mb-1">Priority</label>
+                                <select id="newTaskPriority" class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm">
+                                    <option value="normal">Normal</option>
+                                    <option value="low">Low</option>
+                                    <option value="medium">Medium</option>
+                                    <option value="high">High</option>
+                                    <option value="urgent">Urgent</option>
+                                </select>
+                            </div>
+                            <div class="md:col-span-2">
+                                <label class="block text-[11px] text-gray-600 mb-1">Due date</label>
+                                <input id="newTaskDue" type="date" class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm">
+                            </div>
+                            <div class="md:col-span-2">
+                                <label class="block text-[11px] text-gray-600 mb-1">Attachment</label>
+                                <input id="newTaskAttachment" type="file" class="w-full border border-gray-300 rounded-md px-2 py-2 text-xs">
+                            </div>
+                            <div class="md:col-span-12 flex justify-end">
+                                <button type="button" class="px-3 py-2 rounded-md bg-emerald-100 text-emerald-700 text-sm font-semibold hover:bg-emerald-200" onclick="addChecklistItem()">
+                                      Add item
+                                  </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="px-4 py-3 border-t border-gray-200 flex items-center justify-end gap-2">
+                    <button type="button" class="px-4 py-2 rounded-md bg-gray-100 text-gray-700 hover:bg-gray-200" onclick="closeChecklistEditor()">Close</button>
+                    <button type="button" class="px-4 py-2 rounded-md bg-emerald-100 text-emerald-700 hover:bg-emerald-200" onclick="saveChecklistChanges()">Save changes</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Assigned Tasks Summary Modal -->
+    <div id="summaryModalAssigned" class="fixed inset-0 bg-gray-900 bg-opacity-40 hidden z-40">
+        <div class="flex items-center justify-center min-h-screen p-4">
+            <div class="bg-white rounded-lg shadow-xl w-full max-w-3xl max-h-[85vh] overflow-hidden">
+                <div class="p-4 border-b border-gray-200 flex items-center justify-between gap-3">
+                    <div class="min-w-0">
+                        <div class="text-xs text-gray-500">Scope of Work</div>
+                        <div id="assignedSummaryTitle" class="text-lg font-semibold text-gray-900 truncate">Summary</div>
+                    </div>
+                    <div class="flex items-center gap-2">
+                          <button type="button" id="assignedSummaryEditBtn"
+                                 class="px-3 py-2 bg-emerald-100 hover:bg-emerald-200 text-emerald-700 rounded-lg text-sm font-semibold">
+                              <i class="fas fa-pen mr-1"></i>Edit
+                          </button>
+                        <button type="button" class="px-3 py-2 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-lg text-sm font-semibold" data-summary-close>
+                            <i class="fas fa-times mr-1"></i>Close
+                        </button>
+                    </div>
+                </div>
+                <div class="p-4 overflow-y-auto max-h-[70vh] bg-gray-50">
+                    <div class="text-xs text-gray-500 mb-2">Summary</div>
+                    <div id="assignedSummaryBody" class="summary-content text-sm"></div>
+                    <div id="assignedSummaryEditor" class="hidden">
+                        <div class="flex items-center justify-end gap-2 mt-3">
+                            <button type="button" id="assignedSummaryCancelBtn"
+                                    class="px-3 py-2 bg-gray-200 hover:bg-gray-300 text-gray-800 rounded-lg text-sm font-semibold">
+                                Cancel
+                            </button>
+                              <button type="button" id="assignedSummarySaveBtn"
+                                     class="px-3 py-2 bg-emerald-100 hover:bg-emerald-200 text-emerald-700 rounded-lg text-sm font-semibold">
+                                  Save
+                              </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Task Details Modal -->
+    <div id="taskDetailModal" class="fixed inset-0 bg-gray-900 bg-opacity-40 hidden z-40">
+        <div class="flex items-center justify-center min-h-screen p-4">
+            <div class="bg-white rounded-lg shadow-xl w-full max-w-3xl max-h-[85vh] overflow-hidden">
+                <div class="p-4 border-b border-gray-200 flex items-center justify-between gap-3">
+                    <div class="min-w-0">
+                        <div class="text-xs text-gray-500">Task Details</div>
+                        <div id="taskDetailTitle" class="text-lg font-semibold text-gray-900 truncate">Task</div>
+                    </div>
+                    <button type="button" class="px-3 py-2 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-lg text-sm font-semibold" data-task-detail-close>
+                        <i class="fas fa-times mr-1"></i>Close
+                    </button>
+                </div>
+                <div class="p-4 overflow-y-auto max-h-[70vh] bg-gray-50">
+                    <div id="taskDetailBody" class="text-sm text-gray-800 space-y-4"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div id="revertModal" class="revert-modal hidden" aria-hidden="true">
+        <div class="revert-modal__backdrop" data-revert-close></div>
+        <div class="revert-modal__card" role="dialog" aria-modal="true" aria-labelledby="revertModalTitle">
+            <div class="flex items-start justify-between">
+                <div>
+                    <div class="revert-modal__title" id="revertModalTitle">Revert With Notes</div>
+                    <div class="revert-modal__subtitle">Add a reason and attach the updated file before reverting.</div>
+                </div>
+                <button type="button" class="text-gray-400 hover:text-gray-600" data-revert-close aria-label="Close">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+            <div class="mt-4">
+                <label class="text-xs font-semibold text-gray-600">Revert note</label>
+                <textarea id="revertModalNote" class="revert-modal__textarea mt-2" placeholder="Explain what needs to change..."></textarea>
+            </div>
+            <div class="mt-4">
+                <label class="text-xs font-semibold text-gray-600">Attachment</label>
+                <div class="revert-modal__attach mt-2">
+                    <button type="button" class="revert-modal__attach-btn" id="revertModalAttachBtn" title="Attach file">
+                        <i class="fas fa-paperclip"></i>
+                    </button>
+                    <input type="file" id="revertModalFile" class="hidden">
+                    <div class="revert-modal__file-name" id="revertModalFileName">No file selected</div>
+                </div>
+            </div>
+            <div class="revert-modal__actions">
+                <button type="button" class="px-3 py-1.5 rounded-md border border-gray-200 text-gray-600 text-xs font-semibold hover:bg-gray-50" data-revert-close>
+                    Cancel
+                </button>
+                <button type="button" class="px-3 py-1.5 rounded-md bg-amber-500 text-white text-xs font-semibold hover:bg-amber-600" id="revertModalSubmit">
+                    Send revert
+                </button>
+            </div>
+        </div>
+    </div>
+    <script>
+        const DEPT_KEY = "{{ dept_key }}";
+        const IS_TEAM_LEAD_VIEW = {{ 'true' if is_team_lead_view else 'false' }};
+        const IS_EMPLOYEE_VIEW = {{ 'true' if is_employee_view else 'false' }};
+        const TASKS_SCOPE_ALL = false;
+        const csrfToken = {{ csrf_token()|tojson }};
+        const CURRENT_USER_EMAIL = "{{ user.email|default('') }}";
+        const CURRENT_USER_ROLE = "{{ (user_role or '')|lower|replace('_',' ') }}";
+        const IS_MANAGER_VIEW = {{ 'true' if sidebar_mode == 'manager' else 'false' }};
+        const CAN_APPROVE = {{ (check_action_access('approve_item') or is_admin or is_team_lead_view or sidebar_mode == 'manager')|tojson }};
+        const CAN_REJECT = {{ (check_action_access('reject_item') or is_admin or is_team_lead_view or sidebar_mode == 'manager')|tojson }};
+        const ASSIGNED_TASKS_BASE_URL = {{ assigned_tasks_base_url|default(None)|tojson }};
+        const lastTasksByBid = {};
+        const loadedTaskPanels = new Set();
+        const deptEmployeesCache = {};
+        const deptTeamLeadsCache = {};
+        const deptManagersCache = {};
+        let topAdminsCache = null;
+
+        document.addEventListener('DOMContentLoaded', function () {
+            const activeKey = (DEPT_KEY || '').toLowerCase();
+            document.querySelectorAll('[data-team-switch]').forEach(tab => {
+                const teamKey = (tab.getAttribute('data-team-switch') || '').toLowerCase();
+                if (teamKey && teamKey === activeKey) {
+                    tab.classList.remove('text-gray-700');
+                    tab.classList.add('bg-emerald-100', 'text-emerald-700', 'border-emerald-200');
+                }
+                if (!ASSIGNED_TASKS_BASE_URL) return;
+                tab.addEventListener('click', () => {
+                    const target = teamKey || 'business';
+                    const url = `${ASSIGNED_TASKS_BASE_URL}?team=${encodeURIComponent(target)}`;
+                    window.location.href = url;
+                });
+            });
+
+            document.querySelectorAll('[data-summary-toggle]').forEach(btn => {
+                btn.addEventListener('click', () => {
+                    const modal = document.getElementById('summaryModalAssigned');
+                    const titleEl = document.getElementById('assignedSummaryTitle');
+                    const bodyEl = document.getElementById('assignedSummaryBody');
+                    if (!modal || !titleEl || !bodyEl) return;
+                    let summary = '';
+                    try {
+                        summary = JSON.parse(btn.getAttribute('data-summary') || '""') || '';
+                    } catch (e) {
+                        summary = btn.getAttribute('data-summary') || '';
+                    }
+                    const title = btn.getAttribute('data-summary-title') || 'Summary';
+                    const bidId = btn.getAttribute('data-bid-id') || '';
+                    const gId = btn.getAttribute('data-g-id') || '';
+                    titleEl.textContent = title;
+                    renderSummary(bodyEl, summary || '');
+                    modal.setAttribute('data-bid-id', bidId);
+                    modal.setAttribute('data-g-id', gId);
+                    modal.classList.remove('hidden');
+                });
+            });
+
+            const summaryModal = document.getElementById('summaryModalAssigned');
+            if (summaryModal) {
+                summaryModal.addEventListener('click', (event) => {
+                    if (event.target === summaryModal) {
+                        summaryModal.classList.add('hidden');
+                    }
+                });
+                summaryModal.querySelectorAll('[data-summary-close]').forEach(btn => {
+                    btn.addEventListener('click', () => summaryModal.classList.add('hidden'));
+                });
+            }
+
+            const assignedSummaryEditBtn = document.getElementById('assignedSummaryEditBtn');
+            const assignedSummaryCancelBtn = document.getElementById('assignedSummaryCancelBtn');
+            const assignedSummarySaveBtn = document.getElementById('assignedSummarySaveBtn');
+            if (assignedSummaryEditBtn) {
+                assignedSummaryEditBtn.addEventListener('click', () => {
+                    const bodyEl = document.getElementById('assignedSummaryBody');
+                    const editorWrap = document.getElementById('assignedSummaryEditor');
+                    if (editorWrap) editorWrap.classList.remove('hidden');
+                    if (bodyEl) {
+                        bodyEl.contentEditable = 'true';
+                        bodyEl.classList.add('ring-2', 'ring-green-200', 'rounded-lg', 'p-2', 'bg-white');
+                        bodyEl.focus();
+                    }
+                });
+            }
+            if (assignedSummaryCancelBtn) {
+                assignedSummaryCancelBtn.addEventListener('click', () => {
+                    const bodyEl = document.getElementById('assignedSummaryBody');
+                    const editorWrap = document.getElementById('assignedSummaryEditor');
+                    if (editorWrap) editorWrap.classList.add('hidden');
+                    if (bodyEl) {
+                        bodyEl.contentEditable = 'false';
+                        bodyEl.classList.remove('ring-2', 'ring-green-200', 'rounded-lg', 'p-2', 'bg-white');
+                    }
+                });
+            }
+            if (assignedSummarySaveBtn) {
+                assignedSummarySaveBtn.addEventListener('click', async () => {
+                    const modal = document.getElementById('summaryModalAssigned');
+                    const bodyEl = document.getElementById('assignedSummaryBody');
+                    const editorWrap = document.getElementById('assignedSummaryEditor');
+                    if (!modal || !bodyEl) return;
+                    const bidId = modal.getAttribute('data-bid-id') || '';
+                    const text = bodyEl.innerText || '';
+                    if (!bidId) {
+                        showToast('Missing bid id for summary', 'error');
+                        return;
+                    }
+                    try {
+                        const res = await fetch('/api/bid-analyzer/update-summary', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            credentials: 'include',
+                            body: JSON.stringify({ bid_id: bidId, summary: text }),
+                        });
+                        const data = await res.json().catch(() => ({}));
+                        if (!res.ok || data.ok === false) {
+                            showToast((data && (data.error || data.message)) || 'Save failed', 'error');
+                            return;
+                        }
+                        renderSummary(bodyEl, text || '');
+                        if (editorWrap) editorWrap.classList.add('hidden');
+                        if (bodyEl) {
+                            bodyEl.contentEditable = 'false';
+                            bodyEl.classList.remove('ring-2', 'ring-green-200', 'rounded-lg', 'p-2', 'bg-white');
+                        }
+                        showToast('Summary updated.');
+                    } catch (e) {
+                        showToast('Failed to save summary', 'error');
+                    }
+                });
+            }
+
+            const bellBtn = document.getElementById('combinedBellBtn');
+            const bellDropdown = document.getElementById('combinedBellDropdown');
+            if (bellBtn && bellDropdown) {
+                bellBtn.addEventListener('click', () => {
+                    bellDropdown.classList.toggle('hidden');
+                });
+                document.addEventListener('click', (event) => {
+                    if (!bellDropdown.contains(event.target) && !bellBtn.contains(event.target)) {
+                        bellDropdown.classList.add('hidden');
+                    }
+                });
+                const closeBtn = bellDropdown.querySelector('[data-approval-close]');
+                if (closeBtn) {
+                    closeBtn.addEventListener('click', () => bellDropdown.classList.add('hidden'));
+                }
+            }
+
+            if (!IS_EMPLOYEE_VIEW) {
+                loadCombinedBell();
+            }
+            const bootstrapDept = normalizeDeptKey(DEPT_KEY || CURRENT_USER_ROLE || '');
+            if (IS_TEAM_LEAD_VIEW && DEPT_KEY) {
+                ensureDeptManagers(DEPT_KEY);
+            }
+            if (IS_EMPLOYEE_VIEW && bootstrapDept) {
+                ensureTopAdmins();
+                ensureDeptTeamLeads(bootstrapDept);
+                ensureDeptManagers(bootstrapDept);
+            }
+        });
+
+        function showToast(msg, type = 'success') {
+            const toast = document.createElement('div');
+            toast.className = `fixed bottom-4 right-4 z-50 px-4 py-2 rounded-md text-sm font-semibold shadow-lg ${type === 'error' ? 'bg-red-600 text-white' : 'bg-emerald-600 text-white'}`;
+            toast.textContent = msg;
+            document.body.appendChild(toast);
+            setTimeout(() => toast.remove(), 2500);
+        }
+
+        function escapeHtml(value) {
+            const div = document.createElement('div');
+            div.textContent = value == null ? '' : String(value);
+            return div.innerHTML;
+        }
+
+
+        function formatSummaryHtml(text) {
+            const escaped = escapeHtml(text || '');
+            return escaped.replace(/\n/g, '<br>');
+        }
+
+        function renderSummary(container, rawText) {
+            while (container.firstChild) container.removeChild(container.firstChild);
+
+            const text = String(rawText || '').replace(/\r\n/g, '\n').trim();
+            if (!text) {
+                const empty = document.createElement('div');
+                empty.className = 'bg-white border border-gray-200 rounded-lg p-4 text-sm text-gray-500';
+                empty.textContent = 'No summary available.';
+                container.appendChild(empty);
+                return;
+            }
+
+            const blocks = text.split(/\n\s*\n/g).map(s => s.trim()).filter(Boolean);
+            const cleanCell = (s) => String(s || '')
+                .replace(/^\*\*\s*|\s*\*\*$/g, '')
+                .replace(/\*\*/g, '')
+                .replace(/`+/g, '')
+                .trim();
+            const isPipeRow = (l) => l.includes('|') && l.split('|').filter(x => x.trim()).length >= 2;
+
+            function renderTable(body, tableLines) {
+                const rawRows = tableLines
+                    .map(l => l.replace(/^\|/, '').replace(/\|$/, '').split('|').map(c => cleanCell(c)))
+                    .filter(r => r.length >= 2);
+                const cleaned = rawRows.filter(r => !r.every(c => /^-+$/.test(c.replace(/\s/g, ''))));
+                if (!cleaned.length) return;
+
+                const headerRow = cleaned[0] || [];
+                const hasHeader = headerRow.some(c => /field|item|requirement|status|score|details|section|value/i.test(c));
+                const dataRows = hasHeader ? cleaned.slice(1) : cleaned;
+
+                const wrap = document.createElement('div');
+                wrap.className = 'overflow-x-auto';
+
+                const table = document.createElement('table');
+                table.className = 'min-w-full text-sm border border-gray-200 border-collapse';
+
+                if (hasHeader) {
+                    const thead = document.createElement('thead');
+                    const trh = document.createElement('tr');
+                    headerRow.forEach((c) => {
+                        const th = document.createElement('th');
+                        th.className = 'text-left px-3 py-2 font-semibold text-gray-800 border border-gray-200';
+                        th.textContent = c || '';
+                        trh.appendChild(th);
+                    });
+                    thead.appendChild(trh);
+                    table.appendChild(thead);
+                }
+
+                const tbody = document.createElement('tbody');
+                dataRows.forEach((r) => {
+                    const tr = document.createElement('tr');
+                    r.forEach((c) => {
+                        const td = document.createElement('td');
+                        td.className = 'px-3 py-2 align-top text-gray-800 border border-gray-200';
+                        td.textContent = c || '';
+                        tr.appendChild(td);
+                    });
+                    tbody.appendChild(tr);
+                });
+
+                table.appendChild(tbody);
+                wrap.appendChild(table);
+                body.appendChild(wrap);
+            }
+
+            function renderTextChunk(body, chunkLines) {
+                if (!chunkLines.length) return;
+
+                const kv = chunkLines
+                    .map(l => {
+                        const cleaned = l.replace(/^\s*[-*]\s+/, '').trim();
+                        const m = cleaned.match(/^([^:]{2,50}):\s*(.+)$/);
+                        return m ? { k: cleanCell(m[1]), v: cleanCell(m[2]) } : null;
+                    })
+                    .filter(Boolean);
+
+                if (kv.length >= 2 && kv.length >= Math.floor(chunkLines.length * 0.6)) {
+                    const dl = document.createElement('dl');
+                    dl.className = 'grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-3';
+                    kv.forEach(({ k, v }) => {
+                        const wrap = document.createElement('div');
+                        const dt = document.createElement('dt');
+                        dt.className = 'text-xs font-semibold text-gray-500 uppercase tracking-wide';
+                        dt.textContent = k;
+                        const dd = document.createElement('dd');
+                        dd.className = 'mt-1 text-sm text-gray-800';
+                        dd.style.whiteSpace = 'pre-wrap';
+                        dd.textContent = v;
+                        wrap.appendChild(dt);
+                        wrap.appendChild(dd);
+                        dl.appendChild(wrap);
+                    });
+                    body.appendChild(dl);
+                    return;
+                }
+
+                const p = document.createElement('div');
+                p.className = 'text-sm text-gray-800';
+                p.style.whiteSpace = 'pre-wrap';
+                p.textContent = chunkLines.join('\n');
+                body.appendChild(p);
+            }
+
+            blocks.forEach((block) => {
+                const lines = block.split('\n').map(l => l.trim()).filter(Boolean);
+                const first = lines[0] || '';
+                if (/^evaluation\s+sequence$/i.test(first) || /^detailed\s+bid\s+evaluation$/i.test(first)) {
+                    return;
+                }
+
+                const section = document.createElement('div');
+                section.className = 'bg-white border border-gray-200 rounded-lg shadow-sm';
+
+                const isHeading =
+                    /^step\s*\d+/i.test(first) ||
+                    /^(compliance|summary|details|item|section|rfp)/i.test(first) ||
+                    (first.length <= 40 && first === first.toUpperCase());
+
+                if (isHeading && lines.length > 1) {
+                    const head = document.createElement('div');
+                    head.className = 'px-4 py-3 border-b border-gray-100';
+                    const h = document.createElement('div');
+                    h.className = 'font-bold text-gray-900 text-base';
+                    h.textContent = cleanCell(first).replace(/^[*]\s*/, '');
+                    head.appendChild(h);
+                    section.appendChild(head);
+                    lines.shift();
+                }
+
+                const body = document.createElement('div');
+                body.className = 'p-4 text-sm text-gray-800 leading-relaxed';
+
+                let currentText = [];
+                let currentTable = [];
+                const flushText = () => { renderTextChunk(body, currentText); currentText = []; };
+                const flushTable = () => { renderTable(body, currentTable); currentTable = []; };
+
+                lines.forEach((l) => {
+                    if (isPipeRow(l)) {
+                        if (currentText.length) flushText();
+                        currentTable.push(l);
+                    } else {
+                        if (currentTable.length) flushTable();
+                        currentText.push(l);
+                    }
+                });
+                if (currentTable.length) flushTable();
+                if (currentText.length) flushText();
+
+                section.appendChild(body);
+                container.appendChild(section);
+            });
+        }
+
+        function formatShortDate(value) {
+            const raw = String(value || '').trim();
+            if (!raw) return '';
+            const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+            const m = raw.match(/^(\d{4})-(\d{2})-(\d{2})/);
+            if (m) {
+                const y = parseInt(m[1], 10);
+                const mo = parseInt(m[2], 10) - 1;
+                const d = parseInt(m[3], 10);
+                if (!isNaN(y) && !isNaN(mo) && !isNaN(d) && mo >= 0 && mo <= 11) {
+                    return `${months[mo]}-${String(d).padStart(2, '0')}-${y}`;
+                }
+            }
+            const parsed = new Date(raw);
+            if (Number.isNaN(parsed.getTime())) return raw;
+            const useUTC = /GMT|Z$/i.test(raw);
+            const y = useUTC ? parsed.getUTCFullYear() : parsed.getFullYear();
+            const mo = useUTC ? parsed.getUTCMonth() : parsed.getMonth();
+            const d = useUTC ? parsed.getUTCDate() : parsed.getDate();
+            if (Number.isNaN(y) || Number.isNaN(mo) || Number.isNaN(d)) return raw;
+            return `${months[mo]}-${String(d).padStart(2, '0')}-${y}`;
+        }
+
+        function normalizeTaskStatus(value) {
+            const raw = String(value || '').trim().toLowerCase();
+            if (!raw) return 'pending';
+            const normalized = raw.replace(/[-_]/g, ' ').replace(/\s+/g, ' ').trim();
+            if (['completed', 'complete', 'done', 'finished', 'closed'].includes(normalized)) return 'completed';
+            if (['submitted', 'submit', 'submission'].includes(normalized)) return 'submitted';
+            if (['rejected', 'reject'].includes(normalized)) return 'rejected';
+            if (['in progress', 'inprogress', 'working', 'wip', 'started'].includes(normalized)) return 'in_progress';
+            if (['pending', 'not started', 'notstarted', 'new'].includes(normalized)) return 'pending';
+            return 'pending';
+        }
+
+        function isPastDue(value) {
+            const raw = String(value || '').trim();
+            if (!raw) return false;
+            const parsed = new Date(raw);
+            if (Number.isNaN(parsed.getTime())) return false;
+            const today = new Date();
+            today.setHours(0, 0, 0, 0);
+            parsed.setHours(0, 0, 0, 0);
+            return parsed < today;
+        }
+
+        function formatMentions(text) {
+            const escaped = escapeHtml(text || '');
+            return escaped.replace(/@([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})/g, '<span class="mention-tag">@$1</span>');
+        }
+
+        function normalizeApprovalTarget(value) {
+            const raw = String(value || '').toLowerCase().replace(/\s+/g, '_');
+            if (!raw) return '';
+            if (raw.includes('team')) return 'team_lead';
+            if (raw.includes('manager')) return 'manager';
+            if (raw.includes('admin')) return 'admin';
+            return raw;
+        }
+
+        function currentApprovalTarget() {
+            if (IS_MANAGER_VIEW) return 'manager';
+            if (IS_TEAM_LEAD_VIEW) return 'team_lead';
+            const role = String(CURRENT_USER_ROLE || '').toLowerCase();
+            if (role.includes('manager')) return 'manager';
+            if (role.includes('team')) return 'team_lead';
+            if (role.includes('admin')) return 'admin';
+            return '';
+        }
+
+        function canActOnApproval(statusValue, approvalTarget) {
+            if (IS_EMPLOYEE_VIEW) return false;
+            if (String(statusValue || '').toLowerCase() !== 'pending') return false;
+            const itemTarget = normalizeApprovalTarget(approvalTarget) || currentApprovalTarget();
+            if (itemTarget === currentApprovalTarget()) return true;
+            return IS_MANAGER_VIEW || IS_TEAM_LEAD_VIEW;
+        }
+
+        function generateProposal(bidId, bidName, company) {
+            const params = new URLSearchParams({
+                bid_id: bidId,
+                bid_name: bidName || '',
+                company: company || ''
+            });
+            window.location.href = `/proposals-making?${params.toString()}`;
+        }
+
+        async function loadApprovalBell() {
+            const listEl = document.getElementById('combinedApprovalList');
+            if (!listEl) return 0;
+            try {
+                const res = await fetch(`/api/approvals/summary?department=${encodeURIComponent(DEPT_KEY || '')}`, { credentials: 'include' });
+                const data = await res.json().catch(() => ({}));
+                const items = Array.isArray(data.items) ? data.items : [];
+                const pendingCount = Number(data.pending_count || 0);
+                const reviewCount = items.filter(it => String(it.status || '').toLowerCase() === 'review').length;
+                const visibleCount = pendingCount + reviewCount;
+                if (!items.length) {
+                    listEl.innerHTML = '<div class="text-xs text-gray-500">No approvals yet.</div>';
+                    return visibleCount;
+                }
+                const canApprove = {{ (check_action_access('approve_item') or is_admin)|tojson }};
+                const canReject = {{ (check_action_access('reject_item') or is_admin)|tojson }};
+                const canRevert = {{ (check_action_access('revert_item') or is_admin)|tojson }};
+                listEl.innerHTML = items.map(item => {
+                    const status = escapeHtml(item.status || 'pending');
+                    const label = escapeHtml(item.bid_name || item.task_name || 'Task');
+                    const uploader = escapeHtml(item.uploader || 'User');
+                    const when = escapeHtml(item.uploaded_at || '');
+                    const reason = escapeHtml(item.reason || '');
+                    const filename = escapeHtml(item.original_filename || item.filename || '');
+                    const comment = escapeHtml(item.comment || '');
+                    const link = item.download_url ? `<a href="${escapeHtml(item.download_url)}" class="text-blue-600 underline" download>Download</a>` : '';
+                    const statusLower = String(item.status || '').toLowerCase();
+                    const sourceId = item.source_id || item.id || '';
+                    const isPending = statusLower === 'pending';
+                    const isReview = statusLower === 'review';
+                    const typeLabel = isPending ? 'Approval request' : (isReview ? 'Document exchange' : 'Update');
+                    const approveActions = sourceId ? (isPending ? `
+                        <div class="flex items-center gap-2 mt-2">
+                            ${canApprove ? `
+                            <button type="button"
+                                    class="px-2 py-1 rounded-md bg-emerald-100 text-emerald-700 text-[11px] font-semibold hover:bg-emerald-200"
+                                    data-approval-action="approve"
+                                    data-source-table="${escapeHtml(item.source_table || '')}"
+                                    data-source-id="${escapeHtml(sourceId)}">
+                                Approve
+                            </button>` : ''}
+                            ${canReject ? `
+                            <button type="button"
+                                    class="px-2 py-1 rounded-md bg-rose-100 text-rose-700 text-[11px] font-semibold hover:bg-rose-200"
+                                    data-approval-action="reject"
+                                    data-source-table="${escapeHtml(item.source_table || '')}"
+                                    data-source-id="${escapeHtml(sourceId)}">
+                                Reject
+                            </button>` : ''}
+                        </div>
+                    ` : (isReview ? `
+                        <div class="flex items-center gap-2 mt-2">
+                            ${canRevert ? `
+                            <button type="button"
+                                    class="px-2 py-1 rounded-md bg-amber-100 text-amber-700 text-[11px] font-semibold hover:bg-amber-200 inline-flex items-center gap-1"
+                                    data-approval-action="revert"
+                                    data-source-table="${escapeHtml(item.source_table || '')}"
+                                    data-source-id="${escapeHtml(sourceId)}"
+                                    data-task-id="${escapeHtml(item.task_id || '')}">
+                                <i class="fas fa-rotate-left text-[10px]"></i>
+                                Revert
+                            </button>` : ''}
+                        </div>
+                    ` : '')) : '';
+                    return `
+                        <div class="border-b border-gray-100 pb-2 mb-2 last:border-0 last:mb-0">
+                            <div class="flex items-center justify-between text-[11px] text-gray-500">
+                                <span>${status.toUpperCase()}</span>
+                                <span>${when}</span>
+                            </div>
+                            <div class="text-xs font-semibold text-gray-700 mt-1">${label}</div>
+                            <div class="text-[11px] text-gray-500 mt-1">By: ${uploader}</div>
+                            <div class="text-[11px] text-slate-500 mt-1">${typeLabel}</div>
+                            ${filename ? `<div class="text-[11px] text-gray-600 mt-1">${filename}</div>` : ''}
+                            ${comment ? `<div class="text-[11px] text-gray-600 mt-1">${comment}</div>` : ''}
+                            ${reason ? `<div class="text-[11px] text-gray-600 mt-1">Reason: ${reason}</div>` : ''}
+                            ${link ? `<div class="text-[11px] mt-1">${link}</div>` : ''}
+                            ${approveActions}
+                        </div>
+                    `;
+                }).join('');
+                return visibleCount;
+            } catch (e) {
+                listEl.innerHTML = '<div class="text-xs text-red-500">Failed to load approvals.</div>';
+                return 0;
+            }
+        }
+
+        async function loadUserNotifications() {
+            const listEl = document.getElementById('combinedNotifList');
+            const markAllBtn = document.getElementById('combinedNotifMarkAll');
+            if (!listEl) return 0;
+            try {
+                const includeEmployee = !IS_EMPLOYEE_VIEW;
+                const unreadUrl = `/api/notifications/unread-count${includeEmployee ? '?include_employee=1' : ''}`;
+                const recentUrl = `/api/notifications/recent?limit=10${includeEmployee ? '&include_employee=1' : ''}`;
+                const markUrl = `/api/notifications/mark-read${includeEmployee ? '?include_employee=1' : ''}`;
+                const unreadRes = await fetch(unreadUrl, { credentials: 'include', cache: 'no-store' });
+                const unreadData = await unreadRes.json().catch(() => ({}));
+                const unreadCount = Number(unreadData.unread || 0);
+                const res = await fetch(recentUrl, { credentials: 'include', cache: 'no-store' });
+                const data = await res.json().catch(() => ({}));
+                const items = Array.isArray(data.items) ? data.items : [];
+                if (!items.length) {
+                    listEl.innerHTML = '<div class="text-xs text-gray-500">No notifications.</div>';
+                } else {
+                    listEl.innerHTML = items.map(n => {
+                        const title = escapeHtml(n.title || 'Notification');
+                        const message = escapeHtml(n.message || '');
+                        const link = n.link_url || '';
+                        return `
+                            <div class="border-b border-gray-100 pb-2 mb-2 last:border-0 last:mb-0">
+                                <div class="text-xs font-semibold text-gray-700">${title}</div>
+                                <div class="text-[11px] text-gray-500 mt-1">${message}</div>
+                                ${link ? `<a href="${escapeHtml(link)}" class="text-[11px] text-blue-600 hover:text-blue-700">Open</a>` : ''}
+                            </div>
+                        `;
+                    }).join('');
+                }
+                if (markAllBtn) {
+                    markAllBtn.onclick = async () => {
+                        try {
+                            markAllBtn.disabled = true;
+                            await fetch(markUrl, {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                credentials: 'include',
+                                body: JSON.stringify({ ids: [], _csrf_token: csrfToken })
+                            });
+                            await loadCombinedBell();
+                        } catch (e) {} finally {
+                            markAllBtn.disabled = false;
+                        }
+                    };
+                }
+                return unreadCount;
+            } catch (e) {
+                listEl.innerHTML = '<div class="text-xs text-red-500">Failed to load notifications.</div>';
+                return 0;
+            }
+        }
+
+        async function loadCombinedBell() {
+            const badge = document.getElementById('combinedBellCount');
+            if (!badge) return;
+            const [approvalCount, notifCount] = await Promise.all([
+                loadApprovalBell(),
+                loadUserNotifications()
+            ]);
+            const total = Number(approvalCount || 0) + Number(notifCount || 0);
+            badge.textContent = String(total);
+            badge.classList.toggle('hidden', total <= 0);
+        }
+
+        const revertModalState = {
+            sourceTable: '',
+            sourceId: 0,
+            taskId: '',
+            bidId: ''
+        };
+
+        function openRevertModal(payload) {
+            const modal = document.getElementById('revertModal');
+            if (!modal) return;
+            revertModalState.sourceTable = payload.sourceTable || '';
+            revertModalState.sourceId = Number(payload.sourceId || 0);
+            revertModalState.taskId = payload.taskId || '';
+            revertModalState.bidId = payload.bidId || '';
+            const noteEl = document.getElementById('revertModalNote');
+            const fileEl = document.getElementById('revertModalFile');
+            const fileNameEl = document.getElementById('revertModalFileName');
+            if (noteEl) noteEl.value = '';
+            if (fileEl) fileEl.value = '';
+            if (fileNameEl) fileNameEl.textContent = 'No file selected';
+            modal.classList.remove('hidden');
+        }
+
+        function closeRevertModal() {
+            const modal = document.getElementById('revertModal');
+            if (modal) modal.classList.add('hidden');
+        }
+
+        function buildActivityHtml(name, ts, messageHtml, linkHtml) {
+            const safeName = escapeHtml(name || 'User');
+            const safeTs = escapeHtml(ts || '');
+            const messageLine = messageHtml ? `<div class="text-xs text-gray-700 mt-1">${messageHtml}</div>` : '';
+            const linkLine = linkHtml ? `<div class="text-xs text-blue-600 mt-1">${linkHtml}</div>` : '';
+            return `
+                <div class="text-xs font-semibold text-gray-700 flex items-center gap-2">
+                    <span>${safeName}</span>
+                    <span class="text-[11px] text-gray-500">${safeTs}</span>
+                </div>
+                ${messageLine}
+                ${linkLine}
+            `;
+        }
+
+        function normalizeDeptKey(val) {
+            const d = String(val || '').trim().toLowerCase().replace(/\s+/g, '_');
+            if (!d) return '';
+            if (['business', 'business_dev', 'business_development'].includes(d)) return 'business';
+            if (['design', 'marketing'].includes(d)) return 'design';
+            if (['operations', 'operation', 'ops', 'operation_team', 'operations_team', 'ops_team', 'ops_team', 'operationteam', 'operationsteam'].includes(d)) return 'operations';
+            if (['site_engineer', 'site_engineering', 'engineer', 'engineering', 'engineering_team', 'engineer_team', 'site_engineering_team'].includes(d)) return 'engineer';
+            return d;
+        }
+
+        let mentionDropdown = null;
+        let mentionTarget = null;
+
+        function getMentionQuery(text, cursorPos) {
+            const upto = text.slice(0, cursorPos);
+            const match = upto.match(/@([A-Za-z0-9._%+-]*)$/);
+            if (!match) return null;
+            return { term: match[1] || '', start: cursorPos - match[0].length, end: cursorPos };
+        }
+
+        function closeMentionDropdown() {
+            if (mentionDropdown) {
+                mentionDropdown.remove();
+                mentionDropdown = null;
+                mentionTarget = null;
+            }
+        }
+
+        function positionMentionDropdown(textarea) {
+            if (!mentionDropdown) return;
+            const rect = textarea.getBoundingClientRect();
+            mentionDropdown.style.top = `${rect.bottom + window.scrollY + 4}px`;
+            mentionDropdown.style.left = `${rect.left + window.scrollX}px`;
+        }
+
+        async function ensureMentionSource() {
+            const dept = normalizeDeptKey(DEPT_KEY || '');
+            if (!dept) return [];
+            await ensureDeptEmployees(dept);
+            return deptEmployeesCache[dept] || [];
+        }
+
+        async function showMentionSuggestions(textarea) {
+            const cursorPos = textarea.selectionStart || 0;
+            const query = getMentionQuery(textarea.value || '', cursorPos);
+            if (!query) {
+                closeMentionDropdown();
+                return;
+            }
+            const term = query.term.toLowerCase();
+            const employees = await ensureMentionSource();
+            const matches = employees
+                .filter(e => (e.email || '').toLowerCase().includes(term))
+                .slice(0, 6);
+            if (!mentionDropdown) {
+                mentionDropdown = document.createElement('div');
+                mentionDropdown.className = 'mention-dropdown';
+                document.body.appendChild(mentionDropdown);
+            }
+            mentionTarget = { textarea, query };
+            positionMentionDropdown(textarea);
+            if (!matches.length) {
+                mentionDropdown.innerHTML = '<div class="mention-empty">No matches</div>';
+                return;
+            }
+            mentionDropdown.innerHTML = matches.map(e => {
+                const email = e.email || '';
+                const name = e.name || '';
+                const label = name ? `${name} <${email}>` : email;
+                return `<div class="mention-item" data-mention-email="${escapeHtml(email)}">${escapeHtml(label)}</div>`;
+            }).join('');
+        }
+
+        document.addEventListener('click', (event) => {
+            const item = event.target.closest('.mention-item');
+            if (!item || !mentionTarget) return;
+            const email = item.getAttribute('data-mention-email') || '';
+            const { textarea, query } = mentionTarget;
+            const before = textarea.value.slice(0, query.start);
+            const after = textarea.value.slice(query.end);
+            const insert = `@${email} `;
+            textarea.value = `${before}${insert}${after}`;
+            textarea.focus();
+            const pos = before.length + insert.length;
+            textarea.setSelectionRange(pos, pos);
+            closeMentionDropdown();
+        });
+
+        document.addEventListener('input', (event) => {
+            const target = event.target;
+            if (!target || target.tagName !== 'TEXTAREA') return;
+            if (!target.hasAttribute('data-note-input') && !target.hasAttribute('data-project-comment-input')) return;
+            showMentionSuggestions(target);
+        });
+
+        document.addEventListener('click', (event) => {
+            if (mentionDropdown && !event.target.closest('.mention-dropdown')) {
+                if (!event.target.closest('textarea')) closeMentionDropdown();
+            }
+        });
+
+        window.addEventListener('scroll', () => {
+            if (mentionTarget && mentionTarget.textarea) {
+                positionMentionDropdown(mentionTarget.textarea);
+            }
+        });
+
+        async function ensureTopAdmins() {
+            if (topAdminsCache) return;
+            try {
+                const res = await fetch('/api/top-admins', { credentials: 'include' });
+                const data = await res.json().catch(() => ({}));
+                topAdminsCache = data.admins || [];
+            } catch (e) {
+                topAdminsCache = [];
+            }
+        }
+
+        async function ensureDeptEmployees(dept) {
+            const key = normalizeDeptKey(dept);
+            if (!key || deptEmployeesCache[key]) return;
+            try {
+                const res = await fetch(`/api/team/${encodeURIComponent(key)}/employees`, { credentials: 'include' });
+                const data = await res.json().catch(() => ({}));
+                deptEmployeesCache[key] = data.employees || [];
+            } catch (e) {
+                deptEmployeesCache[key] = [];
+            }
+        }
+
+        async function ensureDeptTeamLeads(dept) {
+            const key = normalizeDeptKey(dept);
+            if (!key || deptTeamLeadsCache[key]) return;
+            try {
+                const res = await fetch(`/api/team/${encodeURIComponent(key)}/team-leads`, { credentials: 'include' });
+                const data = await res.json().catch(() => ({}));
+                deptTeamLeadsCache[key] = data.team_leads || [];
+            } catch (e) {
+                deptTeamLeadsCache[key] = [];
+            }
+        }
+
+        async function ensureDeptManagers(dept) {
+            const key = normalizeDeptKey(dept);
+            if (!key || deptManagersCache[key]) return;
+            try {
+                const res = await fetch(`/api/team/${encodeURIComponent(key)}/managers`, { credentials: 'include' });
+                const data = await res.json().catch(() => ({}));
+                deptManagersCache[key] = data.managers || [];
+            } catch (e) {
+                deptManagersCache[key] = [];
+            }
+        }
+
+        function renderBidTasks(gid, tasks) {
+            const tbody = document.getElementById(`taskRows-${gid}`);
+            if (!tbody) return;
+            if (!tasks || !tasks.length) {
+                tbody.innerHTML = '<tr><td colspan="9" class="p-4 text-xs text-gray-500">No tasks available.</td></tr>';
+                return;
+            }
+
+            lastTasksByBid[String(gid)] = tasks || [];
+            tbody.innerHTML = (tasks || []).map(t => {
+                try {
+                const deptKey = normalizeDeptKey(
+                    t.department ||
+                    t.stage ||
+                    t.team ||
+                    t.assigned_department ||
+                    t.assignee_department ||
+                    t.assigned_dept ||
+                    DEPT_KEY ||
+                    CURRENT_USER_ROLE ||
+                    ''
+                );
+                const deptEmployeesAll = deptEmployeesCache[deptKey] || [];
+                const deptManagers = deptManagersCache[deptKey] || [];
+                const deptTeamLeads = deptTeamLeadsCache[deptKey] || [];
+                const topAdmins = Array.isArray(topAdminsCache) ? topAdminsCache : [];
+                const allManagers = Object.values(deptManagersCache).flat();
+                const allTeamLeads = Object.values(deptTeamLeadsCache).flat();
+                const fallbackManagers = !deptKey ? allManagers : [];
+                const fallbackTeamLeads = !deptKey ? allTeamLeads : [];
+                const assignedTeamLeads = [];
+                const assignedLead = (t.assigned_team_lead_email || t.assigned_team_lead || '').trim();
+                if (assignedLead) {
+                    assignedTeamLeads.push({ email: assignedLead, name: t.assigned_team_lead_name || assignedLead });
+                }
+                const assignedLeadList = Array.isArray(t.assigned_team_leads) ? t.assigned_team_leads : [];
+                assignedLeadList.forEach(email => {
+                    const clean = String(email || '').trim();
+                    if (!clean) return;
+                    assignedTeamLeads.push({ email: clean, name: clean });
+                });
+                const deptLabel = deptKey ? deptKey.replace(/_/g, ' ').replace(/\b\w/g, s => s.toUpperCase()) : '-';
+                let assignee = t.assigned_employee_name || t.employee_email || t.assigned_to_name || '';
+                if (!assignee) {
+                    assignee = t.assigned_team_lead_name || t.assigned_team_lead_email || '';
+                }
+                if (!assignee && IS_EMPLOYEE_VIEW) {
+                    assignee = CURRENT_USER_EMAIL || '';
+                }
+                if (!assignee) {
+                    assignee = 'Unassigned';
+                }
+                const status = t.status || 'pending';
+                const statusValue = normalizeTaskStatus(status);
+                const priority = t.priority || 'normal';
+                const dueRaw = t.due_date || '';
+                const dueDate = formatShortDate(dueRaw);
+                const dueClass = isPastDue(dueRaw) ? 'text-red-600 font-semibold' : 'text-gray-700';
+                const taskCode = t.task_code || t.taskCode || '';
+                const toTitleCase = (value) => {
+                    return String(value || '')
+                        .toLowerCase()
+                        .split(' ')
+                        .filter(Boolean)
+                        .map(w => w.charAt(0).toUpperCase() + w.slice(1))
+                        .join(' ');
+                };
+                const preserveEmailCase = (value) => {
+                    const raw = String(value || '');
+                    return raw.includes('@') ? raw : toTitleCase(raw);
+                };
+                const taskName = toTitleCase(t.task_name || 'Task');
+                const assigneeLabel = preserveEmailCase(assignee);
+                const comments = Array.isArray(t.employee_comments) ? t.employee_comments : [];
+                const employeeFiles = Array.isArray(t.employee_files) ? t.employee_files : [];
+                const managerFiles = Array.isArray(t.manager_files) ? t.manager_files : [];
+                const pendingApprovals = Number(t.pending_approvals || 0);
+                const reviewItems = Number(t.review_items || 0);
+                const approvedItems = Number(t.approved_items || 0);
+                const hasActivity = (comments.length + employeeFiles.length + managerFiles.length) > 0;
+                let derivedStatus = statusValue;
+                if (pendingApprovals > 0 || reviewItems > 0) {
+                    derivedStatus = 'submitted';
+                } else if (approvedItems > 0 || statusValue === 'completed') {
+                    derivedStatus = 'completed';
+                } else if (statusValue === 'pending' && hasActivity) {
+                    derivedStatus = 'in_progress';
+                } else if (statusValue === 'submitted') {
+                    derivedStatus = 'submitted';
+                }
+                let statusLabel = toTitleCase(String(derivedStatus || '').replace('_', ' '));
+                if (derivedStatus === 'in_progress') {
+                    statusLabel = 'Started';
+                }
+                const priorityLabel = toTitleCase(priority);
+                const deptLabelTitle = toTitleCase(deptLabel);
+
+                const activityItems = [];
+                const allowedEmails = IS_TEAM_LEAD_VIEW
+                    ? new Set([
+                        ...deptEmployeesAll.map(e => (e.email || '').toLowerCase()),
+                        ...deptManagers.map(m => (m.email || '').toLowerCase()),
+                        ...deptTeamLeads.map(l => (l.email || '').toLowerCase()),
+                    ].filter(Boolean))
+                    : null;
+                (comments || []).forEach(c => {
+                    const name = c.employee_name || 'User';
+                    const ts = c.created_at || '';
+                    const message = formatMentions(c.comment || '');
+                    if (allowedEmails) {
+                        const email = String(c.employee_email || '').toLowerCase();
+                        if (email && !allowedEmails.has(email)) return;
+                    }
+                    const statusRaw = String(c.approval_status || '').toLowerCase();
+                    const status = statusRaw || (c.needs_approval ? 'pending' : '');
+                    const canAct = canActOnApproval(status, c.approval_target);
+                    let link = '';
+                    if (canAct && (CAN_APPROVE || CAN_REJECT)) {
+                        const btns = [];
+                        if (CAN_APPROVE) {
+                            btns.push(`
+                                <button type="button"
+                                        class="ml-2 inline-flex items-center justify-center w-6 h-6 rounded-full bg-emerald-100 text-emerald-700 hover:bg-emerald-200"
+                                        data-approval-action="approve"
+                                        data-source-table="task_comments"
+                                        data-source-id="${escapeHtml(c.id)}"
+                                        title="Approve">
+                                    <i class="fas fa-check text-[10px]"></i>
+                                </button>
+                            `);
+                        }
+                        if (CAN_REJECT) {
+                            btns.push(`
+                                <button type="button"
+                                        class="ml-1 inline-flex items-center justify-center w-6 h-6 rounded-full bg-red-100 text-red-700 hover:bg-red-200"
+                                        data-approval-action="reject"
+                                        data-source-table="task_comments"
+                                        data-source-id="${escapeHtml(c.id)}"
+                                        title="Reject">
+                                    <i class="fas fa-times text-[10px]"></i>
+                                </button>
+                            `);
+                        }
+                        link = btns.join(' ');
+                    }
+                    activityItems.push({ ts, html: buildActivityHtml(name, ts, message, link) });
+                });
+                (employeeFiles || []).forEach(f => {
+                    const name = f.employee_email || f.employee_name || 'User';
+                    const ts = f.uploaded_at || '';
+                    const sourceTable = 'task_work_files';
+                    const revertKey = `${sourceTable}-${f.id}`;
+                    const canRevert = !IS_EMPLOYEE_VIEW
+                        && normalizeApprovalTarget(f.approval_target) === currentApprovalTarget()
+                        && String(f.approval_status || '').toLowerCase() === 'review';
+                    const linkParts = [
+                        `<a href="${escapeHtml(f.download_url || '#')}" class="text-blue-600 underline" download>${escapeHtml(f.filename || 'Upload')}</a>`
+                    ];
+                    if (canRevert) {
+                        linkParts.push(`
+                            <button type="button"
+                                    class="ml-2 px-2 py-0.5 rounded-md bg-amber-100 text-amber-700 text-[10px] font-semibold hover:bg-amber-200 inline-flex items-center gap-1"
+                                    data-revert-open
+                                    data-revert-key="${escapeHtml(revertKey)}"
+                                    data-source-table="${escapeHtml(sourceTable)}"
+                                    data-source-id="${escapeHtml(f.id)}"
+                                    data-task-id="${escapeHtml(t.id)}"
+                                    data-bid-id="${escapeHtml(gid)}">
+                                <i class="fas fa-paperclip text-[9px]"></i>
+                                Revert
+                            </button>
+                        `);
+                    }
+                    const link = `${linkParts.join(' ')}`;
+                    const statusRaw = String(f.approval_status || '').toLowerCase();
+                    const status = statusRaw || (f.approval_target ? 'pending' : '');
+                    const message = status === 'review' ? escapeHtml('Document exchange')
+                        : status === 'pending' ? escapeHtml('Submit for approval')
+                        : escapeHtml('Uploaded a file');
+                    if (allowedEmails) {
+                        const email = String(f.employee_email || '').toLowerCase();
+                        if (email && !allowedEmails.has(email)) return;
+                    }
+                    activityItems.push({ ts, html: buildActivityHtml(name, ts, message, link) });
+                });
+                (managerFiles || []).forEach(f => {
+                    const name = f.manager_email || 'Manager';
+                    const ts = f.uploaded_at || '';
+                    const sourceTable = 'task_manager_attachments';
+                    const revertKey = `${sourceTable}-${f.id}`;
+                    const canRevert = !IS_EMPLOYEE_VIEW
+                        && normalizeApprovalTarget(f.approval_target) === currentApprovalTarget()
+                        && String(f.approval_status || '').toLowerCase() === 'review';
+                    const linkParts = [
+                        `<a href="${escapeHtml(f.download_url || '#')}" class="text-blue-600 underline" download>${escapeHtml(f.filename || 'File')}</a>`
+                    ];
+                    if (canRevert) {
+                        linkParts.push(`
+                            <button type="button"
+                                    class="ml-2 px-2 py-0.5 rounded-md bg-amber-100 text-amber-700 text-[10px] font-semibold hover:bg-amber-200 inline-flex items-center gap-1"
+                                    data-revert-open
+                                    data-revert-key="${escapeHtml(revertKey)}"
+                                    data-source-table="${escapeHtml(sourceTable)}"
+                                    data-source-id="${escapeHtml(f.id)}"
+                                    data-task-id="${escapeHtml(t.id)}"
+                                    data-bid-id="${escapeHtml(gid)}">
+                                <i class="fas fa-paperclip text-[9px]"></i>
+                                Revert
+                            </button>
+                        `);
+                    }
+                    const link = `${linkParts.join(' ')}`;
+                    const statusRaw = String(f.approval_status || '').toLowerCase();
+                    const status = statusRaw || (f.approval_target ? 'pending' : '');
+                    const message = status === 'review' ? escapeHtml('Document exchange')
+                        : status === 'pending' ? escapeHtml('Submit for approval')
+                        : escapeHtml('Uploaded a file');
+                    if (allowedEmails) {
+                        const email = String(f.manager_email || '').toLowerCase();
+                        if (email && !allowedEmails.has(email)) return;
+                    }
+                    activityItems.push({ ts, html: buildActivityHtml(name, ts, message, link) });
+                });
+                activityItems.sort((a, b) => String(b.ts || '').localeCompare(String(a.ts || '')));
+                const activityList = activityItems.length
+                    ? activityItems.map(item => `<div class="rounded-md border border-gray-200 bg-gray-50 px-3 py-2">${item.html}</div>`).join('')
+                    : '<div class="text-xs text-gray-500">No activity yet.</div>';
+
+                const currentEmp = deptEmployeesAll.find(e => (e.email || '').toLowerCase() === (CURRENT_USER_EMAIL || '').toLowerCase());
+                const currentEmpId = currentEmp ? Number(currentEmp.id) : null;
+                const leadEmails = new Set(deptTeamLeads.map(l => (l.email || '').toLowerCase()).filter(Boolean));
+                const managerEmails = new Set(deptManagers.map(m => (m.email || '').toLowerCase()).filter(Boolean));
+                const deptEmployees = deptEmployeesAll.filter(e => {
+                    const email = (e.email || '').toLowerCase();
+                    const deptMatch = normalizeDeptKey(e.department || '') === deptKey;
+                    return deptMatch && email && !leadEmails.has(email) && !managerEmails.has(email);
+                });
+                const employeeChecks = deptEmployees.length
+                    ? deptEmployees.map(e => `
+                        <label class="flex items-center gap-2 text-xs text-gray-700 py-0.5">
+                            <input type="checkbox" value="${escapeHtml(e.id)}" data-assign-emp="${t.id}">
+                            <span>${escapeHtml(e.name || e.email || 'Employee')}</span>
+                        </label>
+                    `).join('')
+                    : '<div class="text-xs text-gray-500">No employees found.</div>';
+                const managerChecks = deptManagers.length
+                    ? deptManagers.map(m => {
+                        const mgrId = m.employee_id || '';
+                        const email = m.email || '';
+                        const disabled = mgrId ? '' : 'disabled';
+                        const title = mgrId ? '' : 'title="No employee record found"';
+                        return `
+                        <label class="flex items-center gap-2 text-xs text-gray-700 py-0.5">
+                            <input type="checkbox" value="${escapeHtml(mgrId)}" data-email="${escapeHtml(email)}" data-assign-mgr="${t.id}" ${disabled} ${title}>
+                            <span>${escapeHtml(m.name || m.email || 'Manager')}</span>
+                        </label>
+                        `;
+                    }).join('')
+                    : '<div class="text-xs text-gray-500">No managers found.</div>';
+                const leadChecks = deptTeamLeads.length
+                    ? deptTeamLeads.map(l => {
+                        const leadId = l.id || '';
+                        const email = l.email || '';
+                        return `
+                        <label class="flex items-center gap-2 text-xs text-gray-700 py-0.5">
+                            <input type="checkbox" value="${escapeHtml(leadId)}" data-email="${escapeHtml(email)}" data-assign-lead="${t.id}">
+                            <span>${escapeHtml(email || l.name || 'Team Lead')}</span>
+                        </label>
+                        `;
+                    }).join('')
+                    : '<div class="text-xs text-gray-500">No team leads found.</div>';
+
+                const recipientItems = [];
+                const seenRecipients = new Set();
+                const pushRecipients = (entries, role, labelPrefix) => {
+                    (entries || []).forEach(entry => {
+                        const email = String(entry && entry.email || '').trim();
+                        if (!email) return;
+                        const key = email.toLowerCase();
+                        if (seenRecipients.has(key)) return;
+                        seenRecipients.add(key);
+                        recipientItems.push({
+                            email,
+                            role,
+                            label: `${labelPrefix} - ${email}`
+                        });
+                    });
+                };
+                pushRecipients(assignedTeamLeads, 'team_lead', 'Team Lead');
+                const leadPool = IS_EMPLOYEE_VIEW ? allTeamLeads : (deptTeamLeads.length ? deptTeamLeads : fallbackTeamLeads);
+                const managerPool = IS_EMPLOYEE_VIEW ? allManagers : (deptManagers.length ? deptManagers : fallbackManagers);
+                pushRecipients(leadPool, 'team_lead', 'Team Lead');
+                pushRecipients(managerPool, 'manager', 'Manager');
+                pushRecipients(topAdmins, 'admin', 'Top Admin');
+                const approvalRecipientsHtml = recipientItems.length
+                    ? recipientItems.map(rec => `
+                        <label class="flex items-center gap-2 text-xs text-gray-700 py-0.5">
+                            <input type="checkbox"
+                                   value="${escapeHtml(rec.email)}"
+                                   data-upload-recipient="${t.id}"
+                                   data-recipient-role="${escapeHtml(rec.role)}"
+                                   data-recipient-email="${escapeHtml(rec.email)}">
+                            <span>${escapeHtml(rec.label)}</span>
+                        </label>
+                    `).join('')
+                    : '<div class="text-xs text-gray-500">No approvers found.</div>';
+
+                const assignDate = formatShortDate(t.assigned_at || t.assigned_date || t.created_at || '');
+                const statusCell = `
+                    <span class="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-semibold ${
+                        derivedStatus === 'completed'
+                            ? 'bg-emerald-100 text-emerald-700'
+                            : derivedStatus === 'submitted'
+                                ? 'bg-blue-100 text-blue-700'
+                                : derivedStatus === 'rejected'
+                                    ? 'bg-red-100 text-red-700'
+                                    : derivedStatus === 'in_progress'
+                                        ? 'bg-sky-100 text-sky-700'
+                                        : 'bg-amber-100 text-amber-700'
+                    }">
+                        ${escapeHtml(statusLabel)}
+                    </span>
+                `;
+                return `
+                    <tr class="border-b last:border-b-0">
+                        <td class="p-2 text-xs text-gray-700 whitespace-nowrap">${escapeHtml(taskCode || '-')}</td>
+                        <td class="p-2 text-xs text-gray-700">${escapeHtml(assignDate || '-')}</td>
+                        <td class="p-2 text-xs ${dueClass}">${escapeHtml(dueDate || '-')}</td>
+                        <td class="p-2">
+                            <button type="button"
+                                    class="text-left font-semibold text-gray-900 hover:text-blue-700"
+                                    data-task-open
+                                    data-task-id="${t.id}"
+                                    data-bid-id="${gid}">
+                                ${escapeHtml(taskName)}
+                            </button>
+                            ${t.description ? `<div class="text-xs text-gray-500 whitespace-pre-wrap">${escapeHtml(t.description)}</div>` : ''}
+                        </td>
+                        <td class="p-2 text-xs text-gray-700">${escapeHtml(deptLabelTitle)}</td>
+                        <td class="p-2 text-xs text-gray-700">
+                            <div class="flex items-center gap-2">
+                                <span>${escapeHtml(assigneeLabel)}</span>
+                                ${IS_EMPLOYEE_VIEW ? '' : `
+                                <details class="task-notes relative" data-assign-panel="${t.id}">
+                                    <summary class="w-6 h-6 rounded-full border border-gray-300 bg-white hover:bg-gray-50 text-gray-700 flex items-center justify-center cursor-pointer">
+                                        <i class="fas fa-plus text-[10px]"></i>
+                                    </summary>
+                                    <div class="task-action-panel absolute right-0 mt-2 w-64 rounded-lg border border-gray-200 bg-white shadow-lg z-20 p-3">
+                                        <div class="flex items-center justify-between gap-2 mb-2">
+                                            <div class="text-xs font-semibold text-gray-700">Assign members</div>
+                                            <button type="button" class="text-gray-400 hover:text-gray-700" data-close-details>
+                                                <i class="fas fa-times text-[11px]"></i>
+                                            </button>
+                                        </div>
+                                        <button type="button"
+                                                class="mb-2 px-2 py-1 rounded-md bg-emerald-100 text-emerald-700 text-xs font-semibold hover:bg-emerald-200 w-full"
+                                                data-assign-me
+                                                data-task-id="${t.id}"
+                                                data-bid-id="${gid}"
+                                                data-dept="${escapeHtml(deptKey)}"
+                                                data-emp-id="${escapeHtml(currentEmpId || '')}">
+                                            Assign to me
+                                        </button>
+                                        <div class="text-xs font-semibold text-gray-600 mt-2">Team leads</div>
+                                        <div class="mt-1 max-h-24 overflow-y-auto">${leadChecks}</div>
+                                        <div class="text-xs font-semibold text-gray-600 mt-3">Managers</div>
+                                        <div class="mt-1 max-h-24 overflow-y-auto">${managerChecks}</div>
+                                        <div class="text-xs font-semibold text-gray-600 mt-3">Employees</div>
+                                        <div class="mt-1 max-h-24 overflow-y-auto">${employeeChecks}</div>
+                                        <div class="flex justify-end mt-3">
+                                            <button type="button"
+                                                    class="px-2 py-1 rounded-md bg-emerald-100 text-emerald-700 text-xs font-semibold hover:bg-emerald-200"
+                                                    data-assign-save
+                                                    data-task-id="${t.id}"
+                                                    data-bid-id="${gid}"
+                                                    data-dept="${escapeHtml(deptKey)}">
+                                                Assign
+                                            </button>
+                                        </div>
+                                    </div>
+                                </details>
+                                `}
+                            </div>
+                        </td>
+                        <td class="p-2 text-xs text-gray-700">${statusCell}</td>
+                        <td class="p-2 text-xs text-gray-700">${escapeHtml(priorityLabel)}</td>
+                        <td class="p-2 text-xs text-gray-700">
+                            <details class="task-notes relative" data-action-panel="${t.id}">
+                                <summary class="w-7 h-7 rounded-md border border-gray-300 bg-white hover:bg-gray-50 text-gray-700 flex items-center justify-center cursor-pointer">
+                                    <i class="fas fa-ellipsis-h text-[10px]"></i>
+                                </summary>
+                                <div class="task-action-panel absolute right-0 mt-2 w-72 rounded-lg border border-gray-200 bg-white shadow-lg z-20 p-3">
+                                    <div class="flex items-center justify-between gap-2 mb-2">
+                                        <div class="text-xs font-semibold text-gray-700">Activity</div>
+                                        <button type="button" class="text-gray-400 hover:text-gray-700" data-close-details>
+                                            <i class="fas fa-times text-[11px]"></i>
+                                        </button>
+                                    </div>
+                                    <div class="space-y-2 max-h-40 overflow-y-auto">
+                                        ${activityList}
+                                    </div>
+                                    <div class="pt-2 mt-2 border-t border-gray-200">
+                                        <div class="text-xs font-semibold text-gray-700 mb-2">Upload document</div>
+                                        <input type="file" class="w-full border border-gray-300 rounded-md px-2 py-2 text-xs" data-upload-file="${t.id}">
+                                        <input type="text" class="w-full border border-gray-300 rounded-md px-2 py-2 text-xs mt-2" placeholder="Notes for approval" data-upload-desc="${t.id}">
+                                        <div class="mt-2">
+                                            <div class="text-[11px] font-semibold text-gray-600 mb-1">Approval recipients (select one or more)</div>
+                                            <div class="relative">
+                                                <details class="approval-dropdown group" data-approval-dropdown="${t.id}">
+                                                    <summary class="w-full border border-gray-300 rounded-md px-2 py-2 text-xs bg-white flex items-center justify-between cursor-pointer">
+                                                          <span data-approval-summary="${t.id}" class="approval-summary">Select approvers</span>
+                                                          <i class="fas fa-chevron-down text-[10px] text-gray-500 group-open:rotate-180 transition-transform"></i>
+                                                      </summary>
+                                                    <div class="absolute left-0 right-0 mt-2 z-30 border border-gray-200 rounded-md bg-white shadow-lg p-2 max-h-40 overflow-y-auto">
+                                                        ${approvalRecipientsHtml}
+                                                    </div>
+                                                </details>
+                                            </div>
+                                        </div>
+                                        <div class="flex justify-end gap-2 mt-2">
+                                            <button type="button"
+                                                    class="px-2 py-1 rounded-md bg-gray-100 text-gray-700 text-xs font-semibold hover:bg-gray-200"
+                                                    data-upload-submit
+                                                    data-task-id="${t.id}"
+                                                    data-bid-id="${gid}"
+                                                    data-needs-approval="0">
+                                                Document exchange
+                                            </button>
+                                            <button type="button"
+                                                    class="px-2 py-1 rounded-md bg-emerald-100 text-emerald-700 text-xs font-semibold hover:bg-emerald-200"
+                                                    data-upload-submit
+                                                    data-task-id="${t.id}"
+                                                    data-bid-id="${gid}"
+                                                    data-needs-approval="1">
+                                                Submit for approval
+                                            </button>
+                                        </div>
+                                    </div>
+                                    <div class="pt-2 mt-2 border-t border-gray-200">
+                                        <div class="text-xs font-semibold text-gray-700 mb-2">Add a comment</div>
+                                        <textarea class="w-full border border-gray-300 rounded-md px-2 py-2 text-xs" rows="2" placeholder="Write a comment with @email mentions" data-note-input="${t.id}"></textarea>
+                                        <div class="flex justify-end mt-2">
+                                            <button type="button"
+                                                    class="px-2 py-1 rounded-md bg-emerald-100 text-emerald-700 text-xs font-semibold hover:bg-emerald-200"
+                                                    data-note-submit
+                                                    data-task-id="${t.id}"
+                                                    data-bid-id="${gid}">
+                                                Send
+                                            </button>
+                                        </div>
+                                    </div>
+                                </div>
+                            </details>
+                        </td>
+                    </tr>
+                `;
+                } catch (e) {
+                    console.error('renderBidTask error', e, t);
+                    const fallbackTask = escapeHtml((t && (t.task_name || t.task || 'Task')) || 'Task');
+                    return `
+                        <tr class="border-b last:border-b-0">
+                            <td class="p-2 text-xs text-gray-700">-</td>
+                            <td class="p-2 text-xs text-gray-700">-</td>
+                            <td class="p-2 text-xs text-gray-700">-</td>
+                            <td class="p-2 text-xs text-gray-900 font-semibold">${fallbackTask}</td>
+                            <td class="p-2 text-xs text-gray-700">-</td>
+                            <td class="p-2 text-xs text-gray-700">-</td>
+                            <td class="p-2 text-xs text-gray-700">Pending</td>
+                            <td class="p-2 text-xs text-gray-700">-</td>
+                            <td class="p-2 text-xs text-gray-700">-</td>
+                        </tr>
+                    `;
+                }
+            }).join('');
+        }
+
+        function buildTaskDetailHtml(task) {
+            const description = (task.description || '').trim();
+            const comments = Array.isArray(task.employee_comments) ? task.employee_comments : [];
+            const employeeFiles = Array.isArray(task.employee_files) ? task.employee_files : [];
+            const managerFiles = Array.isArray(task.manager_files) ? task.manager_files : [];
+            const allFiles = [...employeeFiles, ...managerFiles];
+            const sections = [];
+            if (description) {
+                sections.push(`<div><div class="text-xs font-semibold text-gray-600 mb-1">Notes</div><div class="whitespace-pre-wrap text-gray-800">${escapeHtml(description)}</div></div>`);
+            }
+            if (allFiles.length) {
+                const filesHtml = allFiles.map(f => {
+                    const statusRaw = String(f.approval_status || '').toLowerCase();
+                    const status = statusRaw || (f.approval_target ? 'pending' : '');
+                    const statusLabel = status ? status.charAt(0).toUpperCase() + status.slice(1) : 'Uploaded';
+                    return `
+                        <div class="flex items-center justify-between gap-2 text-xs">
+                            <a href="${escapeHtml(f.download_url || '#')}" class="text-blue-600 underline" download>${escapeHtml(f.filename || 'File')}</a>
+                            <span class="text-gray-400">${escapeHtml(f.uploaded_at || '')}</span>
+                            <span class="text-[10px] text-gray-500">${escapeHtml(statusLabel)}</span>
+                        </div>
+                    `;
+                }).join('');
+                sections.push(`<div><div class="text-xs font-semibold text-gray-600 mb-1">Documents</div><div class="space-y-1">${filesHtml}</div></div>`);
+            }
+            if (comments.length) {
+                const commentsHtml = comments.map(c => `
+                    <div class="text-xs text-gray-700">
+                        <span class="font-semibold">${escapeHtml(c.employee_name || 'User')}:</span>
+                        <span>${escapeHtml(c.comment || '')}</span>
+                    </div>
+                `).join('');
+                sections.push(`<div><div class="text-xs font-semibold text-gray-600 mb-1">Comments</div><div class="space-y-1">${commentsHtml}</div></div>`);
+            }
+            if (!sections.length) {
+                return '<div class="text-xs text-gray-500">No notes, documents, or comments yet.</div>';
+            }
+            return sections.join('');
+        }
+
+        async function triggerTaskStarted(taskId) {
+            try {
+                const fd = new FormData();
+                fd.append('status', 'in_progress');
+                await fetch(`/task/${encodeURIComponent(taskId)}/update_status`, {
+                    method: 'POST',
+                    credentials: 'include',
+                    body: fd
+                });
+            } catch (e) {
+                // ignore
+            }
+        }
+
+        function openTaskDetailModal(task, gid) {
+            const modal = document.getElementById('taskDetailModal');
+            const titleEl = document.getElementById('taskDetailTitle');
+            const bodyEl = document.getElementById('taskDetailBody');
+            if (!modal || !titleEl || !bodyEl || !task) return;
+            titleEl.textContent = task.task_name || 'Task';
+            bodyEl.innerHTML = buildTaskDetailHtml(task);
+            modal.classList.remove('hidden');
+            const statusValue = normalizeTaskStatus(task.status || 'pending');
+            if (IS_EMPLOYEE_VIEW && statusValue === 'pending') {
+                triggerTaskStarted(task.id);
+                loadBidTasks(gid);
+            }
+        }
+
+        function updateBidStatusBadges(gid, tasks) {
+            const target = document.querySelector(`[data-bid-status="${gid}"]`);
+            if (!target) return;
+            const counts = { pending: 0, submitted: 0, completed: 0 };
+            (tasks || []).forEach(t => {
+                const s = normalizeTaskStatus(t.status || '');
+                if (s === 'completed') {
+                    counts.completed += 1;
+                } else if (s === 'submitted') {
+                    counts.submitted += 1;
+                } else {
+                    counts.pending += 1;
+                }
+            });
+            const badge = (label, count, cls, icon) => `
+                <span class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[9px] font-semibold ${cls}" title="${label}">
+                    <i class="fas ${icon} text-[9px]"></i>
+                    ${count}
+                </span>
+            `;
+            target.innerHTML = [
+                badge('Pending', counts.pending, 'bg-amber-100 text-amber-700', 'fa-hourglass-half'),
+                badge('Submitted', counts.submitted, 'bg-blue-100 text-blue-700', 'fa-paper-plane'),
+                badge('Completed', counts.completed, 'bg-emerald-100 text-emerald-700', 'fa-check-circle'),
+            ].join('');
+        }
+
+        function filterTasksForViewer(tasks) {
+            if (IS_EMPLOYEE_VIEW || IS_MANAGER_VIEW) {
+                return tasks;
+            }
+            if (!IS_TEAM_LEAD_VIEW) {
+                return tasks;
+            }
+            return tasks;
+        }
+
+        async function loadBidTasks(gid) {
+            const tbody = document.getElementById(`taskRows-${gid}`);
+            if (tbody) {
+                tbody.innerHTML = '<tr><td colspan="9" class="p-4 text-xs text-gray-500">Loading tasks...</td></tr>';
+            }
+            const scope = TASKS_SCOPE_ALL ? '?scope=all' : '';
+            try {
+                await ensureTopAdmins();
+                const endpoint = IS_EMPLOYEE_VIEW
+                    ? `/api/employee/bids/${encodeURIComponent(gid)}/tasks`
+                    : `/api/team/${encodeURIComponent(DEPT_KEY)}/bids/${encodeURIComponent(gid)}/tasks${scope}`;
+                const res = await fetch(endpoint, { credentials: 'include' });
+                const data = await res.json().catch(() => ({}));
+                const tasks = Array.isArray(data.tasks) ? data.tasks : [];
+                lastTasksByBid[String(gid)] = tasks;
+                let deptKeys = Array.from(new Set(tasks.map(t => normalizeDeptKey(
+                    t.department ||
+                    t.stage ||
+                    t.team ||
+                    t.assigned_department ||
+                    t.assignee_department ||
+                    t.assigned_dept ||
+                    DEPT_KEY ||
+                    CURRENT_USER_ROLE ||
+                    ''
+                )).filter(Boolean)));
+                if (!deptKeys.length && DEPT_KEY) {
+                    const fallbackKey = normalizeDeptKey(DEPT_KEY);
+                    if (fallbackKey) {
+                        deptKeys = [fallbackKey];
+                    }
+                }
+                if (!deptKeys.length && CURRENT_USER_ROLE) {
+                    const roleKey = normalizeDeptKey(CURRENT_USER_ROLE);
+                    if (roleKey) {
+                        deptKeys = [roleKey];
+                    }
+                }
+                if (!deptKeys.length) {
+                    deptKeys = ['all'];
+                }
+                try {
+                    await Promise.all(deptKeys.map(d => Promise.all([ensureDeptEmployees(d), ensureDeptTeamLeads(d), ensureDeptManagers(d)])));
+                } catch (e) {
+                    // Ignore cache prefetch errors; still render tasks.
+                }
+                const filteredTasks = filterTasksForViewer(tasks);
+                try {
+                    renderBidTasks(gid, filteredTasks);
+                    updateBidStatusBadges(gid, filteredTasks);
+                } catch (e) {
+                    if (tbody) {
+                        tbody.innerHTML = '<tr><td colspan="9" class="p-4 text-xs text-red-500">Failed to render tasks.</td></tr>';
+                    }
+                }
+                try {
+                    renderProjectActivity(gid, filteredTasks);
+                } catch (e) {
+                    // Ignore activity rendering errors.
+                }
+            } catch (e) {
+                if (tbody) {
+                    tbody.innerHTML = '<tr><td colspan="9" class="p-4 text-xs text-red-500">Failed to load tasks.</td></tr>';
+                }
+            }
+        }
+
+        function renderProjectActivity(gid, tasks) {
+            const panel = document.querySelector(`[data-project-activity-panel="${gid}"]`);
+            const list = document.querySelector(`[data-project-activity-list="${gid}"]`);
+            if (!panel || !list) return;
+            let projectActivity = [];
+            try {
+                projectActivity = JSON.parse(panel.getAttribute('data-project-activity') || '[]') || [];
+            } catch (e) {
+                projectActivity = [];
+            }
+            const items = [];
+            (projectActivity || []).forEach(a => {
+                const name = a.author || 'User';
+                const ts = a.created_at || a.ts || '';
+                const message = escapeHtml(a.message || '');
+                items.push({ ts, html: buildActivityHtml(name, ts, message, '') });
+            });
+            (tasks || []).forEach(t => {
+                const taskName = t.task_name || 'Task';
+                const dept = normalizeDeptKey(t.department || t.stage || '');
+                const deptLabel = dept ? dept.replace(/_/g, ' ').replace(/\b\w/g, s => s.toUpperCase()) : '';
+                (t.employee_comments || []).forEach(c => {
+                    const name = c.employee_name || 'User';
+                    const ts = c.created_at || '';
+                    const message = formatMentions(c.comment || '');
+                    const statusRaw = String(c.approval_status || '').toLowerCase();
+                    const status = statusRaw || (c.needs_approval ? 'pending' : '');
+                    const canAct = canActOnApproval(status, c.approval_target);
+                    let link = '';
+                    if (canAct && (CAN_APPROVE || CAN_REJECT)) {
+                        const btns = [];
+                        if (CAN_APPROVE) {
+                            btns.push(`
+                                <button type="button"
+                                        class="ml-2 inline-flex items-center justify-center w-6 h-6 rounded-full bg-emerald-100 text-emerald-700 hover:bg-emerald-200"
+                                        data-approval-action="approve"
+                                        data-source-table="task_comments"
+                                        data-source-id="${escapeHtml(c.id)}"
+                                        title="Approve">
+                                    <i class="fas fa-check text-[10px]"></i>
+                                </button>
+                            `);
+                        }
+                        if (CAN_REJECT) {
+                            btns.push(`
+                                <button type="button"
+                                        class="ml-1 inline-flex items-center justify-center w-6 h-6 rounded-full bg-red-100 text-red-700 hover:bg-red-200"
+                                        data-approval-action="reject"
+                                        data-source-table="task_comments"
+                                        data-source-id="${escapeHtml(c.id)}"
+                                        title="Reject">
+                                    <i class="fas fa-times text-[10px]"></i>
+                                </button>
+                            `);
+                        }
+                        link = btns.join(' ');
+                    }
+                    items.push({
+                        ts,
+                        html: buildActivityHtml(`${name}${taskName ? ` - ${taskName}` : ''}${deptLabel ? ` (${deptLabel})` : ''}`, ts, message, link)
+                    });
+                });
+                (t.employee_files || []).forEach(f => {
+                    const name = f.employee_email || f.employee_name || 'User';
+                    const ts = f.uploaded_at || '';
+                    const linkParts = [
+                        `<a href="${escapeHtml(f.download_url || '#')}" class="text-blue-600 underline" download>${escapeHtml(f.filename || 'File')}</a>`
+                    ];
+                    const statusRaw = String(f.approval_status || '').toLowerCase();
+                    const status = statusRaw || (f.approval_target ? 'pending' : '');
+                    const message = status === 'review' ? escapeHtml('Document exchange')
+                        : status === 'pending' ? escapeHtml('Submit for approval')
+                        : escapeHtml('Uploaded a file');
+                    const target = f.approval_target ? ` → ${escapeHtml(String(f.approval_target).replace('_', ' '))}` : '';
+                    const canAct = canActOnApproval(status, f.approval_target);
+                    if (canAct && (CAN_APPROVE || CAN_REJECT)) {
+                        if (CAN_APPROVE) {
+                            linkParts.push(`
+                                <button type="button"
+                                        class="ml-2 inline-flex items-center justify-center w-6 h-6 rounded-full bg-emerald-100 text-emerald-700 hover:bg-emerald-200"
+                                        data-approval-action="approve"
+                                        data-source-table="task_work_files"
+                                        data-source-id="${escapeHtml(f.id)}"
+                                        title="Approve">
+                                    <i class="fas fa-check text-[10px]"></i>
+                                </button>
+                            `);
+                        }
+                        if (CAN_REJECT) {
+                            linkParts.push(`
+                                <button type="button"
+                                        class="ml-1 inline-flex items-center justify-center w-6 h-6 rounded-full bg-red-100 text-red-700 hover:bg-red-200"
+                                        data-approval-action="reject"
+                                        data-source-table="task_work_files"
+                                        data-source-id="${escapeHtml(f.id)}"
+                                        title="Reject">
+                                    <i class="fas fa-times text-[10px]"></i>
+                                </button>
+                            `);
+                        }
+                    }
+                    const link = linkParts.join(' ');
+                    items.push({
+                        ts,
+                        html: buildActivityHtml(`${name}${taskName ? ` - ${taskName}` : ''}${target}`, ts, message, link)
+                    });
+                });
+                (t.manager_files || []).forEach(f => {
+                    const name = f.manager_email || 'Manager';
+                    const ts = f.uploaded_at || '';
+                    const linkParts = [
+                        `<a href="${escapeHtml(f.download_url || '#')}" class="text-blue-600 underline" download>${escapeHtml(f.filename || 'File')}</a>`
+                    ];
+                    const statusRaw = String(f.approval_status || '').toLowerCase();
+                    const status = statusRaw || (f.approval_target ? 'pending' : '');
+                    const message = status === 'review' ? escapeHtml('Document exchange')
+                        : status === 'pending' ? escapeHtml('Submit for approval')
+                        : escapeHtml('Uploaded a file');
+                    const target = f.approval_target ? ` → ${escapeHtml(String(f.approval_target).replace('_', ' '))}` : '';
+                    const canAct = canActOnApproval(status, f.approval_target);
+                    if (canAct && (CAN_APPROVE || CAN_REJECT)) {
+                        if (CAN_APPROVE) {
+                            linkParts.push(`
+                                <button type="button"
+                                        class="ml-2 inline-flex items-center justify-center w-6 h-6 rounded-full bg-emerald-100 text-emerald-700 hover:bg-emerald-200"
+                                        data-approval-action="approve"
+                                        data-source-table="task_manager_attachments"
+                                        data-source-id="${escapeHtml(f.id)}"
+                                        title="Approve">
+                                    <i class="fas fa-check text-[10px]"></i>
+                                </button>
+                            `);
+                        }
+                        if (CAN_REJECT) {
+                            linkParts.push(`
+                                <button type="button"
+                                        class="ml-1 inline-flex items-center justify-center w-6 h-6 rounded-full bg-red-100 text-red-700 hover:bg-red-200"
+                                        data-approval-action="reject"
+                                        data-source-table="task_manager_attachments"
+                                        data-source-id="${escapeHtml(f.id)}"
+                                        title="Reject">
+                                    <i class="fas fa-times text-[10px]"></i>
+                                </button>
+                            `);
+                        }
+                    }
+                    const link = linkParts.join(' ');
+                    items.push({
+                        ts,
+                        html: buildActivityHtml(`${name}${taskName ? ` - ${taskName}` : ''}${target}`, ts, message, link)
+                    });
+                });
+            });
+            items.sort((a, b) => String(b.ts || '').localeCompare(String(a.ts || '')));
+            list.innerHTML = items.length
+                ? items.map(item => `<div class="rounded-md border border-gray-200 bg-gray-50 px-3 py-2">${item.html}</div>`).join('')
+                : '<div class="text-xs text-gray-500">No activity yet.</div>';
+        }
+
+        function toggleBidDetails(gid, forceOpen) {
+            const row = document.querySelector(`[data-details-row="${gid}"]`);
+            const icon = document.querySelector(`[data-expand-icon="${gid}"]`);
+            const btn = document.querySelector(`[data-expand-bid="${gid}"]`);
+            const activityPanel = document.querySelector(`[data-project-activity-panel="${gid}"]`);
+            if (!row || !icon || !btn) return;
+            const isOpen = !row.classList.contains('hidden');
+            const nextOpen = typeof forceOpen === 'boolean' ? forceOpen : !isOpen;
+            row.classList.toggle('hidden', !nextOpen);
+            icon.classList.toggle('rotate-90', nextOpen);
+            btn.setAttribute('aria-expanded', nextOpen ? 'true' : 'false');
+            if (activityPanel && nextOpen) {
+                activityPanel.classList.remove('hidden');
+            }
+            if (nextOpen && !loadedTaskPanels.has(gid)) {
+                loadedTaskPanels.add(gid);
+                loadBidTasks(gid);
+            }
+        }
+
+        async function appendProjectComment(gid, message) {
+            const panel = document.querySelector(`[data-project-activity-panel="${gid}"]`);
+            if (!panel) return;
+            let current = [];
+            try {
+                current = JSON.parse(panel.getAttribute('data-project-activity') || '[]') || [];
+            } catch (e) {
+                current = [];
+            }
+            const now = new Date();
+            const timestamp = now.toISOString().slice(0, 16).replace('T', ' ');
+            const entry = {
+                message: message,
+                created_at: timestamp,
+                author: (CURRENT_USER_EMAIL || 'User')
+            };
+            current.push(entry);
+            panel.setAttribute('data-project-activity', JSON.stringify(current));
+            renderProjectActivity(gid, lastTasksByBid[String(gid)] || []);
+            try {
+                const res = await fetch('/api/bid-analyzer/assign-detail', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    credentials: 'include',
+                    body: JSON.stringify({ g_id: Number(gid), data: { project_activity: current } })
+                });
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok || data.error) {
+                    throw new Error(data.error || 'failed');
+                }
+            } catch (e) {
+                showToast('Failed to save comment', 'error');
+            }
+        }
+
+        document.addEventListener('click', function (event) {
+            const proposalBtn = event.target.closest('[data-generate-proposal]');
+            if (proposalBtn) {
+                event.preventDefault();
+                event.stopPropagation();
+                const bidId = proposalBtn.getAttribute('data-bid-id');
+                const bidName = proposalBtn.getAttribute('data-bid-name');
+                const company = proposalBtn.getAttribute('data-company');
+                generateProposal(bidId, bidName, company);
+                return;
+            }
+            const expandBtn = event.target.closest('[data-expand-bid]');
+            if (expandBtn) {
+                const gid = expandBtn.getAttribute('data-expand-bid');
+                toggleBidDetails(gid);
+                return;
+            }
+            const closeBtn = event.target.closest('[data-close-bid]');
+            if (closeBtn) {
+                const gid = closeBtn.getAttribute('data-close-bid');
+                toggleBidDetails(gid, false);
+            }
+        });
+
+        document.addEventListener('click', function (event) {
+            const closeBtn = event.target.closest('[data-activity-close]');
+            if (!closeBtn) return;
+            const gid = closeBtn.getAttribute('data-activity-close');
+            const panel = document.querySelector(`[data-project-activity-panel="${gid}"]`);
+            if (panel) {
+                panel.classList.add('hidden');
+            }
+        });
+
+        document.addEventListener('click', function (event) {
+            const submitBtn = event.target.closest('[data-project-comment-submit]');
+            if (!submitBtn) return;
+            const gid = submitBtn.getAttribute('data-project-comment-submit');
+            const input = document.querySelector(`[data-project-comment-input="${gid}"]`);
+            const message = (input && input.value || '').trim();
+            if (!message) {
+                showToast('Add a comment first', 'error');
+                return;
+            }
+            submitBtn.disabled = true;
+            appendProjectComment(gid, message).finally(() => {
+                if (input) input.value = '';
+                submitBtn.disabled = false;
+            });
+        });
+
+        document.addEventListener('click', async function (event) {
+            const noteBtn = event.target.closest('[data-note-submit]');
+            if (!noteBtn) return;
+            const taskId = noteBtn.getAttribute('data-task-id');
+            const bidId = noteBtn.getAttribute('data-bid-id');
+            const input = document.querySelector(`[data-note-input="${taskId}"]`);
+            if (!input) return;
+            const comment = (input.value || '').trim();
+            if (!comment) {
+                showToast('Add a note first', 'error');
+                return;
+            }
+            noteBtn.disabled = true;
+            try {
+                const res = await fetch(`/task/${encodeURIComponent(taskId)}/comment`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    credentials: 'include',
+                    body: JSON.stringify({ comment })
+                });
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok) {
+                    throw new Error((data && (data.error || data.message)) || 'failed');
+                }
+                input.value = '';
+                if (bidId) {
+                    await loadBidTasks(bidId);
+                }
+                showToast('Note added');
+            } catch (e) {
+                showToast(`Failed to add note${e && e.message ? `: ${e.message}` : ''}`, 'error');
+            } finally {
+                noteBtn.disabled = false;
+            }
+        });
+
+        document.addEventListener('click', async function (event) {
+            const assignMeBtn = event.target.closest('[data-assign-me]');
+            if (!assignMeBtn) return;
+            const taskId = assignMeBtn.getAttribute('data-task-id');
+            const bidId = assignMeBtn.getAttribute('data-bid-id');
+            const dept = assignMeBtn.getAttribute('data-dept') || DEPT_KEY;
+            let empId = assignMeBtn.getAttribute('data-emp-id');
+            if (!empId) {
+                const deptEmployees = deptEmployeesCache[(dept || '').toLowerCase()] || [];
+                const match = deptEmployees.find(e => (e.email || '').toLowerCase() === (CURRENT_USER_EMAIL || '').toLowerCase());
+                empId = match ? String(match.id) : '';
+            }
+            assignMeBtn.disabled = true;
+            try {
+                let res;
+                if (empId) {
+                    const form = new FormData();
+                    form.append('assigned_to', String(empId));
+                    res = await fetch(`/task/${encodeURIComponent(taskId)}/update`, {
+                        method: 'POST',
+                        credentials: 'include',
+                        body: form
+                    });
+                } else {
+                    res = await fetch(`/task/${encodeURIComponent(taskId)}/assign-self`, {
+                        method: 'POST',
+                        credentials: 'include'
+                    });
+                }
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok || data.error) {
+                    if (empId) {
+                        const res2 = await fetch(`/task/${encodeURIComponent(taskId)}/assign-self`, {
+                            method: 'POST',
+                            credentials: 'include'
+                        });
+                        const data2 = await res2.json().catch(() => ({}));
+                        if (!res2.ok || data2.error) {
+                            throw new Error((data2 && (data2.error || data2.message)) || 'failed');
+                        }
+                    } else {
+                        throw new Error((data && (data.error || data.message)) || 'failed');
+                    }
+                }
+                if (bidId) {
+                    await loadBidTasks(bidId);
+                }
+                showToast('Assigned to you');
+            } catch (e) {
+                showToast(`Failed to assign to you${e && e.message ? `: ${e.message}` : ''}`, 'error');
+            } finally {
+                assignMeBtn.disabled = false;
+            }
+        });
+
+        document.addEventListener('click', function (event) {
+            const closeBtn = event.target.closest('[data-close-details]');
+            if (!closeBtn) return;
+            const details = closeBtn.closest('details');
+            if (details) details.open = false;
+        });
+
+        document.addEventListener('click', function (event) {
+            const taskBtn = event.target.closest('[data-task-open]');
+            if (!taskBtn) return;
+            const taskId = Number(taskBtn.getAttribute('data-task-id') || 0);
+            const gid = String(taskBtn.getAttribute('data-bid-id') || '');
+            if (!taskId || !gid) return;
+            const tasks = lastTasksByBid[String(gid)] || [];
+            const task = tasks.find(t => Number(t.id) === Number(taskId));
+            if (task) {
+                openTaskDetailModal(task, gid);
+            }
+        });
+
+        document.addEventListener('click', function (event) {
+            const closeBtn = event.target.closest('[data-task-detail-close]');
+            if (!closeBtn) return;
+            const modal = document.getElementById('taskDetailModal');
+            if (modal) modal.classList.add('hidden');
+        });
+
+        function _approvalInitial(email) {
+            const val = String(email || '').trim();
+            if (!val) return '?';
+            const local = val.split('@')[0] || val;
+            return String(local.charAt(0) || '?').toUpperCase();
+        }
+
+        function updateApprovalSummary(taskId) {
+            const summary = document.querySelector(`[data-approval-summary="${taskId}"]`);
+            if (!summary) return;
+            const selected = Array.from(document.querySelectorAll(`[data-upload-recipient="${taskId}"]:checked`));
+            if (!selected || !selected.length) {
+                summary.textContent = 'Select approvers';
+                return;
+            }
+            const maxAvatars = 4;
+            const recipients = selected.map(input => {
+                const email = (input.getAttribute('data-recipient-email') || input.value || '').trim();
+                return { email, initial: _approvalInitial(email) };
+            }).filter(r => r.email);
+            const visible = recipients.slice(0, maxAvatars);
+            const remaining = recipients.length - visible.length;
+            const avatarsHtml = visible.map(r => `
+                <span class="approval-avatar" title="${escapeHtml(r.email)}">${escapeHtml(r.initial)}</span>
+            `).join('');
+            const moreHtml = remaining > 0
+                ? `<span class="approval-avatar approval-avatar--more" title="+${remaining} more">+${remaining}</span>`
+                : '';
+            summary.innerHTML = `
+                <span class="approval-summary-text">${recipients.length} selected</span>
+                <span class="approval-avatar-stack">${avatarsHtml}${moreHtml}</span>
+            `;
+        }
+
+        document.addEventListener('change', function (event) {
+            const checkbox = event.target.closest('[data-upload-recipient]');
+            if (!checkbox) return;
+            const taskId = checkbox.getAttribute('data-upload-recipient');
+            if (taskId) updateApprovalSummary(taskId);
+        });
+
+        document.addEventListener('click', function (event) {
+            const dropdown = event.target.closest('details[data-approval-dropdown]');
+            if (dropdown) {
+                document.querySelectorAll('details[data-approval-dropdown]').forEach(d => {
+                    if (d !== dropdown) d.removeAttribute('open');
+                });
+                return;
+            }
+            document.querySelectorAll('details[data-approval-dropdown]').forEach(d => d.removeAttribute('open'));
+        });
+
+
+        document.addEventListener('click', async function (event) {
+            const uploadBtn = event.target.closest('[data-upload-submit]');
+            if (!uploadBtn) return;
+            const taskId = uploadBtn.getAttribute('data-task-id');
+            const bidId = uploadBtn.getAttribute('data-bid-id');
+            const needsApproval = (uploadBtn.getAttribute('data-needs-approval') || '0') === '1';
+            const fileInput = document.querySelector(`[data-upload-file="${taskId}"]`);
+            const descInput = document.querySelector(`[data-upload-desc="${taskId}"]`);
+            const recipientInputs = document.querySelectorAll(`[data-upload-recipient="${taskId}"]:checked`);
+            const file = fileInput && fileInput.files ? fileInput.files[0] : null;
+            if (!file) {
+                showToast('Select a file to upload', 'error');
+                return;
+            }
+            const recipients = Array.from(recipientInputs || []).map(input => {
+                return (input.getAttribute('data-recipient-email') || input.value || '').trim();
+            }).filter(Boolean);
+            const roles = new Set(Array.from(recipientInputs || []).map(input => {
+                return (input.getAttribute('data-recipient-role') || '').trim();
+            }).filter(Boolean));
+            let approvalTarget = '';
+            if (roles.has('admin')) {
+                approvalTarget = 'admin';
+            } else if (roles.has('manager')) {
+                approvalTarget = 'manager';
+            } else if (roles.has('team_lead')) {
+                approvalTarget = 'team_lead';
+            }
+            if (!approvalTarget) {
+                if (IS_EMPLOYEE_VIEW) approvalTarget = 'team_lead';
+                else if (IS_TEAM_LEAD_VIEW) approvalTarget = 'manager';
+                else if (IS_MANAGER_VIEW) approvalTarget = 'admin';
+                else approvalTarget = 'admin';
+            }
+            uploadBtn.disabled = true;
+            try {
+                const form = new FormData();
+                form.append('file', file);
+                if (descInput && descInput.value) {
+                    form.append('description', descInput.value.trim());
+                }
+                if (approvalTarget) {
+                    form.append('approval_target', approvalTarget);
+                }
+                if (recipients.length) {
+                    form.append('recipients', recipients.join(','));
+                }
+                form.append('needs_approval', needsApproval ? '1' : '0');
+                const res = await fetch(`/task/${encodeURIComponent(taskId)}/upload`, {
+                    method: 'POST',
+                    credentials: 'include',
+                    body: form
+                });
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok || data.error) {
+                    throw new Error((data && (data.error || data.message)) || 'failed');
+                }
+                if (fileInput) fileInput.value = '';
+                if (descInput) descInput.value = '';
+                if (recipientInputs && recipientInputs.length) {
+                    recipientInputs.forEach(input => {
+                        input.checked = false;
+                    });
+                }
+                updateApprovalSummary(taskId);
+                if (bidId) {
+                    await loadBidTasks(bidId);
+                }
+                showToast(needsApproval ? 'Submitted for approval' : 'Document uploaded');
+            } catch (e) {
+                showToast(`Upload failed${e && e.message ? `: ${e.message}` : ''}`, 'error');
+            } finally {
+                uploadBtn.disabled = false;
+            }
+        });
+
+        document.addEventListener('click', async function (event) {
+            const actionBtn = event.target.closest('[data-approval-action]');
+            if (!actionBtn) return;
+            const action = actionBtn.getAttribute('data-approval-action');
+            const sourceTable = actionBtn.getAttribute('data-source-table');
+            const sourceId = Number(actionBtn.getAttribute('data-source-id') || 0);
+            if (!action || !sourceTable || !sourceId) return;
+            let decisionNote = '';
+            let submitAction = action;
+            if (action === 'revert') {
+                const taskId = actionBtn.getAttribute('data-task-id') || '';
+                openRevertModal({
+                    sourceTable,
+                    sourceId,
+                    taskId,
+                    bidId: ''
+                });
+                return;
+            }
+            actionBtn.disabled = true;
+            try {
+                const res = await fetch('/approvals/action', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    credentials: 'include',
+                    body: JSON.stringify({
+                        action: submitAction,
+                        source_table: sourceTable,
+                        source_id: sourceId,
+                        decision_note: decisionNote,
+                        _csrf_token: csrfToken
+                    })
+                });
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok || data.error) {
+                    throw new Error((data && (data.error || data.message)) || 'failed');
+                }
+                await loadCombinedBell();
+                if (action === 'approve') {
+                    showToast('Approved');
+                } else if (action === 'revert') {
+                    showToast('Reverted');
+                } else {
+                    showToast('Rejected');
+                }
+            } catch (e) {
+                showToast(`Approval failed${e && e.message ? `: ${e.message}` : ''}`, 'error');
+            } finally {
+                actionBtn.disabled = false;
+            }
+        });
+
+        document.addEventListener('click', function (event) {
+            const openBtn = event.target.closest('[data-revert-open]');
+            if (openBtn) {
+                openRevertModal({
+                    sourceTable: openBtn.getAttribute('data-source-table'),
+                    sourceId: openBtn.getAttribute('data-source-id'),
+                    taskId: openBtn.getAttribute('data-task-id'),
+                    bidId: openBtn.getAttribute('data-bid-id')
+                });
+                return;
+            }
+            if (event.target.closest('[data-revert-close]')) {
+                closeRevertModal();
+                return;
+            }
+        });
+
+        const revertAttachBtn = document.getElementById('revertModalAttachBtn');
+        const revertFileInput = document.getElementById('revertModalFile');
+        const revertFileName = document.getElementById('revertModalFileName');
+        const revertSubmitBtn = document.getElementById('revertModalSubmit');
+
+        if (revertAttachBtn && revertFileInput) {
+            revertAttachBtn.addEventListener('click', () => revertFileInput.click());
+        }
+        if (revertFileInput && revertFileName) {
+            revertFileInput.addEventListener('change', () => {
+                const file = revertFileInput.files && revertFileInput.files[0];
+                revertFileName.textContent = file ? file.name : 'No file selected';
+            });
+        }
+        if (revertSubmitBtn) {
+            revertSubmitBtn.addEventListener('click', async () => {
+                const noteEl = document.getElementById('revertModalNote');
+                const note = (noteEl && noteEl.value || '').trim();
+                const file = revertFileInput && revertFileInput.files ? revertFileInput.files[0] : null;
+                if (!revertModalState.sourceTable || !revertModalState.sourceId || !revertModalState.taskId) {
+                    showToast('Missing revert details', 'error');
+                    return;
+                }
+                if (!note) {
+                    showToast('Revert note is required', 'error');
+                    return;
+                }
+                if (!file) {
+                    showToast('Attach a file to revert', 'error');
+                    return;
+                }
+                revertSubmitBtn.disabled = true;
+                try {
+                    const res = await fetch('/approvals/action', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        credentials: 'include',
+                        body: JSON.stringify({
+                            action: 'revert',
+                            source_table: revertModalState.sourceTable,
+                            source_id: Number(revertModalState.sourceId),
+                            decision_note: note,
+                            _csrf_token: csrfToken
+                        })
+                    });
+                    const data = await res.json().catch(() => ({}));
+                    if (!res.ok || data.error) {
+                        throw new Error((data && (data.error || data.message)) || 'failed');
+                    }
+                    const form = new FormData();
+                    form.append('file', file);
+                    form.append('description', `Revert: ${note}`);
+                    form.append('approval_target', currentApprovalTarget() || 'manager');
+                    form.append('needs_approval', '0');
+                    const uploadRes = await fetch(`/task/${encodeURIComponent(revertModalState.taskId)}/upload`, {
+                        method: 'POST',
+                        credentials: 'include',
+                        body: form
+                    });
+                    const uploadData = await uploadRes.json().catch(() => ({}));
+                    if (!uploadRes.ok || uploadData.error) {
+                        throw new Error((uploadData && (uploadData.error || uploadData.message)) || 'upload_failed');
+                    }
+                    await loadCombinedBell();
+                    if (revertModalState.bidId) {
+                        await loadBidTasks(revertModalState.bidId);
+                    }
+                    closeRevertModal();
+                    showToast('Revert sent');
+                } catch (e) {
+                    showToast(`Revert failed${e && e.message ? `: ${e.message}` : ''}`, 'error');
+                } finally {
+                    revertSubmitBtn.disabled = false;
+                }
+            });
+        }
+
+        document.addEventListener('click', async function (event) {
+            const assignBtn = event.target.closest('[data-assign-save]');
+            if (!assignBtn) return;
+            const taskId = assignBtn.getAttribute('data-task-id');
+            const bidId = assignBtn.getAttribute('data-bid-id');
+            const dept = assignBtn.getAttribute('data-dept') || DEPT_KEY;
+            const empChecks = Array.from(document.querySelectorAll(`[data-assign-emp="${taskId}"]:checked`));
+            const mgrChecks = Array.from(document.querySelectorAll(`[data-assign-mgr="${taskId}"]:checked`));
+            const leadChecks = Array.from(document.querySelectorAll(`[data-assign-lead="${taskId}"]:checked`));
+            const deptEmployees = deptEmployeesCache[(dept || '').toLowerCase()] || [];
+            const leadUserIds = leadChecks.map(cb => {
+                const raw = String(cb.value || '').trim();
+                return raw && /^\d+$/.test(raw) ? Number(raw) : null;
+            }).filter(Boolean);
+            const managerEmployeeIds = mgrChecks.map(cb => {
+                const raw = String(cb.value || '').trim();
+                if (raw && /^\d+$/.test(raw)) return Number(raw);
+                const email = String(cb.getAttribute('data-email') || '').trim().toLowerCase();
+                if (!email) return null;
+                const match = deptEmployees.find(e => (e.email || '').toLowerCase() === email);
+                return match ? Number(match.id) : null;
+            }).filter(Boolean);
+            const employeeIds = Array.from(new Set([
+                ...empChecks.map(cb => Number(cb.value)).filter(Boolean),
+                ...managerEmployeeIds,
+            ]));
+            if (!employeeIds.length && !leadUserIds.length) {
+                showToast('Select at least one member', 'error');
+                return;
+            }
+            assignBtn.disabled = true;
+            try {
+                if (leadUserIds.length) {
+                    const leadPayload = {
+                        team_lead_user_id: leadUserIds[0],
+                        department_key: dept
+                    };
+                    const resLead = await fetch(`/api/task/${encodeURIComponent(taskId)}/assign-team-lead`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        credentials: 'include',
+                        body: JSON.stringify(leadPayload)
+                    });
+                    const dataLead = await resLead.json().catch(() => ({}));
+                    if (!resLead.ok || dataLead.error) {
+                        throw new Error((dataLead && (dataLead.error || dataLead.message)) || 'failed');
+                    }
+                }
+                if (employeeIds.length) {
+                    const first = employeeIds[0];
+                    const form = new FormData();
+                    form.append('assigned_to', String(first));
+                    const res = await fetch(`/task/${encodeURIComponent(taskId)}/update`, {
+                        method: 'POST',
+                        credentials: 'include',
+                        body: form
+                    });
+                    const data = await res.json().catch(() => ({}));
+                    if (!res.ok || data.error) {
+                        throw new Error((data && (data.error || data.message)) || 'failed');
+                    }
+                }
+                if (bidId) {
+                    await loadBidTasks(bidId);
+                }
+                showToast('Assignment saved');
+            } catch (e) {
+                showToast(`Failed to assign${e && e.message ? `: ${e.message}` : ''}`, 'error');
+            } finally {
+                assignBtn.disabled = false;
+            }
+        });
+
+        document.addEventListener('toggle', function (event) {
+            const details = event.target;
+            if (!details || !details.classList || !details.classList.contains('task-notes')) return;
+            if (!details.open) return;
+            const panel = details.querySelector('.task-action-panel');
+            const summary = details.querySelector('summary');
+            if (!panel || !summary) return;
+            const rect = summary.getBoundingClientRect();
+            panel.style.position = 'fixed';
+            panel.style.right = 'auto';
+            panel.style.zIndex = '9999';
+            const maxLeft = Math.max(12, window.innerWidth - panel.offsetWidth - 12);
+            const maxTop = Math.max(12, window.innerHeight - panel.offsetHeight - 12);
+            panel.style.left = `${Math.min(rect.left, maxLeft)}px`;
+            panel.style.top = `${Math.min(rect.bottom + 8, maxTop)}px`;
+        }, true);
+
+        function closeChecklistEditor() {
+            const modal = document.getElementById('checklistEditorModal');
+            if (modal) modal.classList.add('hidden');
+        }
+
+        function openChecklistEditor() {
+            const modal = document.getElementById('checklistEditorModal');
+            if (modal) modal.classList.remove('hidden');
+        }
+
+        function renderChecklistEditor() {
+            const body = document.getElementById('checklistEditorBody');
+            if (!body) return;
+            const tasks = (checklistEditorState || {}).tasks || [];
+            body.innerHTML = tasks.length
+                ? tasks.map((t, idx) => `<div class="p-3 text-sm">${idx + 1}. ${escapeHtml(t.text || t.task_name || 'Task')}</div>`).join('')
+                : '<div class="p-3 text-sm text-gray-500">No checklist items.</div>';
+        }
+
+        function loadTeamOptions() {
+            return;
+        }
+    </script>
+</body>
+</html>

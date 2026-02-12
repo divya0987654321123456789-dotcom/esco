@@ -1,0 +1,190 @@
+{% extends "top_admin_base.html" %}
+{% block title %}Role Hierarchy{% endblock %}
+{% block page_title %}Role Hierarchy{% endblock %}
+{% block page_subtitle %}Clear role ladder and responsibilities.{% endblock %}
+
+{% block content %}
+  <style>
+    .hierarchy-map {
+      position: relative;
+      padding: 28px 18px 10px;
+    }
+    .hierarchy-map__center {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      padding: 12px 18px;
+      border-radius: 999px;
+      border: 1px solid rgba(148, 163, 184, 0.4);
+      background: linear-gradient(145deg, #ffffff 0%, #f0f7ff 100%);
+      font-weight: 700;
+      color: #0f172a;
+      box-shadow: 0 10px 20px rgba(15, 23, 42, 0.08);
+    }
+    .hierarchy-branches {
+      position: relative;
+      margin-top: 28px;
+      display: grid;
+      grid-template-columns: repeat(4, minmax(200px, 1fr));
+      gap: 18px;
+    }
+    .hierarchy-branches::before {
+      content: "";
+      position: absolute;
+      top: -18px;
+      left: 12%;
+      right: 12%;
+      height: 3px;
+      background: linear-gradient(90deg, #10b981, #60a5fa, #f59e0b, #a855f7);
+      border-radius: 999px;
+      opacity: 0.6;
+    }
+    .dept-card {
+      position: relative;
+      background: #ffffff;
+      border: 1px solid rgba(148, 163, 184, 0.35);
+      border-radius: 18px;
+      padding: 16px;
+      box-shadow: 0 8px 18px rgba(15, 23, 42, 0.08);
+    }
+    .dept-card::before {
+      content: "";
+      position: absolute;
+      top: -18px;
+      left: 50%;
+      width: 2px;
+      height: 18px;
+      background: rgba(148, 163, 184, 0.6);
+      transform: translateX(-50%);
+    }
+    .dept-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 10px;
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+    .dept-pill.business { background: #dbeafe; color: #1d4ed8; }
+    .dept-pill.operations { background: #dcfce7; color: #047857; }
+    .dept-pill.marketing { background: #fef3c7; color: #b45309; }
+    .dept-pill.engineer { background: #ede9fe; color: #6d28d9; }
+    .role-stack {
+      margin-top: 14px;
+      position: relative;
+      padding-left: 18px;
+    }
+    .role-stack::before {
+      content: "";
+      position: absolute;
+      top: 10px;
+      bottom: 12px;
+      left: 6px;
+      width: 2px;
+      background: rgba(148, 163, 184, 0.6);
+      border-radius: 999px;
+    }
+    .role-item {
+      position: relative;
+      padding: 10px 12px 10px 14px;
+      border-radius: 12px;
+      border: 1px solid rgba(148, 163, 184, 0.25);
+      background: #f8fafc;
+      margin-bottom: 10px;
+      font-weight: 600;
+      color: #0f172a;
+    }
+    .role-item::before {
+      content: "";
+      position: absolute;
+      left: -12px;
+      top: 50%;
+      width: 12px;
+      height: 2px;
+      background: rgba(148, 163, 184, 0.6);
+      transform: translateY(-50%);
+    }
+    .role-item small {
+      display: block;
+      margin-top: 4px;
+      font-size: 11px;
+      color: #64748b;
+      font-weight: 500;
+    }
+    @media (max-width: 1100px) {
+      .hierarchy-branches {
+        grid-template-columns: repeat(2, minmax(220px, 1fr));
+      }
+    }
+    @media (max-width: 700px) {
+      .hierarchy-branches {
+        grid-template-columns: 1fr;
+      }
+      .hierarchy-branches::before {
+        left: 20%;
+        right: 20%;
+      }
+    }
+  </style>
+
+  <div class="bg-white border border-gray-200 rounded-2xl p-6">
+    <div class="flex items-center justify-between">
+      <div>
+        <div class="font-semibold text-lg">Department Role Flow</div>
+        <div class="text-xs text-gray-500 mt-1">Mind-map layout with the same role ladder in each department.</div>
+      </div>
+      <span class="text-xs text-gray-500">Top → Bottom</span>
+    </div>
+
+    <div class="hierarchy-map mt-6">
+      <div class="flex justify-center">
+        <div class="hierarchy-map__center">
+          <i class="fas fa-crown text-amber-500"></i>
+          Top Level Admin
+          <span class="text-[11px] px-2 py-0.5 rounded-full bg-slate-100 text-slate-600 font-semibold">IT Admin Support</span>
+        </div>
+      </div>
+
+      <div class="hierarchy-branches">
+        <div class="dept-card">
+          <span class="dept-pill business"><i class="fas fa-briefcase"></i>Business</span>
+          <div class="role-stack">
+            <div class="role-item">Manager<small>Leads the Business department</small></div>
+            <div class="role-item">Team Lead<small>Owns team execution</small></div>
+            <div class="role-item">Employees<small>Multiple team members</small></div>
+          </div>
+        </div>
+
+        <div class="dept-card">
+          <span class="dept-pill operations"><i class="fas fa-gears"></i>Operations</span>
+          <div class="role-stack">
+            <div class="role-item">Manager<small>Leads the Operations department</small></div>
+            <div class="role-item">Team Lead<small>Owns team execution</small></div>
+            <div class="role-item">Employees<small>Multiple team members</small></div>
+          </div>
+        </div>
+
+        <div class="dept-card">
+          <span class="dept-pill marketing"><i class="fas fa-bullhorn"></i>Marketing</span>
+          <div class="role-stack">
+            <div class="role-item">Manager<small>Leads the Marketing department</small></div>
+            <div class="role-item">Team Lead<small>Owns team execution</small></div>
+            <div class="role-item">Employees<small>Multiple team members</small></div>
+          </div>
+        </div>
+
+        <div class="dept-card">
+          <span class="dept-pill engineer"><i class="fas fa-helmet-safety"></i>Site Engineer</span>
+          <div class="role-stack">
+            <div class="role-item">Manager<small>Leads the Site Engineer department</small></div>
+            <div class="role-item">Team Lead<small>Owns team execution</small></div>
+            <div class="role-item">Employees<small>Multiple team members</small></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+{% endblock %}

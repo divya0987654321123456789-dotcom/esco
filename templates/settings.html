@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Settings - ESCO Suite</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link rel="stylesheet" href="{{ url_for('static', filename='light_theme_overrides.css') }}">
+</head>
+<body class="bg-gray-50 text-gray-800 with-fixed-sidebar">
+    <div class="flex min-h-screen">
+        {% set sidebar_fixed = true %}
+        {% set topbar_title = 'Settings' %}
+        {% set topbar_subtitle = 'Manage your account preferences and quick actions.' %}
+        {% include 'sidebar.html' %}
+        <main class="ml-64 flex-1 min-w-0 p-8">
+
+            <div class="grid grid-cols-1 lg:grid-cols-3 gap-6 mt-8">
+                <div class="lg:col-span-2 space-y-6">
+                    <div class="bg-white border border-gray-200 rounded-2xl p-6 shadow-sm">
+                        <div class="flex items-center justify-between">
+                            <div>
+                                <div class="text-xs uppercase tracking-wider text-gray-500">Profile</div>
+                                {% set _profile_name = (employee.name if employee_view else current_user.full_name) %}
+                                {% set _profile_email = (employee.email if employee_view else current_user.email) %}
+                                <div class="text-lg font-semibold mt-1">{{ _profile_name or 'User' }}</div>
+                                <div class="text-sm text-gray-500">{{ _profile_email }}</div>
+                            </div>
+                            <div class="w-12 h-12 rounded-full bg-gradient-to-br from-blue-500 to-teal-400 text-white flex items-center justify-center font-bold">
+                                {{ (_profile_name or _profile_email or 'U')[0:1]|upper }}
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="bg-white border border-gray-200 rounded-2xl p-6 shadow-sm">
+                        <div class="text-sm font-semibold">Quick Actions</div>
+                        <div class="mt-4 grid grid-cols-1 md:grid-cols-2 gap-4">
+                            <a href="{{ url_for('employee_logout') if employee_view else url_for('logout') }}" class="flex items-center justify-between rounded-xl border border-gray-200 px-4 py-3 hover:bg-gray-50">
+                                <div>
+                                    <div class="text-sm font-semibold">Logout</div>
+                                    <div class="text-xs text-gray-500">Sign out of ESCO Suite</div>
+                                </div>
+                                <i class="fas fa-arrow-right-from-bracket text-gray-400"></i>
+                            </a>
+                            {% if employee_view %}
+                            <a href="{{ url_for('employee_dashboard', employee_id=employee.id) }}" class="flex items-center justify-between rounded-xl border border-gray-200 px-4 py-3 hover:bg-gray-50">
+                                <div>
+                                    <div class="text-sm font-semibold">Go to Dashboard</div>
+                                    <div class="text-xs text-gray-500">Jump back to your tasks</div>
+                                </div>
+                                <i class="fas fa-arrow-up-right-from-square text-gray-400"></i>
+                            </a>
+                            {% else %}
+                            <a href="{{ url_for('top_admin_overview') if (current_user.is_admin or (current_user.role|lower in ['top_level_admin','top level admin'])) else url_for('bid_analyzer') }}" class="flex items-center justify-between rounded-xl border border-gray-200 px-4 py-3 hover:bg-gray-50">
+                                <div>
+                                    <div class="text-sm font-semibold">Go to Dashboard</div>
+                                    <div class="text-xs text-gray-500">Jump back to your main view</div>
+                                </div>
+                                <i class="fas fa-arrow-up-right-from-square text-gray-400"></i>
+                            </a>
+                            {% endif %}
+                        </div>
+                    </div>
+                </div>
+
+                <div class="space-y-6">
+                    <div class="bg-white border border-gray-200 rounded-2xl p-6 shadow-sm">
+                        <div class="text-sm font-semibold">Role</div>
+                        <div class="mt-2 text-xs uppercase tracking-wider text-gray-500">Current Role</div>
+                        {% if employee_view %}
+                        <div class="mt-1 text-base font-semibold text-gray-900">Employee</div>
+                        <div class="mt-2 text-xs uppercase tracking-wider text-gray-500">Department</div>
+                        <div class="mt-1 text-base font-semibold text-gray-900">{{ (employee.department or 'Team Member')|replace('_',' ')|title }}</div>
+                        {% else %}
+                        <div class="mt-1 text-base font-semibold text-gray-900">{{ current_user.role|replace('_',' ')|title }}</div>
+                        {% endif %}
+                        <div class="mt-4 text-xs text-gray-500">Company context and access are controlled by administrators.</div>
+                    </div>
+
+                    <div class="bg-white border border-gray-200 rounded-2xl p-6 shadow-sm">
+                        <div class="text-sm font-semibold">Help</div>
+                        <p class="text-xs text-gray-500 mt-2">Need help updating your access or profile? Contact your administrator.</p>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+</body>
+</html>

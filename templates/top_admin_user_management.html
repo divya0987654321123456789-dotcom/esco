@@ -1,0 +1,573 @@
+{% extends "top_admin_base.html" %}
+{% block title %}Administration{% endblock %}
+{% block page_title %}Administration{% endblock %}
+{% block page_subtitle %}Manage roles, access, and reporting managers in one table.{% endblock %}
+
+{% block content %}
+  <style>
+    .btn-light{background:#eef2ff;color:#1f2937;border:1px solid #dbe3ff}
+    .btn-light:hover{background:#e3e9ff}
+    .btn-dark{background:#111827;color:#ffffff;border:1px solid #111827}
+    .btn-dark:hover{background:#0f172a}
+    .pill{font-size:11px;padding:2px 8px;border-radius:999px;border:1px solid #e5e7eb;background:#f8fafc;color:#475569;display:inline-flex;align-items:center;gap:6px}
+    .pill-green{background:#ecfdf5;color:#065f46;border-color:#a7f3d0}
+    .pill-gray{background:#ffffff;color:#64748b;border-color:#e5e7eb}
+    .pill-blue{background:#eff6ff;color:#1d4ed8;border-color:#bfdbfe}
+    .icon-btn{width:30px;height:30px;border-radius:8px;border:1px solid #e5e7eb;display:inline-flex;align-items:center;justify-content:center;color:#374151;background:#fff}
+    .icon-btn:hover{background:#f3f4f6}
+    .icon-btn[disabled]{opacity:.45;cursor:not-allowed}
+  </style>
+
+  <div class="bg-white border border-gray-200 rounded-xl p-5">
+    <div class="flex items-center justify-between">
+      <div>
+        <div class="font-semibold text-lg">Admin Settings</div>
+        <div class="text-xs text-gray-500 mt-1">Update roles, access, and reporting managers directly in the table.</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="bg-white border border-gray-200 rounded-xl p-5 mt-6">
+    <div class="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+      <div>
+        <div class="font-semibold text-gray-900">Users & Access</div>
+        <div class="text-xs text-gray-500 mt-1">Includes user accounts + employees table.</div>
+      </div>
+      <div class="flex flex-wrap items-center gap-2">
+        <input id="userFilter" type="text" placeholder="Search users..."
+               class="w-60 rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-emerald-200">
+        <div class="text-xs text-gray-500">Showing <span id="userCount" class="font-semibold text-gray-700">0</span></div>
+      </div>
+    </div>
+
+    <div class="mt-4 flex flex-wrap gap-2">
+      <button class="user-tab px-3 py-2 rounded-lg text-sm font-semibold btn-light" data-user-tab="all">All users <span class="ml-1 text-xs pill pill-blue" id="countAll">0</span></button>
+      <button class="user-tab px-3 py-2 rounded-lg text-sm font-semibold btn-light" data-user-tab="active">Active <span class="ml-1 text-xs pill pill-green" id="countActive">0</span></button>
+      <button class="user-tab px-3 py-2 rounded-lg text-sm font-semibold btn-light" data-user-tab="inactive">Deactivated <span class="ml-1 text-xs pill pill-gray" id="countInactive">0</span></button>
+    </div>
+
+    <div class="mt-4 overflow-x-auto border border-gray-200 rounded-xl">
+      <table class="min-w-full text-sm" id="employeeAccessTable">
+        <thead class="bg-gray-50 text-xs uppercase text-gray-500">
+          <tr>
+            <th class="text-left p-3">User</th>
+            <th class="text-left p-3">Type</th>
+            <th class="text-left p-3">Role</th>
+            <th class="text-left p-3">Reporting Manager</th>
+            <th class="text-left p-3">Department</th>
+            <th class="text-left p-3">Access</th>
+            <th class="text-center p-3">Status</th>
+            <th class="text-center p-3">Actions</th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-gray-100">
+          {% for user in access_users %}
+          <tr class="hover:bg-gray-50 employee-row"
+              data-user-search="{{ (user.email ~ ' ' ~ (user.full_name or '') ~ ' ' ~ (user.role or '') ~ ' ' ~ (user.departments or '') ~ ' ' ~ (user.pages | join(' '))) | lower }}"
+              data-user-active="{{ 1 if user.is_active else 0 }}"
+              data-user-id="{{ user.id }}"
+              data-user-email="{{ user.email }}"
+              data-user-name="{{ user.full_name or '' }}"
+              data-source="{{ user.source }}">
+            <td class="p-3">
+              <div class="font-semibold text-gray-900">{{ user.full_name or user.email }}</div>
+              <div class="text-xs text-gray-500">{{ user.email }}</div>
+            </td>
+            <td class="p-3 text-sm text-gray-700">
+              {% if user.source == 'employee' %}
+                <span class="pill">Employee</span>
+              {% else %}
+                <span class="pill pill-blue">User</span>
+              {% endif %}
+            </td>
+            <td class="p-3 text-sm text-gray-700">
+              {% if user.source == 'user' %}
+                <select class="border border-gray-200 rounded-md text-xs px-2 py-1"
+                        data-role-select data-user-id="{{ user.id }}">
+                  {% for rk, lbl in [('topleveladmin','Top Admin'),('manager','Manager'),('teamlead','Team Lead'),('member','Employee')] %}
+                    <option value="{{ rk }}" {% if (user.role or '')|lower|replace(' ','_') == rk %}selected{% endif %}>{{ lbl }}</option>
+                  {% endfor %}
+                </select>
+              {% else %}
+                <span class="text-xs text-gray-500">Employee</span>
+              {% endif %}
+            </td>
+            <td class="p-3 text-sm text-gray-700">
+              {% if user.source == 'employee' %}
+                <select class="border border-gray-200 rounded-md text-xs px-2 py-1"
+                        data-manager-select data-source="employee" data-employee-id="{{ user.id }}">
+                  <option value="">Not assigned</option>
+                  {% for m in reporting_managers %}
+                    <option value="{{ m.id }}" {% if user.team_lead_id and (m.id == user.team_lead_id) %}selected{% endif %}>
+                      {{ m.full_name or m.email }}
+                    </option>
+                  {% endfor %}
+                </select>
+              {% else %}
+                <select class="border border-gray-200 rounded-md text-xs px-2 py-1"
+                        data-manager-select data-source="user" data-user-id="{{ user.id }}">
+                  <option value="">Not assigned</option>
+                  {% for m in reporting_managers %}
+                    <option value="{{ m.id }}" {% if user.manager_user_id and (m.id == user.manager_user_id) %}selected{% endif %}>
+                      {{ m.full_name or m.email }}
+                    </option>
+                  {% endfor %}
+                </select>
+              {% endif %}
+            </td>
+            <td class="p-3 text-sm text-gray-500">{{ user.departments or '-' }}</td>
+            <td class="p-3">
+              <div class="flex flex-wrap gap-2 text-xs">
+                {% set flags = user.access_flags or {} %}
+                {% for key,label,icon in [('bid_analyzer','Bid','fa-chart-line'),('assigned_tasks','Tasks','fa-list-check'),('approvals','Approvals','fa-check-circle')] %}
+                  <label class="inline-flex items-center gap-1 px-2 py-1 rounded-full border border-gray-200 cursor-pointer {{ 'pill-green' if flags.get(key) else 'pill-gray' }}"
+                         data-access-pill
+                         data-module="{{ key }}">
+                    <input type="checkbox" class="sr-only"
+                           data-user-access-toggle
+                           data-user-id="{{ user.id }}"
+                           data-source="{{ user.source }}"
+                           data-module="{{ key }}"
+                           {% if flags.get(key) %}checked{% endif %}>
+                    <i class="fas {{ icon }} text-xs"></i>
+                    <span>{{ label }}</span>
+                  </label>
+                {% endfor %}
+              </div>
+            </td>
+            <td class="p-3 text-center">
+              <span class="text-[10px] px-2 py-1 rounded-full {{ 'bg-emerald-100 text-emerald-700' if user.is_active else 'bg-gray-100 text-gray-500' }}">
+                {{ 'Active' if user.is_active else 'Inactive' }}
+              </span>
+            </td>
+            <td class="p-3 text-center">
+              <div class="inline-flex items-center gap-2">
+                <button class="icon-btn" title="Save changes" data-save-role data-user-id="{{ user.id }}">
+                  <i class="fas fa-floppy-disk text-xs"></i>
+                </button>
+                {% if user.source == 'user' %}
+                <button class="icon-btn" title="Edit user" data-edit-user data-user-id="{{ user.id }}">
+                  <i class="fas fa-pen text-xs"></i>
+                </button>
+                <button class="icon-btn" title="Transfer login" data-transfer-user data-user-id="{{ user.id }}">
+                  <i class="fas fa-right-left text-xs"></i>
+                </button>
+                {% else %}
+                <button class="icon-btn" title="Edit user" disabled>
+                  <i class="fas fa-pen text-xs"></i>
+                </button>
+                <button class="icon-btn" title="Transfer login" disabled>
+                  <i class="fas fa-right-left text-xs"></i>
+                </button>
+                {% endif %}
+                <button class="text-gray-600 hover:text-rose-600"
+                        title="{{ 'Deactivate' if user.is_active else 'Activate' }}"
+                        data-toggle-status
+                        data-source="{{ user.source }}"
+                        data-id="{{ user.id }}">
+                  <i class="fas {{ 'fa-user-slash' if user.is_active else 'fa-user-check' }}"></i>
+                </button>
+              </div>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div id="userMgmtToast" class="fixed bottom-6 right-6 hidden px-4 py-2 rounded-lg text-sm font-semibold shadow-lg"></div>
+
+  <div id="editUserModal" class="fixed inset-0 hidden z-50 bg-black/40">
+    <div class="bg-white rounded-xl shadow-xl w-full max-w-md mx-auto mt-24 p-5">
+      <div class="flex items-center justify-between">
+        <div class="font-semibold text-gray-900">Edit user</div>
+        <button type="button" class="text-gray-400 hover:text-gray-700" data-close-edit>
+          <i class="fas fa-times"></i>
+        </button>
+      </div>
+      <div class="mt-4 space-y-3">
+        <label class="text-xs text-gray-600">Full name</label>
+        <input id="editUserName" type="text" class="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm" />
+        <label class="text-xs text-gray-600">Email</label>
+        <input id="editUserEmail" type="email" class="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm" />
+      </div>
+      <div class="mt-4 flex justify-end gap-2">
+        <button type="button" class="px-3 py-2 rounded-lg border border-gray-200 text-sm" data-close-edit>Cancel</button>
+        <button type="button" class="px-3 py-2 rounded-lg bg-emerald-600 text-white text-sm font-semibold" data-save-edit>Update</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="transferUserModal" class="fixed inset-0 hidden z-50 bg-black/40">
+    <div class="bg-white rounded-xl shadow-xl w-full max-w-lg mx-auto mt-20 p-5">
+      <div class="flex items-center justify-between">
+        <div class="font-semibold text-gray-900">Transfer login</div>
+        <button type="button" class="text-gray-400 hover:text-gray-700" data-close-transfer>
+          <i class="fas fa-times"></i>
+        </button>
+      </div>
+      <div class="mt-4 space-y-3">
+        <div class="text-xs text-gray-500" id="transferFromLabel">Transfer from</div>
+        <label class="text-xs text-gray-600">New email</label>
+        <input id="transferEmail" type="email" class="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm" />
+        <label class="text-xs text-gray-600">Full name (optional)</label>
+        <input id="transferName" type="text" class="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm" />
+        <label class="text-xs text-gray-600">Note</label>
+        <textarea id="transferNote" rows="3" class="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm"></textarea>
+      </div>
+      <div class="mt-4 flex justify-end gap-2">
+        <button type="button" class="px-3 py-2 rounded-lg border border-gray-200 text-sm" data-close-transfer>Cancel</button>
+        <button type="button" class="px-3 py-2 rounded-lg bg-blue-100 text-blue-700 hover:bg-blue-200 text-sm font-semibold" data-submit-transfer>Transfer</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    (function () {
+      const toast = document.getElementById('userMgmtToast');
+      function showToast(msg, isError) {
+        if (!toast) return alert(msg);
+        toast.textContent = msg;
+        toast.className = 'fixed bottom-6 right-6 px-4 py-2 rounded-lg text-sm font-semibold shadow-lg ' +
+          (isError ? 'bg-rose-600 text-white' : 'bg-emerald-600 text-white');
+        toast.classList.remove('hidden');
+        setTimeout(() => toast.classList.add('hidden'), 2400);
+      }
+
+      const userFilter = document.getElementById('userFilter');
+      const userRows = Array.from(document.querySelectorAll('.employee-row'));
+      const userCount = document.getElementById('userCount');
+      const countAll = document.getElementById('countAll');
+      const countActive = document.getElementById('countActive');
+      const countInactive = document.getElementById('countInactive');
+      const userTabs = Array.from(document.querySelectorAll('.user-tab'));
+      let activeUserTab = 'all';
+      if (userTabs.length) {
+        userTabs[0].classList.add('btn-dark');
+        userTabs[0].classList.remove('btn-light');
+      }
+
+      function updateCounts() {
+        const total = userRows.length;
+        const active = userRows.filter(r => r.getAttribute('data-user-active') === '1').length;
+        const inactive = total - active;
+        if (countAll) countAll.textContent = String(total);
+        if (countActive) countActive.textContent = String(active);
+        if (countInactive) countInactive.textContent = String(inactive);
+      }
+
+      function applyUserFilter() {
+        if (!userFilter) return;
+        const query = userFilter.value.trim().toLowerCase();
+        let visible = 0;
+        userRows.forEach((row) => {
+          const hay = row.getAttribute('data-user-search') || '';
+          const isActive = row.getAttribute('data-user-active') === '1';
+          const tabMatch = activeUserTab === 'all' || (activeUserTab === 'active' ? isActive : !isActive);
+          const matches = (!query || hay.includes(query)) && tabMatch;
+          row.classList.toggle('hidden', !matches);
+          if (matches) visible += 1;
+        });
+        if (userCount) userCount.textContent = String(visible);
+      }
+
+      userTabs.forEach(btn => {
+        btn.addEventListener('click', () => {
+          userTabs.forEach(b => b.classList.remove('btn-dark'));
+          userTabs.forEach(b => b.classList.add('btn-light'));
+          btn.classList.add('btn-dark');
+          btn.classList.remove('btn-light');
+          activeUserTab = btn.getAttribute('data-user-tab') || 'all';
+          applyUserFilter();
+        });
+      });
+
+      if (userFilter) {
+        userFilter.addEventListener('input', applyUserFilter);
+      }
+      updateCounts();
+      applyUserFilter();
+
+      function setPillState(pill, enabled) {
+        if (!pill) return;
+        pill.classList.toggle('pill-green', !!enabled);
+        pill.classList.toggle('pill-gray', !enabled);
+      }
+
+      document.querySelectorAll('[data-access-pill]').forEach(pill => {
+        pill.addEventListener('click', () => {
+          const input = pill.querySelector('input[data-user-access-toggle]');
+          if (!input) return;
+          input.checked = !input.checked;
+          setPillState(pill, input.checked);
+          pill.setAttribute('data-changed', '1');
+          const row = pill.closest('tr');
+          if (row) row.setAttribute('data-access-dirty', '1');
+        });
+      });
+
+      document.querySelectorAll('[data-save-role]').forEach(btn => {
+        btn.addEventListener('click', async () => {
+          const userId = btn.getAttribute('data-user-id');
+          const row = btn.closest('tr');
+          const source = row?.getAttribute('data-source') || 'user';
+          const select = row?.querySelector('[data-role-select]');
+          const role = select?.value || 'member';
+          const email = row?.getAttribute('data-user-email') || '';
+          const fullName = row?.getAttribute('data-user-name') || '';
+          let ok = true;
+          if (source === 'user') {
+            try {
+              const res = await fetch(`/api/admin/user/${userId}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': '{{ csrf_token() }}' },
+                body: JSON.stringify({ email: email, full_name: fullName, role: role })
+              });
+              const data = await res.json().catch(() => ({}));
+              if (!res.ok || data.error) throw new Error(data.error || data.message || 'Update failed');
+            } catch (e) {
+              ok = false;
+              showToast(`Role update failed${e && e.message ? `: ${e.message}` : ''}`, true);
+            }
+          }
+
+          const changed = row ? Array.from(row.querySelectorAll('[data-access-pill][data-changed=\"1\"]')) : [];
+          for (const pill of changed) {
+            const input = pill.querySelector('input[data-user-access-toggle]');
+            if (!input) continue;
+            const source = input.getAttribute('data-source');
+            const moduleKey = input.getAttribute('data-module');
+            const enabled = input.checked;
+            const url = source === 'employee'
+              ? '/api/admin/employee-permissions/update'
+              : '/api/admin/user-permissions/update';
+            const payload = source === 'employee'
+              ? { employee_id: userId, module: moduleKey, enabled: enabled }
+              : { user_id: userId, module: moduleKey, perm: 'view', enabled: enabled };
+            try {
+              const res = await fetch(url, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+              });
+              const data = await res.json().catch(() => ({}));
+              if (!res.ok || data.error) throw new Error(data.error || data.message || 'Update failed');
+              pill.removeAttribute('data-changed');
+            } catch (e) {
+              ok = false;
+              showToast(`Access update failed${e && e.message ? `: ${e.message}` : ''}`, true);
+            }
+          }
+
+          if (ok) showToast('Changes saved');
+        });
+      });
+
+      document.querySelectorAll('[data-manager-select]').forEach(sel => {
+        sel.addEventListener('change', async () => {
+          const source = sel.getAttribute('data-source') || 'employee';
+          const teamLeadId = sel.value || null;
+          const empId = sel.getAttribute('data-employee-id');
+          const userId = sel.getAttribute('data-user-id');
+          const url = source === 'user'
+            ? `/api/admin/user/${userId}/reporting-manager`
+            : `/api/admin/employee/${empId}/reporting-manager`;
+          const payload = source === 'user'
+            ? { manager_user_id: teamLeadId }
+            : { team_lead_id: teamLeadId };
+          try {
+            const res = await fetch(url, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(payload)
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok || data.error) throw new Error(data.error || data.message || 'Update failed');
+            showToast('Reporting manager updated');
+          } catch (e) {
+            showToast(`Update failed${e && e.message ? `: ${e.message}` : ''}`, true);
+          }
+        });
+      });
+
+      document.querySelectorAll('[data-user-access-toggle]').forEach(toggle => {
+        toggle.addEventListener('change', (e) => {
+          e.preventDefault();
+        });
+      });
+
+      const csrfToken = '{{ csrf_token() }}';
+      let activeEditUserId = null;
+      let activeTransferUserId = null;
+
+      function openEditModal(row) {
+        const modal = document.getElementById('editUserModal');
+        if (!modal) return;
+        activeEditUserId = row?.getAttribute('data-user-id');
+        const name = row?.getAttribute('data-user-name') || '';
+        const email = row?.getAttribute('data-user-email') || '';
+        const nameInput = document.getElementById('editUserName');
+        const emailInput = document.getElementById('editUserEmail');
+        if (nameInput) nameInput.value = name;
+        if (emailInput) emailInput.value = email;
+        modal.classList.remove('hidden');
+      }
+
+      function closeEditModal() {
+        const modal = document.getElementById('editUserModal');
+        if (modal) modal.classList.add('hidden');
+        activeEditUserId = null;
+      }
+
+      function openTransferModal(row) {
+        const modal = document.getElementById('transferUserModal');
+        if (!modal) return;
+        activeTransferUserId = row?.getAttribute('data-user-id');
+        const label = document.getElementById('transferFromLabel');
+        const name = row?.getAttribute('data-user-name') || row?.getAttribute('data-user-email') || '';
+        const email = row?.getAttribute('data-user-email') || '';
+        if (label) label.textContent = `Transfer from ${name || email}`;
+        const emailInput = document.getElementById('transferEmail');
+        const nameInput = document.getElementById('transferName');
+        const noteInput = document.getElementById('transferNote');
+        if (emailInput) emailInput.value = '';
+        if (nameInput) nameInput.value = '';
+        if (noteInput) noteInput.value = '';
+        modal.classList.remove('hidden');
+      }
+
+      function closeTransferModal() {
+        const modal = document.getElementById('transferUserModal');
+        if (modal) modal.classList.add('hidden');
+        activeTransferUserId = null;
+      }
+
+      document.querySelectorAll('[data-edit-user]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const row = btn.closest('tr');
+          if (!row) return;
+          row.setAttribute('data-user-id', btn.getAttribute('data-user-id') || '');
+          openEditModal(row);
+        });
+      });
+
+      document.querySelectorAll('[data-transfer-user]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const row = btn.closest('tr');
+          if (!row) return;
+          row.setAttribute('data-user-id', btn.getAttribute('data-user-id') || '');
+          openTransferModal(row);
+        });
+      });
+
+      document.querySelectorAll('[data-close-edit]').forEach(btn => btn.addEventListener('click', closeEditModal));
+      document.querySelectorAll('[data-close-transfer]').forEach(btn => btn.addEventListener('click', closeTransferModal));
+
+      const saveEditBtn = document.querySelector('[data-save-edit]');
+      if (saveEditBtn) {
+        saveEditBtn.addEventListener('click', async () => {
+          if (!activeEditUserId) return;
+          const nameInput = document.getElementById('editUserName');
+          const emailInput = document.getElementById('editUserEmail');
+          const name = (nameInput?.value || '').trim();
+          const email = (emailInput?.value || '').trim();
+          if (!email) {
+            showToast('Email is required', true);
+            return;
+          }
+          const row = document.querySelector(`tr[data-source="user"] [data-user-id="${activeEditUserId}"]`)?.closest('tr');
+          const roleSelect = row?.querySelector('[data-role-select]');
+          const role = roleSelect?.value || 'member';
+          try {
+            const res = await fetch(`/api/admin/user/${activeEditUserId}`, {
+              method: 'PUT',
+              headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+              body: JSON.stringify({ email: email, full_name: name, role: role })
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok || data.error) throw new Error(data.error || data.message || 'Update failed');
+            if (row) {
+              row.setAttribute('data-user-email', email);
+              row.setAttribute('data-user-name', name);
+              const label = row.querySelector('td:first-child .font-semibold');
+              const emailLabel = row.querySelector('td:first-child .text-xs');
+              if (label) label.textContent = name || email;
+              if (emailLabel) emailLabel.textContent = email;
+            }
+            showToast('User updated');
+            closeEditModal();
+          } catch (e) {
+            showToast(`Update failed${e && e.message ? `: ${e.message}` : ''}`, true);
+          }
+        });
+      }
+
+      const submitTransferBtn = document.querySelector('[data-submit-transfer]');
+      if (submitTransferBtn) {
+        submitTransferBtn.addEventListener('click', async () => {
+          if (!activeTransferUserId) return;
+          const emailInput = document.getElementById('transferEmail');
+          const nameInput = document.getElementById('transferName');
+          const noteInput = document.getElementById('transferNote');
+          const email = (emailInput?.value || '').trim();
+          const fullName = (nameInput?.value || '').trim();
+          const note = (noteInput?.value || '').trim();
+          if (!email) {
+            showToast('New email is required', true);
+            return;
+          }
+          const form = new FormData();
+          form.append('user_id', String(activeTransferUserId));
+          form.append('new_email', email);
+          if (fullName) form.append('full_name', fullName);
+          if (note) form.append('note', note);
+          form.append('_csrf_token', csrfToken);
+          try {
+            const res = await fetch('/admin/login-transfer', { method: 'POST', body: form, credentials: 'include' });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok || data.error) throw new Error(data.error || data.message || 'Transfer failed');
+            const row = document.querySelector(`tr[data-source="user"] [data-user-id="${activeTransferUserId}"]`)?.closest('tr');
+            if (row) {
+              const newName = fullName || row.getAttribute('data-user-name') || '';
+              row.setAttribute('data-user-email', email);
+              if (newName) row.setAttribute('data-user-name', newName);
+              const label = row.querySelector('td:first-child .font-semibold');
+              const emailLabel = row.querySelector('td:first-child .text-xs');
+              if (label) label.textContent = newName || email;
+              if (emailLabel) emailLabel.textContent = email;
+            }
+            showToast('Login transferred');
+            closeTransferModal();
+          } catch (e) {
+            showToast(`Transfer failed${e && e.message ? `: ${e.message}` : ''}`, true);
+          }
+        });
+      }
+      document.querySelectorAll('[data-toggle-status]').forEach(btn => {
+        btn.addEventListener('click', async () => {
+          const source = btn.getAttribute('data-source');
+          const id = btn.getAttribute('data-id');
+          if (!id || !source) return;
+          const url = source === 'employee'
+            ? `/api/admin/employee/${id}/toggle-status`
+            : `/api/admin/user/${id}/toggle-status`;
+          try {
+            const res = await fetch(url, {
+              method: 'POST',
+              headers: { 'X-CSRF-Token': csrfToken }
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok || data.error) {
+              throw new Error(data.error || data.message || 'Update failed');
+            }
+            showToast('Status updated');
+            setTimeout(() => window.location.reload(), 500);
+          } catch (e) {
+            showToast(`Update failed${e && e.message ? `: ${e.message}` : ''}`, true);
+          }
+        });
+      });
+    })();
+  </script>
+{% endblock %}

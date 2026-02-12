@@ -1,0 +1,953 @@
+{% extends "top_admin_base.html" %}
+{% block title %}Overview{% endblock %}
+{% block page_title %}Overview{% endblock %}
+{% block page_subtitle %}
+  Company-wide snapshot across bids, tasks, and people. Click any KPI to drill into details.
+{% endblock %}
+{% block top_actions %}
+  <form method="POST" action="{{ url_for('switch_context') }}" class="flex items-center gap-2">
+    <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+    <input type="hidden" name="next" value="{{ request.full_path }}">
+    <label class="text-xs text-gray-500">Company</label>
+    <select name="company_id" class="bg-white border border-gray-200 rounded-lg px-3 py-2 text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-gray-900">
+      <option value="" {{ 'selected' if not active_company_id else '' }}>All</option>
+      {% for c in available_companies %}
+        <option value="{{ c.id }}" {{ 'selected' if (active_company_id|string) == (c.id|string) else '' }}>{{ c.name }}</option>
+      {% endfor %}
+    </select>
+    <button type="submit" class="px-3 py-2 rounded-lg text-sm font-semibold text-gray-700 bg-gray-100 hover:bg-gray-200 border border-gray-200">
+      Switch
+    </button>
+  </form>
+{% endblock %}
+{% block content %}
+  <style>
+    .overview-hero {
+      background: linear-gradient(135deg, rgba(16,185,129,0.08), rgba(59,130,246,0.08));
+      border: 1px solid rgba(148,163,184,0.35);
+    }
+    .overview-kpi {
+      background: #fff;
+      border: 1px solid #e5e7eb;
+      border-radius: 16px;
+      transition: transform 0.2s ease, box-shadow 0.2s ease;
+    }
+    .overview-kpi:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 10px 24px rgba(15,23,42,0.08);
+    }
+    .overview-pill {
+      background: #f8fafc;
+      border: 1px solid #e2e8f0;
+      color: #334155;
+    }
+    .overview-pill.active {
+      background: #0f172a;
+      color: #fff;
+      border-color: #0f172a;
+    }
+    .hidden { display: none; }
+    .overview-table th,
+    .overview-table td {
+      padding: 8px 10px;
+      font-size: 12px;
+    }
+    .status-bar {
+      display: grid;
+      grid-template-columns: 120px 1fr auto;
+      align-items: center;
+      gap: 12px;
+    }
+    .status-bar__track {
+      height: 10px;
+      background: #eef2f7;
+      border-radius: 9999px;
+      position: relative;
+      overflow: hidden;
+    }
+    .status-bar__fill {
+      height: 100%;
+      border-radius: 9999px;
+      transition: width 0.35s ease;
+    }
+    .chart-shell {
+      height: 220px;
+    }
+    .status-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 10px;
+      border-radius: 9999px;
+      font-size: 11px;
+      font-weight: 600;
+      border: 1px solid #e2e8f0;
+      background: #f8fafc;
+    }
+  </style>
+
+    
+
+  <!-- KPI Cards (click to drill-down) -->
+  <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4 mt-6">
+    {% if check_module_access('company_dashboards') or is_admin %}
+    <div class="overview-kpi p-5 cursor-pointer" role="button" tabindex="0" data-detail-key="active_projects">
+      <div class="flex items-center justify-between">
+        <div>
+          <div class="text-xs text-gray-500">Active Projects</div>
+          <div class="text-3xl font-bold mt-1">{{ metrics.active_projects }}</div>
+          <div class="text-xs text-gray-500 mt-1">Open bids not in handover</div>
+        </div>
+        <div class="w-10 h-10 rounded-xl bg-gray-900/10 flex items-center justify-center">
+          <i class="fas fa-briefcase text-gray-900"></i>
+        </div>
+      </div>
+      <div class="mt-4 flex items-center gap-2 text-xs">
+        <span class="text-gray-500">Click to drill</span>
+      </div>
+    </div>
+    {% endif %}
+
+    {% if check_module_access('team_management') or is_admin %}
+    <div class="overview-kpi p-5 cursor-pointer" role="button" tabindex="0" data-detail-key="pending_tasks">
+      <div class="flex items-center justify-between">
+        <div>
+          <div class="text-xs text-gray-500">Pending Tasks</div>
+          <div class="text-3xl font-bold mt-1">{{ metrics.pending_tasks }}</div>
+          <div class="text-xs text-gray-500 mt-1">New / Not started</div>
+        </div>
+        <div class="w-10 h-10 rounded-xl bg-amber-500/15 flex items-center justify-center">
+          <i class="fas fa-list-check text-amber-700"></i>
+        </div>
+      </div>
+      <div class="mt-4 flex items-center gap-2 text-xs">
+        <span class="font-semibold text-gray-900">Overdue: {{ metrics.overdue_tasks }}</span>
+        <span class="text-gray-400">•</span>
+        <span class="text-gray-500">Click to drill</span>
+      </div>
+    </div>
+
+    <div class="overview-kpi p-5 cursor-pointer" role="button" tabindex="0" data-detail-key="approvals_pending">
+      <div class="flex items-center justify-between">
+        <div>
+          <div class="text-xs text-gray-500">Pending Approvals</div>
+          <div class="text-3xl font-bold mt-1">{{ metrics.approvals_pending }}</div>
+          <div class="text-xs text-gray-500 mt-1">Uploads awaiting decision</div>
+        </div>
+        <div class="w-10 h-10 rounded-xl bg-emerald-500/15 flex items-center justify-center">
+          <i class="fas fa-check-circle text-emerald-700"></i>
+        </div>
+      </div>
+      <div class="mt-4 flex items-center gap-2 text-xs">
+        <span class="text-gray-500">Click to drill</span>
+      </div>
+    </div>
+
+    <div class="overview-kpi p-5 cursor-pointer" role="button" tabindex="0" data-detail-key="team_leads">
+      <div class="flex items-center justify-between">
+        <div>
+          <div class="text-xs text-gray-500">People</div>
+          <div class="text-3xl font-bold mt-1">{{ metrics.employees }}</div>
+          <div class="text-xs text-gray-500 mt-1">Team Leads: {{ metrics.team_leads }}</div>
+        </div>
+        <div class="w-10 h-10 rounded-xl bg-indigo-500/15 flex items-center justify-center">
+          <i class="fas fa-users text-indigo-700"></i>
+        </div>
+      </div>
+      <div class="mt-4 flex items-center gap-2 text-xs">
+        <span class="text-gray-500">Click to drill team leads</span>
+        <span class="text-gray-400">•</span>
+        <button type="button" class="font-semibold text-gray-900 underline" data-detail-key="employees">Employees</button>
+      </div>
+    </div>
+    {% endif %}
+  </div>
+
+  <!-- Admin Shortcuts -->
+  <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mt-6"></div>
+
+  <!-- Charts -->
+  <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mt-6">
+    <div class="bg-white border border-gray-200 rounded-xl p-5">
+      <div class="flex items-center justify-between">
+        <div class="font-semibold">Bids by Status</div>
+        <div class="text-xs text-gray-500">go_bids.submission_status</div>
+      </div>
+      <div class="mt-4 chart-shell">
+        <canvas id="bidsStatusChart"></canvas>
+      </div>
+      <div class="mt-2 text-[11px] text-gray-500">Tip: click a bar to drill into matching bids.</div>
+    </div>
+    <div class="bg-white border border-gray-200 rounded-xl p-5">
+      <div class="flex items-center justify-between">
+        <div class="font-semibold">Task Status Split</div>
+        <div class="text-xs text-gray-500">bid_checklists.status</div>
+      </div>
+      <div class="mt-4 chart-shell">
+        <canvas id="taskStatusScatter"></canvas>
+      </div>
+      <div class="mt-2 text-[11px] text-gray-500">Tip: click a segment to drill into matching tasks.</div>
+    </div>
+  </div>
+
+  <!-- Details (full-width) -->
+  <div class="bg-white border border-gray-200 rounded-xl p-5 mt-6" id="taDetailsPanel">
+    <div class="flex flex-col md:flex-row md:items-center md:justify-between gap-3 mb-3">
+      <div class="min-w-0">
+        <div class="font-semibold" id="taDetailsTitle">Details</div>
+        <div class="text-sm text-gray-600 mt-1" id="taDetailsHint">Click any KPI card or chart segment to load records here.</div>
+      </div>
+      <div class="flex items-center gap-3">
+        <div class="text-xs text-gray-500" id="taDetailsMeta"></div>
+        <div class="flex items-center gap-2 text-xs text-gray-500">
+          <button type="button" class="px-3 py-2 rounded-lg border border-gray-200 hover:bg-gray-50 overview-pill" data-detail-key="overdue_tasks">Overdue Tasks</button>
+          <button type="button" class="px-3 py-2 rounded-lg border border-gray-200 hover:bg-gray-50 overview-pill" data-detail-key="pending_approvals">Pending Approvals</button>
+        </div>
+      </div>
+    </div>
+    <div id="taDetailsBody" class="text-sm text-gray-600">
+      Click any KPI card to load records here.
+    </div>
+  </div>
+
+  <!-- Bid Timeline -->
+  <div class="bg-white border border-gray-200 rounded-xl overflow-hidden mt-6">
+    <div class="p-5 border-b border-gray-200 flex items-center justify-between gap-4">
+      <div>
+        <div class="font-semibold">Bid Timeline</div>
+        <div class="text-xs text-gray-500 mt-0.5">Live stages for bids in progress</div>
+      </div>
+    </div>
+    <div class="p-5 space-y-5" id="bidTimelineList">
+      {% for item in bid_timeline_items %}
+      <div class="rounded-xl border border-gray-200 bg-white p-5 {{ 'hidden' if loop.index > 3 else '' }}" data-bid-timeline-item>
+        <div class="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h4 class="text-base font-semibold">{{ item.b_name }}</h4>
+            <div class="text-xs text-gray-500 mt-1">{{ item.company or 'Company' }}</div>
+          </div>
+          <div class="flex items-center gap-2">
+            <span class="px-3 py-1 text-xs font-semibold rounded-full border border-gray-200 bg-gray-50 text-gray-700">
+              {{ item.overall_progress or 0 }}% overall
+            </span>
+            <span class="px-3 py-1 text-xs font-semibold rounded-full border border-gray-200 bg-gray-50 text-gray-700">
+              Due: {{ item.due_date or 'TBD' }}
+            </span>
+          </div>
+        </div>
+        <div class="relative mt-6">
+          <div class="absolute top-4 left-0 w-full h-1 bg-gray-100 rounded-full border border-gray-200"></div>
+          <div class="absolute top-4 left-0 h-1 bg-emerald-500 rounded-full" style="width: {{ item.overall_progress or 0 }}%;"></div>
+          <div class="relative flex justify-between">
+            {% for st in item.stages %}
+            <div class="text-center">
+              <div class="relative w-8 h-8 rounded-full mx-auto border border-gray-200 {{ 'bg-emerald-100' if st.active else 'bg-white' }}">
+                <div class="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-3 h-3 {{ 'bg-emerald-600' if st.active else 'bg-gray-300' }} rounded-full"></div>
+              </div>
+              <p class="mt-2 text-[11px] font-semibold text-gray-600">{{ st.name }}</p>
+              <p class="text-[10px] text-gray-500">{{ st.progress }}%</p>
+            </div>
+            {% endfor %}
+          </div>
+        </div>
+      </div>
+      {% else %}
+      <div class="text-center py-8 text-gray-500">
+        <i class="fas fa-inbox text-3xl mb-2 opacity-50"></i>
+        <p>No active bids to display.</p>
+      </div>
+      {% endfor %}
+      <div class="pt-2 flex flex-wrap items-center justify-center gap-2">
+        <button type="button" class="px-4 py-2 rounded-lg border border-gray-200 text-sm font-semibold text-gray-700 hover:bg-gray-50" id="bidTimelineShowMore">
+          Show more
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Project Timeline -->
+  <div class="bg-white border border-gray-200 rounded-xl overflow-hidden mt-6">
+    <div class="p-5 border-b border-gray-200">
+      <div class="font-semibold">Project Timeline</div>
+      <div class="text-xs text-gray-500 mt-0.5">Won bids moved into delivery tracking</div>
+    </div>
+    <div class="p-5 space-y-5" id="projectTimelineList">
+      {% for item in project_timeline_items %}
+      <div class="rounded-xl border border-gray-200 bg-white p-5 {{ 'hidden' if loop.index > 3 else '' }}" data-project-timeline-item
+           data-project-id="{{ item.project_id }}"
+           data-stages='{{ item.stages|tojson|safe }}'
+           data-current-stage-id="{{ item.stages[item.current_stage_index].id if item.stages and item.current_stage_index is not none else '' }}">
+        <div class="flex flex-wrap items-center justify-between gap-3">
+          <h4 class="text-base font-semibold">{{ item.b_name }}</h4>
+          <div class="flex items-center gap-3">
+            <span class="px-3 py-1 text-xs font-semibold rounded-full border border-gray-200 bg-gray-50 text-gray-700">
+              {{ item.company or 'Company' }}
+            </span>
+            {% if can_edit_project_timeline %}
+            <button type="button"
+                    class="project-actions-toggle text-xs font-semibold text-emerald-700 hover:text-emerald-800">
+              Manage
+            </button>
+            {% endif %}
+          </div>
+        </div>
+        <div class="relative mt-6">
+          <div class="absolute top-4 left-0 w-full h-1 bg-gray-100 rounded-full border border-gray-200"></div>
+          <div class="relative flex justify-between">
+            {% for st in item.stages %}
+            {% set index = loop.index0 %}
+            {% set is_active = index <= item.current_stage_index %}
+            <div class="text-center">
+              <div class="relative w-8 h-8 rounded-full mx-auto border border-gray-200 {% if is_active %}bg-gray-900/10{% else %}bg-white{% endif %}">
+                <div class="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-3 h-3 {% if is_active %}bg-gray-900{% else %}bg-gray-300{% endif %} rounded-full"></div>
+              </div>
+              <p class="mt-2 text-[11px] font-semibold text-gray-600">{{ st.name }}</p>
+              <p class="text-[10px] text-gray-500">{{ st.progress }}%</p>
+            </div>
+            {% endfor %}
+          </div>
+        </div>
+      </div>
+      {% else %}
+      <div class="text-center py-8 text-gray-500">
+        <i class="fas fa-trophy text-3xl mb-2 opacity-50"></i>
+        <p>No won projects yet.</p>
+      </div>
+      {% endfor %}
+      <div class="pt-2 flex flex-wrap items-center justify-center gap-2">
+        <button type="button" class="px-4 py-2 rounded-lg border border-gray-200 text-sm font-semibold text-gray-700 hover:bg-gray-50" id="projectTimelineShowMore">
+          Show more
+        </button>
+      </div>
+    </div>
+  </div>
+
+  {% if can_edit_project_timeline %}
+  <div id="projectManageModal" class="fixed inset-0 hidden items-center justify-center z-50">
+    <div class="absolute inset-0 bg-black/30" data-modal-close></div>
+    <div class="relative w-[95%] max-w-4xl rounded-xl bg-white border border-gray-200 shadow-xl">
+      <div class="flex items-center justify-between px-5 py-4 border-b border-gray-200">
+        <div>
+          <h4 class="text-base font-semibold">Manage Project Timeline</h4>
+          <p class="text-xs text-gray-500" id="projectManageTitle">Project</p>
+        </div>
+        <button type="button" class="text-sm font-semibold text-gray-500" data-modal-close>Close</button>
+      </div>
+      <div class="p-5 space-y-5 text-sm">
+        <div class="rounded-lg border border-gray-200 bg-gray-50 p-4">
+          <h5 class="text-sm font-semibold mb-3">Current Stage</h5>
+          <div class="flex flex-col sm:flex-row gap-3 items-start sm:items-center">
+            <select id="projectCurrentStage" class="w-full sm:flex-1 rounded-md border px-3 py-2 bg-white border-gray-200"></select>
+            <button type="button" id="projectCurrentStageBtn" class="px-4 py-2 rounded-md text-white font-semibold bg-emerald-600 hover:bg-emerald-700">Set as Current</button>
+          </div>
+          <p class="text-xs text-gray-500 mt-2">Use this when the project moves to the next phase.</p>
+        </div>
+
+        <div class="rounded-lg border border-gray-200 bg-gray-50 p-4">
+          <h5 class="text-sm font-semibold mb-3">Add Stage</h5>
+          <div class="grid grid-cols-1 md:grid-cols-[1fr_120px_auto] gap-3">
+            <input type="text" id="projectAddStageName" class="w-full rounded-md border px-3 py-2 bg-white border-gray-200" placeholder="Stage name (e.g., Procurement)">
+            <input type="number" id="projectAddStageOrder" class="w-full rounded-md border px-3 py-2 bg-white border-gray-200" placeholder="Order">
+            <button type="button" id="projectAddStageBtn" class="px-4 py-2 rounded-md text-gray-700 font-semibold bg-gray-100 hover:bg-gray-200 border border-gray-200">Add Stage</button>
+          </div>
+          <p class="text-xs text-gray-500 mt-2">Order controls the left-to-right timeline position.</p>
+        </div>
+
+        <div class="rounded-lg border border-gray-200 bg-gray-50 p-4">
+          <div class="flex items-center justify-between mb-3">
+            <h5 class="text-sm font-semibold">Edit Stages</h5>
+            <span class="text-xs text-gray-500">Drag to reorder, rename, update progress</span>
+          </div>
+          <div class="grid grid-cols-[1fr_100px_110px_160px] gap-2 text-xs text-gray-500 mb-2 px-2">
+            <div>Stage</div>
+            <div>Order</div>
+            <div>Progress %</div>
+            <div>Actions</div>
+          </div>
+          <div id="projectStagesList" class="space-y-2 max-h-64 overflow-y-auto pr-1"></div>
+        </div>
+
+        <p class="text-xs text-gray-500">Edits apply only to this project timeline.</p>
+      </div>
+    </div>
+  </div>
+  {% endif %}
+
+  {% if (company_breakdown|length) > 0 %}
+  <div class="bg-white border border-gray-200 rounded-xl overflow-hidden mt-6">
+    <div class="p-5 border-b border-gray-200 flex items-center justify-between">
+      <div class="font-semibold">Company Overview (All)</div>
+      <div class="text-xs text-gray-500">Grouped by go_bids.company</div>
+    </div>
+  <div class="overflow-x-auto">
+      <table class="w-full text-sm overview-table">
+        <thead class="bg-gray-50 text-xs uppercase text-gray-500">
+          <tr>
+            <th class="text-left p-3">Company</th>
+            <th class="text-left p-3">Bids</th>
+            <th class="text-left p-3">Active Projects</th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-gray-100">
+          {% for r in company_breakdown %}
+          <tr class="hover:bg-gray-50">
+            <td class="p-3 font-semibold">{{ r.company_bucket }}</td>
+            <td class="p-3 text-gray-600">{{ r.bids_total }}</td>
+            <td class="p-3 text-gray-600">{{ r.active_projects }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+  {% endif %}
+
+  <script type="application/json" id="taTaskLabels">{{ charts.tasks.labels|tojson }}</script>
+  <script type="application/json" id="taTaskCounts">{{ charts.tasks.counts|tojson }}</script>
+  <script type="application/json" id="taBidsStatus">{{ charts.bids_status|tojson }}</script>
+
+  <script>
+    const apiUrl = "{{ url_for('api_top_admin_overview_details') }}";
+    const bodyEl = document.getElementById('taDetailsBody');
+    const titleEl = document.getElementById('taDetailsTitle');
+    const metaEl = document.getElementById('taDetailsMeta');
+
+    function escapeHtml(v) {
+      const s = (v === null || v === undefined) ? '' : String(v);
+      return s
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;')
+        .replaceAll("'", '&#039;');
+    }
+
+    function setLoading(label) {
+      titleEl.textContent = label || 'Details';
+      metaEl.textContent = 'Loading...';
+      bodyEl.innerHTML = '<div class="text-sm text-gray-600">Loading records...</div>';
+    }
+
+    function setError(label, msg) {
+      titleEl.textContent = label || 'Details';
+      metaEl.textContent = '';
+      bodyEl.innerHTML = '<div class="text-sm text-rose-700">Failed to load: ' + escapeHtml(msg || 'Unknown error') + '</div>';
+    }
+
+    function setEmpty(label) {
+      titleEl.textContent = label || 'Details';
+      metaEl.textContent = '0 records';
+      bodyEl.innerHTML = '<div class="text-sm text-gray-600">No records.</div>';
+    }
+
+    function renderBadge(value, type) {
+      const v = String(value || '').toLowerCase();
+      let cls = 'bg-gray-100 text-gray-700';
+      if (type === 'status') {
+        if (v.includes('pending') || v.includes('not started')) cls = 'bg-amber-100 text-amber-700';
+        else if (v.includes('in progress') || v.includes('working')) cls = 'bg-sky-100 text-sky-700';
+        else if (v.includes('completed') || v.includes('done')) cls = 'bg-emerald-100 text-emerald-700';
+        else if (v.includes('submitted')) cls = 'bg-indigo-100 text-indigo-700';
+      }
+      if (type === 'decision') {
+        if (v.includes('go')) cls = 'bg-emerald-100 text-emerald-700';
+        if (v.includes('no')) cls = 'bg-rose-100 text-rose-700';
+      }
+      if (type === 'result') {
+        if (v.includes('won')) cls = 'bg-emerald-100 text-emerald-700';
+        if (v.includes('lost')) cls = 'bg-rose-100 text-rose-700';
+      }
+      return `<span class="px-2 py-0.5 rounded-full text-xs font-semibold ${cls}">${escapeHtml(value)}</span>`;
+    }
+
+    function renderTable(label, columns, rows, shown, limit) {
+      titleEl.textContent = label || 'Details';
+      metaEl.textContent = `${shown} shown (limit ${limit})`;
+      const thead = '<tr>' + columns.map(c =>
+        '<th class="px-3 py-2 text-left text-xs font-semibold uppercase tracking-wide text-gray-500 border-b border-gray-200">' + escapeHtml(c) + '</th>'
+      ).join('') + '</tr>';
+
+      const tbody = rows.map(r => {
+        return '<tr class="border-b border-gray-100 hover:bg-gray-50">' +
+          columns.map(c => {
+            const v = (r && Object.prototype.hasOwnProperty.call(r, c)) ? r[c] : '';
+            const col = String(c || '').toLowerCase();
+            if (col.includes('status')) {
+              return '<td class="px-3 py-2 text-sm text-gray-900 align-top">' + renderBadge(v, 'status') + '</td>';
+            }
+            if (col.includes('decision')) {
+              return '<td class="px-3 py-2 text-sm text-gray-900 align-top">' + renderBadge(v, 'decision') + '</td>';
+            }
+            if (col.includes('result')) {
+              return '<td class="px-3 py-2 text-sm text-gray-900 align-top">' + renderBadge(v, 'result') + '</td>';
+            }
+            if (col.includes('progress')) {
+              const pct = Number(v || 0) || 0;
+              return `
+                <td class="px-3 py-2 text-sm text-gray-900 align-top">
+                  <div class="w-28 bg-gray-100 rounded-full h-2">
+                    <div class="h-2 rounded-full bg-emerald-500" style="width:${Math.min(100, Math.max(0, pct))}%"></div>
+                  </div>
+                  <div class="text-[11px] text-gray-500 mt-1">${escapeHtml(pct)}%</div>
+                </td>`;
+            }
+            return '<td class="px-3 py-2 text-sm text-gray-900 align-top break-words">' + escapeHtml(v) + '</td>';
+          }).join('') +
+          '</tr>';
+      }).join('');
+
+      bodyEl.innerHTML = `
+        <div class="rounded-xl overflow-hidden border border-gray-200 bg-white">
+          <div class="overflow-x-auto">
+            <table class="w-full text-left table-auto">
+              <thead class="bg-gray-50">${thead}</thead>
+              <tbody>${tbody}</tbody>
+            </table>
+          </div>
+        </div>
+      `;
+    }
+
+    async function loadDetails(key, extraParams) {
+      if (!key) return;
+      setLoading('Details');
+      try {
+        const params = new URLSearchParams();
+        params.set('key', key);
+        if (extraParams && typeof extraParams === 'object') {
+          Object.entries(extraParams).forEach(([k, v]) => {
+            if (v === undefined || v === null || v === '') return;
+            params.set(k, String(v));
+          });
+        }
+        const res = await fetch(apiUrl + '?' + params.toString(), { credentials: 'same-origin' });
+        const contentType = (res.headers.get('content-type') || '').toLowerCase();
+        let data = null;
+        if (contentType.includes('application/json')) {
+          data = await res.json();
+        } else {
+          const text = await res.text();
+          throw new Error(text.slice(0, 200) || ('HTTP ' + res.status));
+        }
+        if (!res.ok || !data || !data.ok) {
+          throw new Error((data && (data.message || data.error)) || ('HTTP ' + res.status));
+        }
+        const title = data.title || 'Details';
+        const columns = data.columns || [];
+        const rows = data.rows || [];
+        if (!rows.length) return setEmpty(title);
+        return renderTable(title, columns, rows, data.shown || rows.length, data.limit || rows.length);
+      } catch (e) {
+        return setError('Details', e && e.message ? e.message : String(e));
+      }
+    }
+
+    function setActive(el) {
+      document.querySelectorAll('[data-detail-key]').forEach(x => {
+        x.classList.remove('ring-2', 'ring-gray-900', 'active');
+      });
+      if (el) {
+        el.classList.add('ring-2', 'ring-gray-900');
+        if (el.classList.contains('overview-pill')) {
+          el.classList.add('active');
+        }
+      }
+    }
+
+    function wireClickable(el) {
+      const key = el.getAttribute('data-detail-key');
+      if (!key) return;
+      el.addEventListener('click', () => {
+        setActive(el);
+        const status = el.getAttribute('data-detail-status');
+        if (status) {
+          loadDetails(key, { status });
+        } else {
+          loadDetails(key);
+        }
+      });
+      el.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          setActive(el);
+          const status = el.getAttribute('data-detail-status');
+          if (status) {
+            loadDetails(key, { status });
+          } else {
+            loadDetails(key);
+          }
+        }
+      });
+    }
+    document.querySelectorAll('[data-detail-key]').forEach(wireClickable);
+
+    function readJson(id, fallback) {
+      try {
+        const el = document.getElementById(id);
+        if (!el || !el.textContent) return fallback;
+        return JSON.parse(el.textContent);
+      } catch (e) {
+        return fallback;
+      }
+    }
+
+    const taskLabels = readJson('taTaskLabels', []);
+    const taskCounts = readJson('taTaskCounts', []);
+    const taskCtx = document.getElementById('taskStatusScatter');
+    if (taskCtx) {
+      new Chart(taskCtx, {
+        type: 'bar',
+        data: {
+          labels: taskLabels,
+          datasets: [{
+            label: 'Tasks',
+            data: taskCounts.map(n => Number(n || 0)),
+            backgroundColor: '#10b981',
+            borderRadius: 6,
+            maxBarThickness: 28
+          }]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: {
+            legend: { display: false },
+            tooltip: { callbacks: { label: (ctx) => `${ctx.label}: ${ctx.parsed.y ?? ctx.parsed}` } }
+          },
+          scales: {
+            x: { grid: { color: 'rgba(148,163,184,0.25)' } },
+            y: { grid: { display: false }, beginAtZero: true }
+          }
+        }
+      });
+    }
+
+    const bidsStatus = readJson('taBidsStatus', { incoming: 0, pending: 0, submitted: 0, unknown: 0 });
+    const bidLabels = ['Incoming', 'Pending', 'Submitted', 'Unknown'];
+    const bidCounts = [bidsStatus.incoming, bidsStatus.pending, bidsStatus.submitted, bidsStatus.unknown].map(n => Number(n || 0));
+    const bidsCtx = document.getElementById('bidsStatusChart');
+    if (bidsCtx) {
+      new Chart(bidsCtx, {
+        type: 'line',
+        data: {
+          labels: bidLabels,
+          datasets: [{
+            label: 'Bids',
+            data: bidCounts,
+            borderColor: '#10b981',
+            backgroundColor: 'rgba(16,185,129,0.18)',
+            tension: 0.35,
+            fill: true,
+            pointRadius: 5,
+            pointHoverRadius: 7
+          }]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: {
+            legend: { display: false },
+            tooltip: { callbacks: { label: (ctx) => `${ctx.label}: ${ctx.parsed.y ?? ctx.parsed}` } }
+          },
+          scales: {
+            x: { grid: { color: 'rgba(148,163,184,0.25)' } },
+            y: { grid: { display: false }, beginAtZero: true }
+          },
+          onClick: function(_evt, elements) {
+            const first = elements && elements[0];
+            if (!first) return;
+            const idx = first.index;
+            const status = (bidLabels[idx] || '').toLowerCase();
+            if (!status) return;
+            loadDetails('bids_status', { status });
+          }
+        }
+      });
+    }
+
+    // Load a meaningful default table on first render.
+    (function () {
+      const first = document.querySelector('[data-detail-key="active_projects"]') || document.querySelector('[data-detail-key]');
+      if (first) {
+        setActive(first);
+        loadDetails(first.getAttribute('data-detail-key'));
+      }
+    })();
+
+    (function () {
+      const bidBtn = document.getElementById('bidTimelineShowMore');
+      if (bidBtn) {
+        const hiddenBid = document.querySelectorAll('[data-bid-timeline-item].hidden');
+        if (!hiddenBid.length) bidBtn.classList.add('hidden');
+        bidBtn.addEventListener('click', () => {
+          hiddenBid.forEach(el => el.classList.remove('hidden'));
+          bidBtn.classList.add('hidden');
+        });
+      }
+      const projBtn = document.getElementById('projectTimelineShowMore');
+      if (projBtn) {
+        const hiddenProj = document.querySelectorAll('[data-project-timeline-item].hidden');
+        if (!hiddenProj.length) projBtn.classList.add('hidden');
+        projBtn.addEventListener('click', () => {
+          hiddenProj.forEach(el => el.classList.remove('hidden'));
+          projBtn.classList.add('hidden');
+        });
+      }
+    })();
+  </script>
+
+  {% if can_edit_project_timeline %}
+  <script>
+    (function () {
+      const modal = document.getElementById('projectManageModal');
+      if (!modal) return;
+      const titleEl = document.getElementById('projectManageTitle');
+      const currentSelect = document.getElementById('projectCurrentStage');
+      const currentBtn = document.getElementById('projectCurrentStageBtn');
+      const addName = document.getElementById('projectAddStageName');
+      const addOrder = document.getElementById('projectAddStageOrder');
+      const addBtn = document.getElementById('projectAddStageBtn');
+      const listEl = document.getElementById('projectStagesList');
+      let activeProjectId = null;
+
+      function postProjectTimeline(url, payload) {
+        return fetch(url, {
+          method: 'POST',
+          body: payload,
+          headers: { 'X-Requested-With': 'XMLHttpRequest' }
+        });
+      }
+
+      function openModal() {
+        modal.classList.remove('hidden');
+        modal.classList.add('flex');
+      }
+
+      function closeModal() {
+        modal.classList.add('hidden');
+        modal.classList.remove('flex');
+      }
+
+      function escapeHtml(v) {
+        const s = (v === null || v === undefined) ? '' : String(v);
+        return s
+          .replaceAll('&', '&amp;')
+          .replaceAll('<', '&lt;')
+          .replaceAll('>', '&gt;')
+          .replaceAll('"', '&quot;')
+          .replaceAll("'", '&#039;');
+      }
+
+      function renderStages(stages, currentStageId) {
+        currentSelect.innerHTML = stages.map((st) => {
+          const selected = String(st.id) === String(currentStageId) ? 'selected' : '';
+          return `<option value="${escapeHtml(st.id)}" ${selected}>${escapeHtml(st.name)}</option>`;
+        }).join('');
+
+        listEl.innerHTML = stages.map((st) => {
+          return `
+            <div class="grid grid-cols-[1fr_100px_110px_160px] gap-2 items-center border border-gray-200 rounded-md p-2 bg-white" data-stage-id="${escapeHtml(st.id)}">
+              <div class="flex items-center gap-2">
+                <span class="project-stage-handle cursor-move text-xs px-2 py-1 rounded bg-gray-50 border border-gray-200" draggable="true">Drag</span>
+                <input type="text" class="project-stage-name w-full rounded-md border px-2 py-1 bg-white border-gray-200" value="${escapeHtml(st.name)}">
+              </div>
+              <input type="number" class="project-stage-order w-full rounded-md border px-2 py-1 bg-white border-gray-200" value="${escapeHtml(st.order)}" min="0">
+              <input type="number" class="project-stage-progress w-full rounded-md border px-2 py-1 bg-white border-gray-200" value="${escapeHtml(st.progress)}" min="0" max="100">
+              <div class="flex gap-2">
+                <button type="button" class="project-stage-save flex-1 text-xs font-semibold px-2 py-1 rounded-md text-gray-700 bg-gray-100 hover:bg-gray-200 border border-gray-200">Save</button>
+                <button type="button" class="project-stage-delete flex-1 text-xs font-semibold px-2 py-1 rounded-md text-white bg-rose-600 hover:bg-rose-700">Delete</button>
+              </div>
+            </div>
+          `;
+        }).join('');
+      }
+
+      function updateStageOrderInputs() {
+        const rows = Array.from(listEl.querySelectorAll('[data-stage-id]'));
+        rows.forEach((row, idx) => {
+          const orderInput = row.querySelector('.project-stage-order');
+          if (orderInput) orderInput.value = String(idx);
+        });
+      }
+
+      async function persistStageOrder() {
+        if (!activeProjectId) return;
+        const rows = Array.from(listEl.querySelectorAll('[data-stage-id]'));
+        for (const row of rows) {
+          const stageId = row.getAttribute('data-stage-id');
+          const orderInput = row.querySelector('.project-stage-order');
+          const stageOrder = orderInput ? orderInput.value : '';
+          if (!stageId || stageOrder === '') continue;
+          const payload = new FormData();
+          payload.append('project_id', activeProjectId);
+          payload.append('stage_id', stageId);
+          payload.append('stage_order', stageOrder);
+          const resp = await postProjectTimeline('/business-manager/project-timeline/stage/update', payload);
+          const data = await resp.json().catch(() => ({}));
+          if (!resp.ok || !data.ok) {
+            throw new Error(data.error || 'Failed to update stage order.');
+          }
+        }
+      }
+
+      document.querySelectorAll('[data-modal-close]').forEach((btn) => {
+        btn.addEventListener('click', closeModal);
+      });
+
+      let draggingRow = null;
+      listEl.addEventListener('dragstart', (e) => {
+        const handle = e.target.closest ? e.target.closest('.project-stage-handle') : null;
+        if (!handle) return;
+        const row = handle.closest('[data-stage-id]');
+        if (!row) return;
+        draggingRow = row;
+        row.classList.add('opacity-60');
+        if (e.dataTransfer) {
+          e.dataTransfer.effectAllowed = 'move';
+          e.dataTransfer.setData('text/plain', row.getAttribute('data-stage-id') || '');
+        }
+      });
+
+      listEl.addEventListener('dragover', (e) => {
+        if (!draggingRow) return;
+        e.preventDefault();
+        const row = e.target.closest ? e.target.closest('[data-stage-id]') : null;
+        if (!row || row === draggingRow) return;
+        const rect = row.getBoundingClientRect();
+        const shouldSwap = (e.clientY - rect.top) > (rect.height / 2);
+        listEl.insertBefore(draggingRow, shouldSwap ? row.nextSibling : row);
+      });
+
+      listEl.addEventListener('drop', async (e) => {
+        if (!draggingRow) return;
+        e.preventDefault();
+        updateStageOrderInputs();
+        try {
+          await persistStageOrder();
+        } catch (err) {
+          alert(err && err.message ? err.message : 'Failed to update stage order.');
+        }
+      });
+
+      listEl.addEventListener('dragend', () => {
+        if (draggingRow) draggingRow.classList.remove('opacity-60');
+        draggingRow = null;
+      });
+
+      document.querySelectorAll('.project-actions-toggle').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          const card = btn.closest('[data-project-id]');
+          if (!card) return;
+          activeProjectId = card.getAttribute('data-project-id');
+          const stagesRaw = card.getAttribute('data-stages') || '[]';
+          const currentStageId = card.getAttribute('data-current-stage-id');
+          let stages = [];
+          try { stages = JSON.parse(stagesRaw) || []; } catch (e) { stages = []; }
+          renderStages(stages, currentStageId);
+          const title = card.querySelector('h4')?.textContent?.trim() || 'Project';
+          titleEl.textContent = title;
+          addName.value = '';
+          addOrder.value = '';
+          openModal();
+        });
+      });
+
+      currentBtn.addEventListener('click', async () => {
+        const stageId = currentSelect.value;
+        if (!activeProjectId || !stageId) return;
+        const payload = new FormData();
+        payload.append('project_id', activeProjectId);
+        payload.append('stage_id', stageId);
+        try {
+          const resp = await postProjectTimeline('/business-manager/project-timeline/stage/current', payload);
+          const data = await resp.json().catch(() => ({}));
+          if (!resp.ok || !data.ok) throw new Error(data.error || 'Failed to update stage.');
+          window.location.reload();
+        } catch (err) {
+          alert(err.message || 'Failed to update stage.');
+        }
+      });
+
+      addBtn.addEventListener('click', async () => {
+        const stageName = (addName.value || '').trim();
+        const stageOrder = (addOrder.value || '').trim();
+        if (!activeProjectId || !stageName) {
+          alert('Enter a stage name.');
+          return;
+        }
+        const payload = new FormData();
+        payload.append('project_id', activeProjectId);
+        payload.append('stage_name', stageName);
+        if (stageOrder !== '') payload.append('stage_order', stageOrder);
+        try {
+          const resp = await postProjectTimeline('/business-manager/project-timeline/stage/add', payload);
+          const data = await resp.json().catch(() => ({}));
+          if (!resp.ok || !data.ok) throw new Error(data.error || 'Failed to add stage.');
+          window.location.reload();
+        } catch (err) {
+          alert(err.message || 'Failed to add stage.');
+        }
+      });
+
+      listEl.addEventListener('click', async (e) => {
+        const target = e.target;
+        if (!target) return;
+        const row = target.closest('[data-stage-id]');
+        if (!row || !activeProjectId) return;
+        const stageId = row.getAttribute('data-stage-id');
+
+        if (target.classList.contains('project-stage-save')) {
+          const stageName = (row.querySelector('.project-stage-name')?.value || '').trim();
+          const stageOrder = (row.querySelector('.project-stage-order')?.value || '').trim();
+          const progressPct = (row.querySelector('.project-stage-progress')?.value || '').trim();
+          const payload = new FormData();
+          payload.append('project_id', activeProjectId);
+          payload.append('stage_id', stageId);
+          if (stageName) payload.append('stage_name', stageName);
+          if (stageOrder !== '') payload.append('stage_order', stageOrder);
+          if (progressPct !== '') payload.append('progress_pct', progressPct);
+          try {
+            const resp = await postProjectTimeline('/business-manager/project-timeline/stage/update', payload);
+            const data = await resp.json().catch(() => ({}));
+            if (!resp.ok || !data.ok) throw new Error(data.error || 'Failed to update stage.');
+            window.location.reload();
+          } catch (err) {
+            alert(err.message || 'Failed to update stage.');
+          }
+        }
+
+        if (target.classList.contains('project-stage-delete')) {
+          if (!confirm('Delete this stage?')) return;
+          const payload = new FormData();
+          payload.append('project_id', activeProjectId);
+          payload.append('stage_id', stageId);
+          try {
+            const resp = await postProjectTimeline('/business-manager/project-timeline/stage/delete', payload);
+            const data = await resp.json().catch(() => ({}));
+            if (!resp.ok || !data.ok) throw new Error(data.error || 'Failed to delete stage.');
+            window.location.reload();
+          } catch (err) {
+            alert(err.message || 'Failed to delete stage.');
+          }
+        }
+      });
+
+      document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') closeModal();
+      });
+    })();
+  </script>
+  {% endif %}
+  {% if bid_timeline_items|length > 5 %}
+  <script>
+    (function () {
+      const showMoreBtn = document.getElementById('bidTimelineShowMore');
+      if (!showMoreBtn) return;
+      showMoreBtn.addEventListener('click', () => {
+        document.querySelectorAll('[data-bid-timeline-item].hidden').forEach(el => el.classList.remove('hidden'));
+        showMoreBtn.classList.add('hidden');
+      });
+    })();
+  </script>
+  {% endif %}
+{% endblock %}

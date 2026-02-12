@@ -1,0 +1,54 @@
+{# Employee: bell dropdown (session-based notifications) #}
+<div class="relative">
+  <button type="button" id="empNotifDropdownBtn"
+          class="w-10 h-10 rounded-lg border flex items-center justify-center relative"
+          style="background: #ffffff; border-color: #e5e7eb;">
+    <i class="fas fa-bell" style="color: #374151;"></i>
+    <span id="empNotifUnreadBadge"
+          class="hidden absolute -top-1 -right-1 min-w-[18px] h-[18px] px-1 rounded-full bg-rose-600 text-white text-[10px] font-bold flex items-center justify-center"></span>
+  </button>
+  <div id="empNotifDropdownPanel" class="hidden absolute right-0 mt-2 w-96 rounded-xl shadow-xl overflow-hidden z-50"
+       style="background: #ffffff; border: 1px solid #e5e7eb;">
+    <div class="px-3 py-2 flex items-center justify-between" style="border-bottom: 1px solid #e5e7eb;">
+      <div class="text-sm font-semibold" style="color: #111827;">Notifications</div>
+      <button type="button" id="empNotifMarkAllBtn" class="text-xs font-semibold text-indigo-600 hover:underline">Mark all</button>
+    </div>
+    <div id="empNotifDropdownList" class="max-h-80 overflow-y-auto"></div>
+  </div>
+</div>
+
+<script>
+  window.ESCO_NOTIF = {
+    mode: 'employee',
+    unreadUrl: {{ url_for('api_employee_notifications_unread_count')|tojson }},
+    recentUrl: {{ url_for('api_employee_notifications_recent')|tojson }},
+    markReadUrl: {{ url_for('api_employee_notifications_mark_read')|tojson }},
+    allUrl: {{ '/notifications'|tojson }},
+    csrf: {{ (csrf_token() if csrf_token is defined else '')|tojson }},
+    badgeId: 'empNotifUnreadBadge',
+    dropdownBtnId: 'empNotifDropdownBtn',
+    dropdownPanelId: 'empNotifDropdownPanel',
+    dropdownListId: 'empNotifDropdownList',
+    pollMs: 12000,
+    pollMsList: 18000
+  };
+</script>
+<script src="{{ url_for('static', filename='notifications.js') }}"></script>
+<script>
+  (function () {
+    const btn = document.getElementById('empNotifMarkAllBtn');
+    if (!btn) return;
+    btn.addEventListener('click', async function () {
+      try {
+        btn.disabled = true;
+        await fetch(window.ESCO_NOTIF.markReadUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ids: [], _csrf_token: window.ESCO_NOTIF.csrf })
+        });
+      } catch (e) {} finally {
+        btn.disabled = false;
+      }
+    });
+  })();
+</script>

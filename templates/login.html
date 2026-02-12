@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Login - Project Suite</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Sora:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        :root {
+            --ink: #0f172a;
+            --muted: #5b6476;
+            --surface: rgba(255, 255, 255, 0.86);
+            --line: rgba(148, 163, 184, 0.45);
+            --accent: #3b82f6;
+            --accent-soft: #dbeafe;
+            --mint: #a7f3d0;
+            --peach: #fde68a;
+            --rose: #fecdd3;
+        }
+        body {
+            font-family: 'Sora', sans-serif;
+            overflow: hidden;
+        }
+       
+        html, body {
+            height: 100%;
+        }
+        .page-bg {
+            position: relative;
+            background: url("{{ url_for('static', filename='login.jpg') }}") center/cover no-repeat !important;
+            background-color: transparent !important;
+        }
+        body.page-bg {
+            background: url("{{ url_for('static', filename='login.jpg') }}") center/cover no-repeat !important;
+            background-color: transparent !important;
+        }
+        
+        .glass-card {
+            background: var(--surface);
+            backdrop-filter: blur(12px);
+            border: 1px solid rgba(148, 163, 184, 0.25);
+            box-shadow: 0 30px 70px rgba(15, 23, 42, 0.18);
+        }
+        .input-field {
+            border: 1.5px solid var(--line);
+            background: rgba(255, 255, 255, 0.9);
+            transition: box-shadow 0.2s ease, border-color 0.2s ease, transform 0.2s ease;
+        }
+        .input-field:focus {
+            border-color: var(--accent);
+            box-shadow: 0 0 0 4px rgba(59, 130, 246, 0.15);
+            transform: translateY(-1px);
+        }
+        .btn-soft {
+            background: linear-gradient(135deg, var(--accent-soft), #eef2ff);
+            color: #1e3a8a;
+            border: 1px solid rgba(59, 130, 246, 0.25);
+            box-shadow: 0 12px 24px rgba(59, 130, 246, 0.18);
+        }
+        .btn-soft:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 18px 28px rgba(59, 130, 246, 0.22);
+        }
+        .btn-portal {
+            border: 1px solid rgba(15, 23, 42, 0.08);
+            box-shadow: 0 10px 18px rgba(15, 23, 42, 0.12);
+        }
+        .btn-portal:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 14px 22px rgba(15, 23, 42, 0.16);
+        }
+        .orb { display: none; }
+    </style>
+    <link rel="stylesheet" href="{{ url_for('static', filename='light_theme_overrides.css') }}">
+</head>
+<body class="page-bg h-screen flex items-center justify-center px-4 overflow-hidden text-[var(--ink)]">
+    <div class="w-full max-w-md glass-card rounded-2xl p-6 md:p-8 max-h-[95vh] flex flex-col relative z-10">
+        <!-- Headlines -->
+        <div class="text-center mb-6 flex-shrink-0">
+            <img src="{{ url_for('static', filename='IKIO USA-01.png') }}" alt="IKIO" class="mx-auto mb-3 h-12 w-auto">
+            <h1 class="text-2xl md:text-3xl font-bold text-slate-900 mb-2 leading-tight">
+                Welcome to our Project Suite
+            </h1>
+            <h2 class="text-xl md:text-2xl font-semibold text-slate-700">
+                Login to Your Account
+            </h2>
+        </div>
+
+        <!-- Login Form -->
+        <form method="POST" action="/login" class="space-y-4 flex-1" autocomplete="off">
+            <!-- CSRF Token for Security -->
+            <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+            
+            <!-- Email Field -->
+            <div>
+                <label for="email" class="block text-sm font-semibold text-slate-700 mb-2">
+                    <i class="fas fa-envelope mr-2 text-blue-500"></i>Email Address
+                </label>
+                <input type="email" name="email" id="email" 
+                       class="w-full rounded-xl px-4 py-2.5 text-base outline-none input-field" 
+                       placeholder="Enter your email" required autocomplete="email" />
+            </div>
+
+            <!-- Password Field -->
+            <div>
+                <label for="password" class="block text-sm font-semibold text-slate-700 mb-2">
+                    <i class="fas fa-lock mr-2 text-blue-500"></i>Password
+                </label>
+                <div class="relative">
+                    <input type="password" name="password" id="password" 
+                           class="w-full rounded-xl px-4 py-2.5 text-base outline-none pr-12 input-field" 
+                           placeholder="Enter your password" required autocomplete="current-password" />
+                    <button type="button" onclick="togglePasswordVisibility()" 
+                            class="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 transition">
+                        <i class="fas fa-eye" id="eye-icon"></i>
+                    </button>
+                </div>
+            </div>
+
+            <!-- Submit Button -->
+            <button type="submit" id="loginBtn"
+                    class="w-full btn-soft font-semibold py-3 text-base rounded-xl transition-all duration-200 mt-2">
+                <i class="fas fa-sign-in-alt mr-2"></i>Login
+            </button>
+        </form>
+        
+        <script>
+            function togglePasswordVisibility() {
+                const passwordInput = document.getElementById('password');
+                const eyeIcon = document.getElementById('eye-icon');
+                if (passwordInput.type === 'password') {
+                    passwordInput.type = 'text';
+                    eyeIcon.classList.remove('fa-eye');
+                    eyeIcon.classList.add('fa-eye-slash');
+                } else {
+                    passwordInput.type = 'password';
+                    eyeIcon.classList.remove('fa-eye-slash');
+                    eyeIcon.classList.add('fa-eye');
+                }
+            }
+            
+            // Prevent double submission
+            document.querySelector('form').addEventListener('submit', function(e) {
+                const btn = document.getElementById('loginBtn');
+                btn.disabled = true;
+                btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>Logging in...';
+            });
+        </script>
+
+        <!-- Admin Login Portals -->
+        <div class="mt-3 flex-shrink-0">
+            <p class="text-xs text-slate-500 text-center mb-2 uppercase tracking-wide font-semibold">Admin Portals</p>
+            <div class="flex gap-2">
+                <a href="{{ url_for('it_admin_login') }}" 
+                   class="flex-1 flex items-center justify-center gap-2 px-3 py-2.5 text-sm font-semibold rounded-xl transition-all btn-portal"
+                   style="background: linear-gradient(135deg, var(--rose), #ffe4e6); color: #9f1239;">
+                    <i class="fas fa-crown"></i>
+                    <span>IT Admin</span>
+                </a>
+                <a href="{{ url_for('top_level_admin_login') }}" 
+                   class="flex-1 flex items-center justify-center gap-2 px-3 py-2.5 text-sm font-semibold rounded-xl transition-all btn-portal"
+                   style="background: linear-gradient(135deg, var(--mint), #e0f2fe); color: #0f766e;">
+                    <i class="fas fa-user-shield"></i>
+                    <span>Top Admin</span>
+                </a>
+            </div>
+        </div>
+
+        <!-- Error Messages -->
+        {% if error %}
+        <div class="mt-3 p-3 bg-rose-50 border border-rose-200 text-rose-700 rounded-xl text-sm flex-shrink-0">
+            <i class="fas fa-exclamation-circle mr-2"></i>{{ error }}
+        </div>
+        {% endif %}
+    </div>
+</body>
+</html>

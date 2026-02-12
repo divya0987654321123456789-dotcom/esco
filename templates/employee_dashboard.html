@@ -1,0 +1,773 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Employee Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link rel="stylesheet" href="{{ url_for('static', filename='light_theme_overrides.css') }}">
+    <style>
+        .assignedTasksTable th,
+        .assignedTasksTable td { border-bottom: 1px solid #e5e7eb; border-right: 1px solid #e5e7eb; }
+        .assignedTasksTable th:last-child,
+        .assignedTasksTable td:last-child { border-right: 0; }
+        .assignedTasksTable tbody tr:last-child td { border-bottom: 0; }
+        .assignedTasksTable .project-col { width: 150px; max-width: 150px; }
+        .assignedTasksTable .bid-col { width: 260px; max-width: 260px; }
+        .assignedTasksTable .scope-col { width: 320px; max-width: 320px; }
+        .assignedTasksTable .bid-name {
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+    </style>
+</head>
+<body class="bg-gray-50 text-gray-800 with-fixed-sidebar">
+<div class="flex h-screen">
+    {% set sidebar_fixed = true %}
+    {% set sidebar_mode = 'employee' %}
+    {% set user_permissions = {'assigned_tasks': True} %}
+    {% set employee_dashboard_url = url_for('employee_dashboard', employee_id=employee.id) %}
+    {% set topbar_title = 'Assigned Tasks' %}
+    {% set topbar_subtitle = 'Tasks assigned to ' ~ ((employee.department or 'team')|title) ~ ' department.' %}
+    {% set topbar_user_label = (employee.name or employee.email or 'Employee') %}
+    {% set topbar_user_email = (employee.department or 'Team Member')|title %}
+    {% set topbar_right_html %}
+        <div class="flex items-center gap-3">
+            {% if (notif_mode or 'employee') == 'user' %}
+                {% include '_bm_notification_bell.html' %}
+            {% else %}
+                {% include '_employee_notification_bell.html' %}
+            {% endif %}
+            <span class="px-3 py-1 rounded-full border border-emerald-200 bg-emerald-50 text-xs font-semibold text-emerald-700">
+                {{ (employee.department or 'Team Member')|title }}
+            </span>
+        </div>
+    {% endset %}
+    {% include 'sidebar.html' %}
+
+    {% set status_options = [
+        {'value': 'pending', 'label': 'Pending'},
+        {'value': 'in_progress', 'label': 'In Progress'},
+        {'value': 'submitted', 'label': 'Submitted'},
+        {'value': 'completed', 'label': 'Completed'},
+    ] %}
+    {% set is_read_only_view = read_only|default(False) %}
+    <main class="ml-64 flex-1 p-8 overflow-y-auto">
+        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+            <div class="bg-white border border-gray-200 rounded-xl p-4 flex items-center justify-between shadow-sm">
+                <div>
+                    <div class="text-[11px] uppercase text-gray-500 font-semibold">Total Tasks</div>
+                    <div class="text-2xl font-bold text-gray-900">{{ total_tasks }}</div>
+                    <div class="text-[11px] text-gray-400 mt-1">Assigned to you</div>
+                </div>
+                <div class="w-10 h-10 rounded-full bg-emerald-50 text-emerald-600 flex items-center justify-center">
+                    <i class="fas fa-list-check"></i>
+                </div>
+            </div>
+            <div class="bg-white border border-gray-200 rounded-xl p-4 flex items-center justify-between shadow-sm">
+                <div>
+                    <div class="text-[11px] uppercase text-gray-500 font-semibold">Completed</div>
+                    <div class="text-2xl font-bold text-gray-900">{{ completed_tasks }}</div>
+                    <div class="text-[11px] text-gray-400 mt-1">Finished tasks</div>
+                </div>
+                <div class="w-10 h-10 rounded-full bg-emerald-50 text-emerald-600 flex items-center justify-center">
+                    <i class="fas fa-check-circle"></i>
+                </div>
+            </div>
+            <div class="bg-white border border-gray-200 rounded-xl p-4 flex items-center justify-between shadow-sm">
+                <div>
+                    <div class="text-[11px] uppercase text-gray-500 font-semibold">In Progress</div>
+                    <div class="text-2xl font-bold text-gray-900">{{ in_progress_tasks }}</div>
+                    <div class="text-[11px] text-gray-400 mt-1">Active tasks</div>
+                </div>
+                <div class="w-10 h-10 rounded-full bg-emerald-50 text-emerald-600 flex items-center justify-center">
+                    <i class="fas fa-spinner"></i>
+                </div>
+            </div>
+            <div class="bg-white border border-gray-200 rounded-xl p-4 flex items-center justify-between shadow-sm">
+                <div>
+                    <div class="text-[11px] uppercase text-gray-500 font-semibold">Pending</div>
+                    <div class="text-2xl font-bold text-gray-900">{{ pending_tasks }}</div>
+                    <div class="text-[11px] text-gray-400 mt-1">Awaiting action</div>
+                </div>
+                <div class="w-10 h-10 rounded-full bg-amber-50 text-amber-600 flex items-center justify-center">
+                    <i class="fas fa-hourglass-half"></i>
+                </div>
+            </div>
+        </div>
+
+            <div class="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
+                <div class="px-6 py-4 border-b border-slate-100">
+                    <h3 class="text-lg font-semibold text-slate-900">My Assigned Tasks</h3>
+                    <p class="text-xs text-slate-500 mt-1">Click actions to open, upload work, drop notes, or escalate to your team lead/manager/admin.</p>
+                </div>
+                <div class="overflow-x-auto">
+                    <table class="assignedTasksTable w-full text-sm border-separate border-spacing-0">
+                        <thead class="sticky top-0 bg-slate-50 text-[11px] uppercase tracking-wide text-slate-600">
+                            <tr>
+                                <th class="p-3 text-left">Task</th>
+                                <th class="p-3 text-left">Bid/Project</th>
+                                <th class="p-3 text-left">Company</th>
+                                <th class="p-3 text-left">Priority</th>
+                                <th class="p-3 text-left">Due Date</th>
+                                <th class="p-3 text-left">Status</th>
+                                <th class="p-3 text-left">Work</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for task in tasks %}
+                            <tr class="border-b last:border-b-0 hover:bg-slate-50 transition-colors">
+                                <td class="p-3">
+                                    <div class="font-semibold text-slate-900">{{ task.task_name }}</div>
+                                    {% if task.description %}
+                                    <div class="text-xs text-slate-500">{{ task.description }}</div>
+                                    {% endif %}
+                                </td>
+                                <td class="p-3 font-semibold text-slate-900">{{ task.bid_name or task.b_name or 'N/A' }}</td>
+                                <td class="p-3">{{ task.company or 'N/A' }}</td>
+                                <td class="p-3">
+                                    <span class="px-2 py-1 text-[11px] rounded-full font-semibold
+                                        {% if task.priority == 'urgent' %}bg-rose-100 text-rose-700
+                                        {% elif task.priority == 'high' %}bg-amber-100 text-amber-700
+                                        {% elif task.priority == 'medium' %}bg-yellow-100 text-yellow-700
+                                        {% else %}bg-slate-100 text-slate-700{% endif %}">
+                                        {{ task.priority|title }}
+                                    </span>
+                                </td>
+                                <td class="p-3">{{ task.due_date_display or 'N/A' }}</td>
+                                <td class="p-3">
+                                    {% if task.status == 'completed' %}
+                                        {% set badge_classes = 'bg-emerald-100 text-emerald-800' %}
+                                        {% set badge_label = 'Completed' %}
+                                    {% elif task.status == 'submitted' %}
+                                        {% set badge_classes = 'bg-emerald-100 text-emerald-800' %}
+                                        {% set badge_label = 'Submitted' %}
+                                    {% elif task.status == 'in_progress' %}
+                                        {% set badge_classes = 'bg-emerald-100 text-emerald-800' %}
+                                        {% set badge_label = 'In Progress' %}
+                                    {% else %}
+                                        {% set badge_classes = 'bg-amber-100 text-amber-800' %}
+                                        {% set badge_label = 'Pending' %}
+                                    {% endif %}
+                                    <div class="flex flex-col gap-2">
+                                        <div>
+                                            <span class="px-2 py-1 text-[11px] rounded-full font-semibold {{ badge_classes }}"
+                                                  data-task-status-badge="{{ task.id }}">
+                                                {{ badge_label }}
+                                            </span>
+                                        </div>
+                                        <div class="flex flex-wrap gap-2 items-center">
+                                            <select class="px-2 py-1.5 border border-slate-200 rounded-md text-sm text-slate-700 focus:outline-none focus:ring-2 focus:ring-emerald-400 bg-white"
+                                                    data-task-status-select="{{ task.id }}"
+                                                    {% if is_read_only_view %}disabled{% endif %}>
+                                                {% for option in status_options %}
+                                                    <option value="{{ option.value }}" {% if option.value == task.status %}selected{% endif %}>
+                                                        {{ option.label }}
+                                                    </option>
+                                                {% endfor %}
+                                            </select>
+                                        </div>
+                                        <div class="text-[11px] tracking-tight min-h-[18px]" data-task-status-feedback="{{ task.id }}"></div>
+                                        {% if is_read_only_view %}
+                                        <div class="text-[10px] text-slate-400">Read-only view</div>
+                                        {% endif %}
+                                    </div>
+                                </td>
+                                <td class="p-3">
+                                    <div class="relative inline-flex">
+                                        <button type="button"
+                                                class="w-9 h-9 inline-flex items-center justify-center rounded-md border border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
+                                                data-task-menu-toggle="{{ task.id }}"
+                                                aria-label="Task actions">
+                                            <i class="fas fa-ellipsis-h"></i>
+                                        </button>
+                                        <div class="absolute right-0 mt-2 w-40 rounded-md border border-slate-200 bg-white shadow-lg z-20 hidden"
+                                             data-task-menu="{{ task.id }}">
+                                            <button type="button"
+                                                    class="w-full px-3 py-2 text-left text-xs text-slate-700 hover:bg-slate-50 flex items-center gap-2"
+                                                    data-task-detail
+                                                    data-task-id="{{ task.id }}"
+                                                    data-task-name="{{ task.task_name|e }}">
+                                                <i class="far fa-eye"></i>Open
+                                            </button>
+                                            <button type="button"
+                                                    class="w-full px-3 py-2 text-left text-xs text-slate-700 hover:bg-slate-50 flex items-center gap-2"
+                                                    data-task-upload
+                                                    data-task-id="{{ task.id }}">
+                                                <i class="fas fa-upload"></i>Upload
+                                            </button>
+                                            <button type="button"
+                                                    class="w-full px-3 py-2 text-left text-xs text-slate-700 hover:bg-slate-50 flex items-center gap-2"
+                                                    data-task-comment
+                                                    data-task-id="{{ task.id }}">
+                                                <i class="fas fa-comment"></i>Notes
+                                            </button>
+                                            <button type="button"
+                                                    class="w-full px-3 py-2 text-left text-xs text-slate-700 hover:bg-slate-50 flex items-center gap-2"
+                                                    data-task-escalate
+                                                    data-task-id="{{ task.id }}">
+                                                <i class="fas fa-share"></i>Escalate
+                                            </button>
+                                        </div>
+                                    </div>
+                                </td>
+                            </tr>
+                            {% endfor %}
+                            {% if tasks|length == 0 %}
+                            <tr>
+                                <td colspan="7" class="p-6 text-center text-slate-500">
+                                    No tasks assigned yet.
+                                </td>
+                            </tr>
+                            {% endif %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+    </main>
+</div>
+
+<!-- Modals -->
+<div id="taskDetailModal" class="fixed inset-0 bg-black/50 hidden z-50 flex items-start justify-center p-4">
+    <div class="bg-white rounded-2xl shadow-xl w-full max-w-3xl overflow-hidden">
+        <div class="px-6 py-4 border-b flex items-center justify-between">
+            <h3 id="taskDetailTitle" class="text-lg font-semibold text-slate-900">Task Details</h3>
+            <button onclick="closeTaskDetail()" class="text-slate-500 hover:text-slate-700">
+                <i class="fas fa-times"></i>
+            </button>
+        </div>
+        <div class="px-6 py-4 space-y-4">
+            <div>
+                <div class="text-xs font-semibold text-slate-500">Description</div>
+                <p id="taskDetailDescription" class="text-sm text-slate-700"></p>
+            </div>
+            <div>
+                <div class="text-xs font-semibold text-slate-500 flex items-center justify-between">
+                    <span>Notes</span>
+                    <button class="text-xs px-2 py-1 bg-emerald-600 text-white rounded" onclick="openCommentModal()">Add</button>
+                </div>
+                <div id="taskDetailNotes" class="mt-2 space-y-3 text-sm text-slate-700 max-h-48 overflow-y-auto bg-slate-50 border border-slate-200 rounded-lg p-3">
+                    Loading comments...
+                </div>
+            </div>
+            <div>
+                <div class="text-xs font-semibold text-slate-500 flex items-center justify-between">
+                    <span>Uploads</span>
+                    <button class="text-xs px-2 py-1 bg-emerald-600 text-white rounded" onclick="openUploadModal()">Upload</button>
+                </div>
+                <div id="taskDetailUploads" class="mt-2 space-y-3 text-sm text-slate-700 max-h-48 overflow-y-auto bg-slate-50 border border-slate-200 rounded-lg p-3">
+                    Loading uploads...
+                </div>
+            </div>
+            <div>
+                <div class="text-xs font-semibold text-slate-500">Activity</div>
+                <div id="taskDetailActivity" class="mt-2 space-y-3 text-sm text-slate-700 max-h-48 overflow-y-auto bg-slate-50 border border-slate-200 rounded-lg p-3">
+                    Loading activity...
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div id="commentModal" class="fixed inset-0 bg-black/50 hidden z-50 flex items-center justify-center p-4">
+    <div class="bg-white rounded-2xl shadow-xl w-full max-w-md">
+        <div class="px-6 py-4 border-b flex items-center justify-between">
+            <h3 class="text-lg font-semibold text-slate-900">Add Note</h3>
+            <button class="text-slate-500 hover:text-slate-700" onclick="closeCommentModal()">
+                <i class="fas fa-times"></i>
+            </button>
+        </div>
+        <div class="px-6 py-4 space-y-4">
+            <textarea id="commentText" class="w-full border border-slate-300 rounded-lg px-3 py-2" rows="4" placeholder="Share your update..."></textarea>
+            <div class="text-xs text-slate-500">Send approval request to:
+                <select id="commentApprovalTarget" class="ml-2 border border-slate-300 rounded px-2 py-1 text-sm">
+                    <option value="teamlead">Team Lead</option>
+                    <option value="manager">Manager</option>
+                </select>
+            </div>
+            <div class="flex justify-end gap-2">
+                <button class="px-3 py-1.5 text-sm bg-slate-200 rounded hover:bg-slate-300" onclick="closeCommentModal()">Cancel</button>
+                <button class="px-4 py-1.5 text-sm bg-emerald-600 text-white rounded hover:bg-emerald-700" onclick="submitComment()">Send</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div id="uploadModal" class="fixed inset-0 bg-black/50 hidden z-50 flex items-center justify-center p-4">
+    <div class="bg-white rounded-2xl shadow-xl w-full max-w-md">
+        <div class="px-6 py-4 border-b flex items-center justify-between">
+            <h3 class="text-lg font-semibold text-slate-900">Upload Work</h3>
+            <button class="text-slate-500 hover:text-slate-700" onclick="closeUploadModal()"><i class="fas fa-times"></i></button>
+        </div>
+        <div class="px-6 py-4 space-y-4">
+            <input id="uploadFile" type="file" class="w-full text-sm text-slate-600">
+            <textarea id="uploadDescription" rows="3" class="w-full border border-slate-300 rounded-lg px-3 py-2" placeholder="Describe the upload..."></textarea>
+            <div class="text-xs text-slate-500">Send approval request to:
+                <select id="uploadApprovalTarget" class="ml-2 border border-slate-300 rounded px-2 py-1 text-sm">
+                    <option value="teamlead">Team Lead</option>
+                    <option value="manager">Manager</option>
+                </select>
+            </div>
+            <div class="flex justify-end gap-2">
+                <button class="px-3 py-1.5 text-sm bg-slate-200 rounded hover:bg-slate-300" onclick="closeUploadModal()">Cancel</button>
+                <button class="px-4 py-1.5 text-sm bg-emerald-600 text-white rounded hover:bg-emerald-700" onclick="submitUpload()">Upload</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div id="escalateModal" class="fixed inset-0 bg-black/50 hidden z-50 flex items-center justify-center p-4">
+    <div class="bg-white rounded-2xl shadow-xl w-full max-w-md">
+        <div class="px-6 py-4 border-b flex items-center justify-between">
+            <h3 class="text-lg font-semibold text-slate-900">Escalate / Reassign</h3>
+            <button class="text-slate-500 hover:text-slate-700" onclick="closeEscalateModal()"><i class="fas fa-times"></i></button>
+        </div>
+        <div class="px-6 py-4 space-y-4">
+            <div>
+                <label class="text-xs text-slate-500 font-semibold">Reassign to (same team)</label>
+                <select id="escalateAssignee" class="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm"></select>
+            </div>
+            <div>
+                <label class="text-xs text-slate-500 font-semibold">Note</label>
+                <textarea id="escalateNote" rows="3" class="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm"></textarea>
+            </div>
+            <div class="flex justify-end gap-2">
+                <button class="px-3 py-1.5 text-sm bg-slate-200 rounded hover:bg-slate-300" onclick="closeEscalateModal()">Cancel</button>
+                <button class="px-4 py-1.5 text-sm bg-rose-600 text-white rounded hover:bg-rose-700" onclick="submitEscalation()">Send</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+    const EMP_CURRENT_TASK = { id: null };
+    const EMPLOYEE_TEAM_KEY = {{ (employee.department or '')|lower|tojson }};
+    const STATUS_META = {
+        pending: { label: 'Pending', classes: 'bg-amber-100 text-amber-800' },
+        in_progress: { label: 'In Progress', classes: 'bg-emerald-100 text-emerald-800' },
+        completed: { label: 'Completed', classes: 'bg-emerald-100 text-emerald-800' },
+    };
+    const statusFeedbackTimers = new Map();
+    const IS_READ_ONLY_VIEW = {{ is_read_only_view|tojson }};
+    const timerFeedbackTimers = new Map();
+    const timerStates = new Map();
+    const timerIntervals = new Map();
+
+    document.addEventListener('DOMContentLoaded', () => {
+    });
+
+    document.addEventListener('click', (event) => {
+        const menuToggle = event.target.closest('[data-task-menu-toggle]');
+        if (menuToggle) {
+            const taskId = menuToggle.getAttribute('data-task-menu-toggle');
+            const menu = document.querySelector(`[data-task-menu="${taskId}"]`);
+            if (menu) {
+                const isHidden = menu.classList.contains('hidden');
+                document.querySelectorAll('[data-task-menu]').forEach(el => el.classList.add('hidden'));
+                menu.classList.toggle('hidden', !isHidden);
+            }
+            return;
+        }
+        if (!event.target.closest('[data-task-menu]')) {
+            document.querySelectorAll('[data-task-menu]').forEach(el => el.classList.add('hidden'));
+        }
+        const detailBtn = event.target.closest('[data-task-detail]');
+        if (detailBtn) {
+            EMP_CURRENT_TASK.id = parseInt(detailBtn.getAttribute('data-task-id') || '0', 10);
+            const taskName = detailBtn.getAttribute('data-task-name') || 'Task';
+            openDetailModal(EMP_CURRENT_TASK.id, taskName);
+            return;
+        }
+        if (event.target.closest('[data-task-comment]')) {
+            EMP_CURRENT_TASK.id = parseInt(event.target.closest('[data-task-comment]').getAttribute('data-task-id') || '0', 10);
+            openCommentModal();
+            return;
+        }
+        if (event.target.closest('[data-task-upload]')) {
+            EMP_CURRENT_TASK.id = parseInt(event.target.closest('[data-task-upload]').getAttribute('data-task-id') || '0', 10);
+            openUploadModal();
+            return;
+        }
+        if (event.target.closest('[data-task-escalate]')) {
+            EMP_CURRENT_TASK.id = parseInt(event.target.closest('[data-task-escalate]').getAttribute('data-task-id') || '0', 10);
+            openEscalateModal();
+            return;
+        }
+    });
+
+    document.addEventListener('change', (event) => {
+        const statusSelect = event.target.closest('[data-task-status-select]');
+        if (!statusSelect) return;
+        const taskId = parseInt(statusSelect.getAttribute('data-task-status-select') || '0', 10);
+        if (!taskId) return;
+        if (statusSelect.disabled) return;
+        handleTaskStatusSave(taskId, statusSelect);
+    });
+
+    document.addEventListener('click', (event) => {
+        const timerBtn = event.target.closest('[data-task-timer-toggle]');
+        if (!timerBtn) return;
+        const taskId = parseInt(timerBtn.getAttribute('data-task-timer-toggle') || '0', 10);
+        handleTimerToggle(taskId, timerBtn);
+    });
+
+    function openDetailModal(taskId, taskName) {
+        const modal = document.getElementById('taskDetailModal');
+        document.getElementById('taskDetailTitle').textContent = taskName;
+        document.getElementById('taskDetailDescription').textContent = 'Loading...';
+        document.getElementById('taskDetailNotes').innerHTML = '<div class="text-xs text-slate-500 italic">Loading...</div>';
+        document.getElementById('taskDetailUploads').innerHTML = '<div class="text-xs text-slate-500 italic">Loading...</div>';
+        document.getElementById('taskDetailActivity').innerHTML = '<div class="text-xs text-slate-500 italic">Loading...</div>';
+        modal.classList.remove('hidden');
+        fetch(`/task/${taskId}/details`)
+            .then(res => res.json())
+            .then(data => {
+                if (!data.success) throw new Error(data.error || 'Failed');
+                const task = data.task || {};
+                document.getElementById('taskDetailDescription').textContent = task.description || 'No description';
+                const notes = data.comments || [];
+                const notesWrap = document.getElementById('taskDetailNotes');
+                notesWrap.innerHTML = notes.length
+                    ? notes.map(n => `<div class="p-2 rounded-lg bg-white border border-slate-200 text-xs text-slate-700">
+                            <div class="font-semibold">${n.employee_name || 'User'}</div>
+                            <div>${n.comment || ''}</div>
+                        </div>`).join('')
+                    : '<div class="text-xs text-slate-500">No notes yet.</div>';
+                const uploads = (data.files || []).concat(data.manager_files || []);
+                const uploadWrap = document.getElementById('taskDetailUploads');
+                uploadWrap.innerHTML = uploads.length
+                    ? uploads.map(file => `
+                        <div class="flex items-center justify-between bg-white border border-slate-200 rounded-lg px-3 py-2 text-xs text-slate-700">
+                            <span>${file.filename || 'File'}</span>
+                            <a href="${file.download_url || '#'}" target="_blank" class="text-emerald-600 hover:underline">Download</a>
+                        </div>`).join('')
+                    : '<div class="text-xs text-slate-500">No uploads yet.</div>';
+            })
+            .catch(() => {
+                document.getElementById('taskDetailDescription').textContent = 'Unable to load details.';
+            });
+        loadTaskActivity(taskId);
+    }
+    function closeTaskDetail() {
+        document.getElementById('taskDetailModal').classList.add('hidden');
+    }
+
+    function escapeHtml(input) {
+        return String(input || '')
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
+    }
+
+    function loadTaskActivity(taskId) {
+        const activityWrap = document.getElementById('taskDetailActivity');
+        if (!activityWrap) return;
+        activityWrap.innerHTML = '<div class="text-xs text-slate-500 italic">Loading...</div>';
+        fetch(`/api/tasks/${taskId}/activity`)
+            .then(res => res.json())
+            .then(data => {
+                if (!data.ok) {
+                    throw new Error(data.error || 'Unable to load activity');
+                }
+                const items = [];
+                (data.comments || []).forEach(c => {
+                    items.push({
+                        ts: c.created_at || '',
+                        html: `
+                            <div class="text-[11px] text-slate-500">${escapeHtml(c.created_at || '')}</div>
+                            <div class="text-xs text-slate-700 mt-1"><span class="font-semibold">${escapeHtml(c.employee_name || 'User')}</span>: ${escapeHtml(c.comment || '')}</div>
+                        `,
+                    });
+                });
+                (data.employee_files || []).forEach(f => {
+                    items.push({
+                        ts: f.uploaded_at || '',
+                        html: `
+                            <div class="text-[11px] text-slate-500">${escapeHtml(f.uploaded_at || '')}</div>
+                            <div class="text-xs text-slate-700 mt-1">
+                                <a href="${escapeHtml(f.download_url || '#')}" class="text-emerald-600 hover:underline" target="_blank">${escapeHtml(f.filename || 'File')}</a>
+                            </div>
+                            <div class="text-[11px] text-slate-500 mt-1">${escapeHtml(f.employee_name || 'Employee')}</div>
+                        `,
+                    });
+                });
+                (data.manager_files || []).forEach(f => {
+                    items.push({
+                        ts: f.uploaded_at || '',
+                        html: `
+                            <div class="text-[11px] text-slate-500">${escapeHtml(f.uploaded_at || '')}</div>
+                            <div class="text-xs text-slate-700 mt-1">
+                                <a href="${escapeHtml(f.download_url || '#')}" class="text-emerald-600 hover:underline" target="_blank">${escapeHtml(f.filename || 'File')}</a>
+                            </div>
+                            <div class="text-[11px] text-slate-500 mt-1">${escapeHtml(f.manager_email || 'Manager')}</div>
+                        `,
+                    });
+                });
+                items.sort((a, b) => String(b.ts || '').localeCompare(String(a.ts || '')));
+                activityWrap.innerHTML = items.length
+                    ? items.map(item => `<div class="rounded-lg border border-slate-200 bg-white px-3 py-2">${item.html}</div>`).join('')
+                    : '<div class="text-xs text-slate-500">No activity yet.</div>';
+            })
+            .catch(() => {
+                activityWrap.innerHTML = '<div class="text-xs text-slate-500">Unable to load activity.</div>';
+            });
+    }
+
+    function openCommentModal() {
+        document.getElementById('commentText').value = '';
+        document.getElementById('commentModal').classList.remove('hidden');
+    }
+    function closeCommentModal() {
+        document.getElementById('commentModal').classList.add('hidden');
+    }
+    function submitComment() {
+        const note = (document.getElementById('commentText').value || '').trim();
+        if (!note) return alert('Please write a note.');
+        const target = document.getElementById('commentApprovalTarget').value || 'manager';
+        fetch(`/task/${EMP_CURRENT_TASK.id}/comment`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ comment: note, needs_approval: true, approval_target: target })
+        })
+        .then(res => res.json())
+        .then(data => {
+            if (data.success) {
+                closeCommentModal();
+                alert('Note submitted.');
+            } else {
+                alert('Failed: ' + (data.error || data.message || 'Unknown'));
+            }
+        })
+        .catch(() => alert('Failed to submit note.'));
+    }
+
+    function openUploadModal() {
+        document.getElementById('uploadFile').value = '';
+        document.getElementById('uploadDescription').value = '';
+        document.getElementById('uploadModal').classList.remove('hidden');
+    }
+    function closeUploadModal() {
+        document.getElementById('uploadModal').classList.add('hidden');
+    }
+    function submitUpload() {
+        const fileInput = document.getElementById('uploadFile');
+        if (!fileInput.files.length) return alert('Please select a file.');
+        const fd = new FormData();
+        fd.append('file', fileInput.files[0]);
+        fd.append('description', document.getElementById('uploadDescription').value || '');
+        fd.append('approval_target', document.getElementById('uploadApprovalTarget').value || 'manager');
+        fetch(`/task/${EMP_CURRENT_TASK.id}/upload`, { method: 'POST', body: fd })
+            .then(res => res.json())
+            .then(data => {
+                if (data.success) {
+                    closeUploadModal();
+                    alert('Upload saved.');
+                } else {
+                    alert('Upload failed: ' + (data.error || data.message));
+                }
+            })
+            .catch(() => alert('Upload failed.'));
+    }
+
+    function openEscalateModal() {
+        document.getElementById('escalateAssignee').innerHTML = '<option value="">Loading...</option>';
+        document.getElementById('escalateNote').value = '';
+        document.getElementById('escalateModal').classList.remove('hidden');
+        fetch(`/api/team/${encodeURIComponent(EMPLOYEE_TEAM_KEY)}/employees`)
+            .then(res => res.json())
+            .then(data => {
+                const employees = data.employees || [];
+                const options = employees.map(emp => `<option value="${emp.id}">${emp.name || emp.email}</option>`);
+                document.getElementById('escalateAssignee').innerHTML = options.join('') || '<option value="">No teammates</option>';
+            })
+            .catch(() => {
+                document.getElementById('escalateAssignee').innerHTML = '<option value="">Unable to load</option>';
+            });
+    }
+    function closeEscalateModal() {
+        document.getElementById('escalateModal').classList.add('hidden');
+    }
+    function submitEscalation() {
+        const assignee = document.getElementById('escalateAssignee').value;
+        if (!assignee) return alert('Please choose a teammate.');
+        fetch(`/task/${EMP_CURRENT_TASK.id}/escalate`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ assigned_to: assignee, note: document.getElementById('escalateNote').value || '' })
+        })
+        .then(res => res.json())
+        .then(data => {
+            if (data.success) {
+                closeEscalateModal();
+                alert('Escalation submitted.');
+            } else {
+                alert('Escalation failed: ' + (data.error || data.message));
+            }
+        })
+        .catch(() => alert('Escalation failed.'));
+    }
+
+    function showStatusFeedback(taskId, message, success) {
+        const feedbackEl = document.querySelector(`[data-task-status-feedback="${taskId}"]`);
+        if (!feedbackEl) return;
+        feedbackEl.textContent = message;
+        feedbackEl.classList.remove('text-emerald-600', 'text-rose-600');
+        feedbackEl.classList.add(success ? 'text-emerald-600' : 'text-rose-600');
+        if (statusFeedbackTimers.has(taskId)) {
+            clearTimeout(statusFeedbackTimers.get(taskId));
+        }
+        const timer = setTimeout(() => {
+            if (feedbackEl.textContent === message) {
+                feedbackEl.textContent = '';
+            }
+            statusFeedbackTimers.delete(taskId);
+        }, 4500);
+        statusFeedbackTimers.set(taskId, timer);
+    }
+
+    function showTimerFeedback(taskId, message, success) {
+        const feedbackEl = document.querySelector(`[data-task-timer-feedback="${taskId}"]`);
+        if (!feedbackEl) return;
+        feedbackEl.textContent = message;
+        feedbackEl.classList.remove('text-emerald-600', 'text-rose-600');
+        feedbackEl.classList.add(success ? 'text-emerald-600' : 'text-rose-600');
+        if (timerFeedbackTimers.has(taskId)) {
+            clearTimeout(timerFeedbackTimers.get(taskId));
+        }
+        const timer = setTimeout(() => {
+            if (feedbackEl.textContent === message) {
+                feedbackEl.textContent = '';
+            }
+            timerFeedbackTimers.delete(taskId);
+        }, 4500);
+        timerFeedbackTimers.set(taskId, timer);
+    }
+
+    async function sendTimeLog(taskId, startMs, endMs, durationSeconds) {
+        if (!taskId || !startMs || !endMs || !durationSeconds) {
+            return;
+        }
+        try {
+            const response = await fetch(`/task/${taskId}/log_time`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    start_time_ms: startMs,
+                    end_time_ms: endMs,
+                    duration_seconds: durationSeconds
+                }),
+            });
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok) {
+                throw new Error(data.error || data.message || 'Unable to save time entry');
+            }
+            const formatted = data.duration_display || formatDuration(durationSeconds * 1000);
+            showTimerFeedback(taskId, data.success || `Logged ${formatted}`, true);
+        } catch (error) {
+            const msg = (error && error.message) ? error.message : 'Unable to save time entry';
+            showTimerFeedback(taskId, msg, false);
+        }
+    }
+
+    function refreshStatusBadge(taskId, statusKey) {
+        const badge = document.querySelector(`[data-task-status-badge="${taskId}"]`);
+        if (!badge) return;
+        const meta = STATUS_META[statusKey] || STATUS_META.pending;
+        badge.textContent = meta.label;
+        badge.className = `px-2 py-1 text-[11px] rounded-full font-semibold ${meta.classes}`;
+    }
+
+    function formatDuration(ms) {
+        const totalSeconds = Math.floor(ms / 1000);
+        const hrs = String(Math.floor(totalSeconds / 3600)).padStart(2, '0');
+        const mins = String(Math.floor((totalSeconds % 3600) / 60)).padStart(2, '0');
+        const secs = String(totalSeconds % 60).padStart(2, '0');
+        return `${hrs}:${mins}:${secs}`;
+    }
+
+    function updateTimerDisplay(taskId) {
+        const state = timerStates.get(taskId);
+        const display = document.querySelector(`[data-task-timer-display="${taskId}"]`);
+        if (!display || !state) return;
+        const elapsed = state.elapsed + (state.running ? Date.now() - state.startedAt : 0);
+        display.textContent = formatDuration(elapsed);
+    }
+
+    function stopTimerInterval(taskId) {
+        if (timerIntervals.has(taskId)) {
+            clearInterval(timerIntervals.get(taskId));
+            timerIntervals.delete(taskId);
+        }
+    }
+
+    async function handleTaskStatusSave(taskId, select) {
+        if (!taskId || !select) return;
+        const statusValue = (select.value || '').trim();
+        if (!statusValue) {
+            showStatusFeedback(taskId, 'Choose a status', false);
+            return;
+        }
+        select.disabled = true;
+        try {
+            const response = await fetch(`/task/${taskId}/update_status`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                },
+                body: new URLSearchParams({ status: statusValue }),
+            });
+            const payload = await response.json();
+            if (!response.ok) {
+                throw new Error(payload.error || payload.message || 'Unable to update status');
+            }
+            refreshStatusBadge(taskId, statusValue);
+            showStatusFeedback(taskId, payload.success || 'Status updated', true);
+        } catch (error) {
+            showStatusFeedback(taskId, error.message || 'Unable to update status', false);
+        } finally {
+            if (!IS_READ_ONLY_VIEW) {
+                select.disabled = false;
+            }
+        }
+    }
+
+    function handleTimerToggle(taskId, button) {
+        if (!button || button.disabled) return;
+        if (!taskId || !button) return;
+        const state = timerStates.get(taskId) || { running: false, startedAt: 0, elapsed: 0 };
+        if (!state.running) {
+            state.running = true;
+            state.startedAt = Date.now();
+            timerStates.set(taskId, state);
+            stopTimerInterval(taskId);
+            timerIntervals.set(taskId, setInterval(() => updateTimerDisplay(taskId), 1000));
+            button.dataset.taskTimerState = 'running';
+            button.innerHTML = '<i class="fas fa-stop"></i><span>Stop</span>';
+        } else {
+            const now = Date.now();
+            const startedAt = state.startedAt || now;
+            const intervalMs = Math.max(0, now - startedAt);
+            const durationSeconds = Math.max(1, Math.round(intervalMs / 1000));
+            state.running = false;
+            state.elapsed += intervalMs;
+            state.startedAt = 0;
+            timerStates.set(taskId, state);
+            stopTimerInterval(taskId);
+            button.dataset.taskTimerState = 'stopped';
+            button.innerHTML = '<i class="fas fa-play"></i><span>Start</span>';
+            updateTimerDisplay(taskId);
+            if (!IS_READ_ONLY_VIEW) {
+                button.disabled = false;
+            }
+            if (intervalMs > 0) {
+                sendTimeLog(taskId, startedAt, now, durationSeconds);
+            }
+        }
+    }
+</script>
+</body>
+</html>

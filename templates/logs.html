@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ESCO Activity Logs</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <script src="https://cdn.socket.io/4.0.0/socket.io.min.js"></script>
+    <link rel="stylesheet" href="{{ url_for('static', filename='light_theme_overrides.css') }}">
+    <style>
+        .embedded-only { display: none; }
+        .embedded-hide { display: none; }
+        .embedded-main { width: 100%; }
+        body.embedded #logs-sidebar { display: none; }
+        body.embedded #logs-header { display: none; }
+        body.embedded #logs-main { width: 100%; padding: 1.5rem; }
+    </style>
+</head>
+<body class="bg-gray-50 text-gray-800 font-sans">
+    <div class="flex h-screen">
+        <aside id="logs-sidebar" class="w-64 bg-white p-6 flex flex-col justify-between border-r border-gray-200">
+            <div>
+                <div class="flex items-center mb-10">
+                    <img src="{{ url_for('static', filename='ikio.png') }}" alt="Ikio Logo" class="h-12 w-auto object-contain">
+                </div>
+                <nav>
+                    <ul>
+                        <li class="mb-4"><a href="#" class="flex items-center p-3 rounded-lg hover:bg-gray-100"><i class="fas fa-lightbulb mr-3"></i>Intelligence Suite</a></li>
+                        <li class="mb-4"><a href="#" class="flex items-center p-3 rounded-lg hover:bg-gray-100"><i class="fas fa-building mr-3"></i>Companies</a></li>
+                        <li class="mb-4"><a href="#" class="flex items-center p-3 rounded-lg hover:bg-gray-100"><i class="fas fa-chart-pie mr-3"></i>BID Analyzer</a></li>
+                        <li class="mb-4"><a href="#" class="flex items-center p-3 rounded-lg hover:bg-gray-100"><i class="fas fa-database mr-3"></i>Database</a></li>
+                        <li class="mb-4"><a href="{{ url_for('logs_page') }}" class="flex items-center p-3 rounded-lg bg-blue-100 text-blue-600 font-semibold"><i class="fas fa-history mr-3"></i>Logs</a></li>
+                    </ul>
+                </nav>
+            </div>
+            <div>
+                 <a href="{{ url_for('logout') }}" class="flex items-center p-3 hover:bg-gray-100 rounded-lg transition-all"><i class="fas fa-sign-out-alt mr-3"></i>Logout</a>
+            </div>
+        </aside>
+
+        <main id="logs-main" class="flex-1 p-8 overflow-y-auto">
+            <header id="logs-header" class="flex justify-between items-center mb-8">
+                <h2 class="text-3xl font-bold text-gray-900">Live Activity Log</h2>
+                <div class="flex items-center">
+                    <div class="relative mr-4"><i class="fas fa-search absolute left-3 top-1/2 -translate-y-1/2 text-gray-400"></i><input type="text" placeholder="Search..." class="bg-white border border-gray-300 rounded-full py-2 pl-10 pr-4 focus:outline-none focus:ring-2 focus:ring-blue-500"></div>
+                        <button class="mr-4 p-2 rounded-full hover:bg-gray-200"><i class="fas fa-bell"></i></button>
+                        <div class="flex items-center"><img src="https://placehold.co/40x40/4338ca/ffffff?text=U" alt="User Avatar" class="rounded-full w-10 h-10"></div>
+                    </div>
+            </header>
+            
+            <div class="bg-white p-6 rounded-lg shadow-md">
+                <div class="overflow-y-auto" style="height: calc(100vh - 10rem);">
+                    <table class="w-full text-left">
+                        <thead class="sticky top-0 bg-white"><tr class="border-b"><th class="p-2 w-1/4">Timestamp</th><th class="p-2 w-1/4">User</th><th class="p-2">Action</th></tr></thead>
+                        <tbody id="logs-table-body">
+                            {% for log in logs %}
+                            <tr class="border-b border-gray-200">
+                                <td class="p-2 text-gray-500 text-sm">{{ log.timestamp.strftime('%Y-%m-%d %H:%M:%S') }}</td>
+                                <td class="p-2 text-sm">{{ log.user.email if log.user else 'System' }}{% if log.user %} ({{ log.user.role|title }}){% endif %}</td>
+                                <td class="p-2 text-sm">{{ log.action }}</td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <script>
+        (function() {
+            const params = new URLSearchParams(window.location.search);
+            const embedded = params.get('embedded') === '1' || window.self !== window.top;
+            if (embedded) {
+                document.body.classList.add('embedded');
+                const sidebar = document.getElementById('logs-sidebar');
+                const main = document.getElementById('logs-main');
+                if (sidebar) sidebar.classList.add('embedded-hide');
+                if (main) main.classList.add('embedded-main');
+            }
+        })();
+    </script>
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            if (typeof io === 'undefined') { return; }
+            const socket = io();
+            const logsTableBody = document.getElementById('logs-table-body');
+            socket.on('master_update', function(data) {
+                if (!data || !data.log || !logsTableBody) return;
+                const tr = document.createElement('tr');
+                tr.className = 'border-b border-gray-200';
+                const timestampCell = document.createElement('td');
+                timestampCell.className = 'p-2 text-gray-500 text-sm';
+                timestampCell.textContent = data.log.timestamp || '';
+                const userCell = document.createElement('td');
+                userCell.className = 'p-2 text-sm';
+                const ue = data.log.user_email || 'System';
+                const ur = data.log.user_role ? ` (${String(data.log.user_role).charAt(0).toUpperCase()}${String(data.log.user_role).slice(1)})` : '';
+                userCell.textContent = ue + ur;
+                const actionCell = document.createElement('td');
+                actionCell.className = 'p-2 text-sm';
+                actionCell.textContent = data.log.action || '';
+                tr.appendChild(timestampCell);
+                tr.appendChild(userCell);
+                tr.appendChild(actionCell);
+                logsTableBody.insertBefore(tr, logsTableBody.firstChild);
+            });
+        });
+    </script>
+</body>
+</html>

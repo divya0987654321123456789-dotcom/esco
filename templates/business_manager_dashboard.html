@@ -1,0 +1,825 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Overview - Business Manager - ESCO</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        :root {
+            /* Light theme (match other dashboards) */
+            --bg-primary: #ffffff;
+            --bg-secondary: #f8fafc;
+            --bg-tertiary: #ffffff;
+            --border-color: #e5e7eb;
+            --text-primary: #111827;
+            --text-secondary: #6b7280;
+            --accent-emerald: #10b981;
+            --accent-cyan: #06b6d4;
+            --accent-violet: #8b5cf6;
+            --accent-amber: #f59e0b;
+            --accent-rose: #f43f5e;
+            --company-primary: {% set _c = (active_company_name or '')|lower %}{% if 'ikio' in _c %}#10b981{% elif 'metco' in _c %}#8b5cf6{% elif 'sunsprint' in _c %}#f59e0b{% else %}#06b6d4{% endif %};
+            --company-secondary: {% set _c2 = (active_company_name or '')|lower %}{% if 'ikio' in _c2 %}#14b8a6{% elif 'metco' in _c2 %}#a855f7{% elif 'sunsprint' in _c2 %}#fb923c{% else %}#22d3ee{% endif %};
+            --company-glow: {% set _c3 = (active_company_name or '')|lower %}{% if 'ikio' in _c3 %}rgba(16, 185, 129, 0.25){% elif 'metco' in _c3 %}rgba(139, 92, 246, 0.25){% elif 'sunsprint' in _c3 %}rgba(245, 158, 11, 0.25){% else %}rgba(6, 182, 212, 0.25){% endif %};
+        }
+        body {
+            background: var(--bg-secondary);
+            color: var(--text-primary);
+        }
+        .glass-card {
+            background: rgba(255, 255, 255, 0.9);
+            border: 1px solid var(--border-color);
+        }
+        .stat-card {
+            background: linear-gradient(135deg, #ffffff 0%, #f8fafc 100%);
+            border: 1px solid var(--border-color);
+            box-shadow: 0 1px 2px rgba(16,24,40,0.06), 0 6px 16px rgba(16,24,40,0.08);
+            transition: transform 0.2s ease, border-color 0.2s ease;
+        }
+        .stat-card:hover {
+            transform: translateY(-3px);
+            border-color: var(--company-primary);
+            box-shadow: 0 0 30px var(--company-glow);
+        }
+        .progress-bar {
+            background: linear-gradient(90deg, var(--company-primary), var(--company-secondary));
+        }
+        .scrollbar-custom::-webkit-scrollbar { width: 8px; }
+        .scrollbar-custom::-webkit-scrollbar-track { background: rgba(17,24,39,0.06); }
+        .scrollbar-custom::-webkit-scrollbar-thumb { background: rgba(100,116,139,0.35); border-radius: 999px; }
+    </style>
+    <link rel="stylesheet" href="{{ url_for('static', filename='light_theme_overrides.css') }}">
+</head>
+<body class="text-[var(--text-primary)]" data-theme="light">
+    <div class="flex h-screen">
+        {% set team = 'business' %}
+        {% set dark_mode = false %}
+        {% include 'sidebar.html' %}
+
+        <main class="flex-1 overflow-y-auto scrollbar-custom">
+            <!-- Header -->
+            <header class="sticky top-0 z-10 px-8 py-5 border-b border-[var(--border-color)] bg-[var(--bg-primary)]/90 backdrop-blur-sm">
+                <div class="flex items-start justify-between gap-6">
+                    <div>
+                        <h2 class="text-3xl font-bold">Overview</h2>
+                        <p class="text-sm text-[var(--text-secondary)]">Business Development • Business Development Manager</p>
+                        <p class="mt-2 text-sm text-[var(--text-secondary)]">Company: <span class="font-semibold text-[var(--text-primary)]">{{ active_company_name or 'All' }}</span></p>
+                    </div>
+                    <div class="flex items-center gap-4">
+                        <form method="POST" action="{{ url_for('switch_context') }}" class="flex items-center gap-2">
+                            <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+                            <input type="hidden" name="next" value="{{ request.full_path }}">
+                            <label class="text-xs text-[var(--text-secondary)]">Company</label>
+                            <select name="company_id" class="bg-[var(--bg-tertiary)] border border-[var(--border-color)] rounded-lg px-3 py-2 text-sm text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--company-primary)]">
+                                <option value="" {{ 'selected' if not active_company_id else '' }} {{ 'disabled' if company_locked else '' }}>All</option>
+                                {% for c in available_companies %}
+                                <option value="{{ c.id }}"
+                                        {{ 'selected' if (active_company_id|string) == (c.id|string) else '' }}
+                                        {{ 'disabled' if (c.is_active is defined and not c.is_active) else '' }}>
+                                    {{ c.name }}{% if c.is_active is defined and not c.is_active %} (Disabled){% endif %}
+                                </option>
+                                {% endfor %}
+                            </select>
+                            <button type="submit" class="px-3 py-2 rounded-lg text-sm font-semibold text-white" style="background: var(--company-primary)">
+                                Switch
+                            </button>
+                        </form>
+                        {% include '_bm_notification_bell.html' %}
+                        <div class="text-right">
+                           
+                            <div class="mt-1 text-xs">
+                                <span class="px-3 py-1 rounded-full glass-card">Role: {{ user_role|replace('_',' ')|title }}</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </header>
+
+            <div class="p-8">
+                <!-- KPI Cards -->
+                <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-7 gap-5 mb-8">
+                    <div class="stat-card rounded-xl p-5 cursor-pointer" role="button" tabindex="0" data-detail-key="new_bids_today">
+                        <div class="flex items-center justify-between">
+                            <div>
+                                <p class="text-xs text-[var(--text-secondary)]">Today's New Bids</p>
+                                <p class="text-3xl font-bold mt-1">{{ overview_cards.new_bids_today }}</p>
+                                <p class="text-xs text-[var(--text-secondary)] mt-1">Created today in Bid Incoming</p>
+                            </div>
+                            <div class="w-10 h-10 rounded-xl flex items-center justify-center bg-rose-500/15">
+                                <i class="fas fa-calendar-day text-rose-300"></i>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="stat-card rounded-xl p-5 cursor-pointer" role="button" tabindex="0" data-detail-key="total_bid_incoming">
+                        <div class="flex items-center justify-between">
+                            <div>
+                                <p class="text-xs text-[var(--text-secondary)]">Total Bid Incoming</p>
+                                <p class="text-3xl font-bold mt-1">{{ overview_cards.total_bid_incoming }}</p>
+                                <p class="text-xs text-[var(--text-secondary)] mt-1">All BIDs received</p>
+                            </div>
+                            <div class="w-10 h-10 rounded-xl flex items-center justify-center" style="background: color-mix(in srgb, var(--company-primary) 20%, transparent);">
+                                <i class="fas fa-inbox" style="color: var(--company-primary)"></i>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="stat-card rounded-xl p-5 cursor-pointer" role="button" tabindex="0" data-detail-key="pending_bids">
+                        <div class="flex items-center justify-between">
+                            <div>
+                                <p class="text-xs text-[var(--text-secondary)]">Pending Bids</p>
+                                <p class="text-3xl font-bold mt-1">{{ overview_cards.pending_bids }}</p>
+                                <p class="text-xs text-[var(--text-secondary)] mt-1">Awaiting action</p>
+                            </div>
+                            <div class="w-10 h-10 rounded-xl flex items-center justify-center bg-amber-500/15">
+                                <i class="fas fa-hourglass-half text-amber-300"></i>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="stat-card rounded-xl p-5 cursor-pointer" role="button" tabindex="0" data-detail-key="bids_submitted">
+                        <div class="flex items-center justify-between">
+                            <div>
+                                <p class="text-xs text-[var(--text-secondary)]">Bids Submitted</p>
+                                <p class="text-3xl font-bold mt-1">{{ overview_cards.bids_submitted }}</p>
+                                <p class="text-xs text-[var(--text-secondary)] mt-1">Already submitted</p>
+                            </div>
+                            <div class="w-10 h-10 rounded-xl flex items-center justify-center bg-emerald-500/15">
+                                <i class="fas fa-paper-plane text-emerald-300"></i>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="stat-card rounded-xl p-5 cursor-pointer" role="button" tabindex="0" data-detail-key="total_project">
+                        <div class="flex items-center justify-between">
+                            <div>
+                                <p class="text-xs text-[var(--text-secondary)]">Total Project</p>
+                                <p class="text-3xl font-bold mt-1">{{ overview_cards.total_project }}</p>
+                                <p class="text-xs text-[var(--text-secondary)] mt-1">All projects</p>
+                            </div>
+                            <div class="w-10 h-10 rounded-xl flex items-center justify-center bg-cyan-500/15">
+                                <i class="fas fa-diagram-project text-cyan-300"></i>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="stat-card rounded-xl p-5 cursor-pointer" role="button" tabindex="0" data-detail-key="project_in_progress">
+                        <div class="flex items-center justify-between">
+                            <div>
+                                <p class="text-xs text-[var(--text-secondary)]">Project In Progress</p>
+                                <p class="text-3xl font-bold mt-1">{{ overview_cards.project_in_progress }}</p>
+                                <p class="text-xs text-[var(--text-secondary)] mt-1">Ongoing</p>
+                            </div>
+                            <div class="w-10 h-10 rounded-xl flex items-center justify-center bg-violet-500/15">
+                                <i class="fas fa-spinner text-violet-300"></i>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="stat-card rounded-xl p-5 cursor-pointer" role="button" tabindex="0" data-detail-key="project_completed">
+                        <div class="flex items-center justify-between">
+                            <div>
+                                <p class="text-xs text-[var(--text-secondary)]">Project Completed</p>
+                                <p class="text-3xl font-bold mt-1">{{ overview_cards.project_completed }}</p>
+                                <p class="text-xs text-[var(--text-secondary)] mt-1">Finished</p>
+                            </div>
+                            <div class="w-10 h-10 rounded-xl flex items-center justify-center bg-emerald-500/15">
+                                <i class="fas fa-circle-check text-emerald-300"></i>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Status + Details -->
+                <div class="grid grid-cols-1 sm:grid-cols-1 gap-6 mb-8">
+                    <div class="glass-card rounded-xl p-6">
+                        <h3 class="text-lg font-semibold mb-4">BIDs by status</h3>
+                        {% set _rows = [
+                            ('Incoming','incoming','bg-cyan-400'),
+                            ('Pending','pending','bg-amber-400'),
+                            ('Submitted','submitted','bg-emerald-400'),
+                            ('Unknown','unknown','bg-slate-400')
+                        ] %}
+                        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 items-center">
+                            <div class="rounded-xl border border-[var(--border-color)] bg-[var(--bg-tertiary)] p-4">
+                                <div class="h-[220px]">
+                                    <canvas id="bidsByStatusChart" aria-label="BIDs by status chart" role="img"></canvas>
+                                </div>
+                                <script type="application/json" id="bidsByStatusData">{{ bids_by_status|tojson }}</script>
+                                <div class="mt-3 text-xs text-[var(--text-secondary)]">
+                                    Based on <span class="font-semibold text-[var(--text-primary)]">GO bids</span> submission status.
+                                </div>
+                            </div>
+
+                            <div class="space-y-4">
+                                {% for label, key, color in _rows %}
+                                <div class="flex items-center gap-4 cursor-pointer" role="button" tabindex="0" data-detail-key="status_{{ key }}">
+                                    <div class="w-24 text-sm text-[var(--text-secondary)]">{{ label }}</div>
+                                    <div class="flex-1 h-2.5 rounded-full bg-white/5 overflow-hidden border border-[var(--border-color)]">
+                                        <div class="h-full progress-bar" data-pct="{{ bids_by_status_pct.get(key, 0) }}"></div>
+                                    </div>
+                                    <div class="w-10 text-right text-sm font-semibold">{{ bids_by_status.get(key, 0) }}</div>
+                                </div>
+                                {% endfor %}
+                            </div>
+                        </div>
+                    </div>
+                    <div class="glass-card rounded-xl p-6" id="bmDetailsPanel">
+                        <div class="flex items-center justify-between gap-4 mb-4">
+                            <h3 class="text-lg font-semibold" id="bmDetailsTitle">Details</h3>
+                            <div class="text-xs text-[var(--text-secondary)]" id="bmDetailsMeta"></div>
+                        </div>
+                        <div id="bmDetailsBody" class="text-sm text-[var(--text-secondary)]">
+                            Click any card above to load records.
+                        </div>
+                    </div>
+                </div>
+
+                <!-- BID Timeline -->
+                <div class="glass-card rounded-xl p-6">
+                    <div class="flex items-center justify-between mb-4">
+                        <div>
+                            <h3 class="text-lg font-semibold">BID Timeline</h3>
+                            <p class="text-sm text-[var(--text-secondary)]">{{ active_company_name or 'All Companies' }} - Top High Priority BIDs</p>
+                        </div>
+                        <a href="{{ url_for('bid_timeline') }}" class="text-sm font-semibold hover:opacity-90" style="color: var(--company-primary)">Open</a>
+                    </div>
+                    <div class="rounded-xl overflow-hidden border border-[var(--border-color)] bg-[var(--bg-tertiary)]">
+                        <iframe
+                            src="{{ url_for('bid_timeline') }}?embed=1{% if bid_timeline_dark %}&dark=1{% endif %}"
+                            class="w-full h-[520px] border-0"
+                            loading="lazy"
+                        ></iframe>
+                    </div>
+                </div>
+
+                <!-- Project Timeline -->
+                <div class="glass-card rounded-xl p-6 mt-6">
+                    <div class="mb-4">
+                        <h3 class="text-lg font-semibold">
+                            <i class="fas fa-trophy mr-2" style="color: var(--accent-amber)"></i>Project Timeline
+                        </h3>
+                        <p class="text-sm text-[var(--text-secondary)]">Won bids moved into delivery tracking</p>
+                    </div>
+                    <div class="space-y-5">
+                        {% for item in won_projects %}
+                        <div class="rounded-xl border border-[var(--border-color)] bg-[var(--bg-tertiary)] p-5" data-project-id="{{ item.project_id }}" data-stages='{{ item.stages|tojson|safe }}' data-current-stage-id="{{ item.current_stage_id }}">
+                            <div class="flex flex-wrap items-center justify-between gap-3">
+                                <h4 class="text-base font-semibold">{{ item.b_name }}</h4>
+                                <div class="flex items-center gap-3">
+                                    <span class="px-3 py-1 text-xs font-semibold rounded-full border border-[var(--border-color)]" style="background: color-mix(in srgb, var(--company-primary) 12%, transparent); color: var(--company-primary);">
+                                        {{ item.company or 'Company' }}
+                                    </span>
+                                    {% if can_edit_project_timeline %}
+                                    <button type="button" class="project-actions-toggle text-xs font-semibold" style="color: var(--company-primary);">
+                                        Manage
+                                    </button>
+                                    {% endif %}
+                                </div>
+                            </div>
+                            <div class="relative mt-6">
+                                <div class="absolute top-4 left-0 w-full h-1 bg-[var(--bg-secondary)] rounded-full border border-[var(--border-color)]"></div>
+                                <div class="relative flex justify-between">
+                                    {% for st in item.stages %}
+                                    {% set index = loop.index0 %}
+                                    {% set is_active = index <= item.current_stage_index %}
+                                    {% set pct = (100 * index // (item.stages|length - 1)) if (item.stages|length - 1) > 0 else 0 %}
+                                    <div class="text-center">
+                                        <div class="relative w-8 h-8 rounded-full mx-auto border border-[var(--border-color)] {% if is_active %}bg-[var(--company-primary)]/20{% else %}bg-[var(--bg-tertiary)]{% endif %}">
+                                            <div class="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-3 h-3 {% if is_active %}bg-[var(--company-primary)]{% else %}bg-[var(--border-color)]{% endif %} rounded-full"></div>
+                                        </div>
+                                        <p class="mt-2 text-[11px] font-semibold text-[var(--text-secondary)]">{{ st.name }}</p>
+                                        <p class="text-[10px] text-[var(--company-primary)]">{{ st.progress }}%</p>
+                                    </div>
+                                    {% endfor %}
+                                </div>
+                            </div>
+                        </div>
+                        {% else %}
+                        <div class="text-center py-8 text-[var(--text-secondary)]">
+                            <i class="fas fa-trophy text-3xl mb-2 opacity-50"></i>
+                            <p>No won projects yet.</p>
+                        </div>
+                        {% endfor %}
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    {% if can_edit_project_timeline %}
+    <div id="projectManageModal" class="fixed inset-0 hidden items-center justify-center z-50">
+        <div class="absolute inset-0 bg-black/30" data-modal-close></div>
+        <div class="relative w-[95%] max-w-4xl rounded-xl bg-[var(--bg-tertiary)] border border-[var(--border-color)] shadow-xl">
+            <div class="flex items-center justify-between px-5 py-4 border-b border-[var(--border-color)]">
+                <div>
+                    <h4 class="text-base font-semibold">Manage Project Timeline</h4>
+                    <p class="text-xs text-[var(--text-secondary)]" id="projectManageTitle">Project</p>
+                </div>
+                <button type="button" class="text-sm font-semibold text-[var(--text-secondary)]" data-modal-close>Close</button>
+            </div>
+            <div class="p-5 space-y-5 text-sm">
+                <div class="rounded-lg border border-[var(--border-color)] bg-[var(--bg-secondary)] p-4">
+                    <h5 class="text-sm font-semibold mb-3">Current Stage</h5>
+                    <div class="flex flex-col sm:flex-row gap-3 items-start sm:items-center">
+                        <select id="projectCurrentStage" class="w-full sm:flex-1 rounded-md border px-3 py-2 bg-[var(--bg-tertiary)] border-[var(--border-color)]"></select>
+                        <button type="button" id="projectCurrentStageBtn" class="px-4 py-2 rounded-md text-white font-semibold" style="background: var(--company-primary);">Set as Current</button>
+                    </div>
+                    <p class="text-xs text-[var(--text-secondary)] mt-2">Use this when the project moves to the next phase.</p>
+                </div>
+
+                <div class="rounded-lg border border-[var(--border-color)] bg-[var(--bg-secondary)] p-4">
+                    <h5 class="text-sm font-semibold mb-3">Add Stage</h5>
+                    <div class="grid grid-cols-1 md:grid-cols-[1fr_120px_auto] gap-3">
+                        <input type="text" id="projectAddStageName" class="w-full rounded-md border px-3 py-2 bg-[var(--bg-tertiary)] border-[var(--border-color)]" placeholder="Stage name (e.g., Procurement)">
+                        <input type="number" id="projectAddStageOrder" class="w-full rounded-md border px-3 py-2 bg-[var(--bg-tertiary)] border-[var(--border-color)]" placeholder="Order">
+                        <button type="button" id="projectAddStageBtn" class="px-4 py-2 rounded-md text-white font-semibold" style="background: var(--company-primary);">Add Stage</button>
+                    </div>
+                    <p class="text-xs text-[var(--text-secondary)] mt-2">Order controls the left-to-right timeline position.</p>
+                </div>
+
+                <div class="rounded-lg border border-[var(--border-color)] bg-[var(--bg-secondary)] p-4">
+                    <div class="flex items-center justify-between mb-3">
+                        <h5 class="text-sm font-semibold">Edit Stages</h5>
+                        <span class="text-xs text-[var(--text-secondary)]">Drag to reorder, rename, update progress</span>
+                    </div>
+                    <div class="grid grid-cols-[1fr_100px_110px_160px] gap-2 text-xs text-[var(--text-secondary)] mb-2 px-2">
+                        <div>Stage</div>
+                        <div>Order</div>
+                        <div>Progress %</div>
+                        <div>Actions</div>
+                    </div>
+                    <div id="projectStagesList" class="space-y-2 max-h-64 overflow-y-auto pr-1"></div>
+                </div>
+
+                <p class="text-xs text-[var(--text-secondary)]">Edits apply only to this project timeline.</p>
+            </div>
+        </div>
+    </div>
+    {% endif %}
+
+    <script>
+        (function () {
+            const apiUrl = "{{ url_for('api_business_manager_overview_details') }}";
+            const bodyEl = document.getElementById('bmDetailsBody');
+            const titleEl = document.getElementById('bmDetailsTitle');
+            const metaEl = document.getElementById('bmDetailsMeta');
+
+            function escapeHtml(v) {
+                const s = (v === null || v === undefined) ? '' : String(v);
+                return s
+                    .replaceAll('&', '&amp;')
+                    .replaceAll('<', '&lt;')
+                    .replaceAll('>', '&gt;')
+                    .replaceAll('"', '&quot;')
+                    .replaceAll("'", '&#039;');
+            }
+
+            function setLoading(label) {
+                titleEl.textContent = label || 'Details';
+                metaEl.textContent = 'Loading...';
+                bodyEl.innerHTML = '<div class="text-sm text-[var(--text-secondary)]">Loading records...</div>';
+            }
+
+            function setError(label, msg) {
+                titleEl.textContent = label || 'Details';
+                metaEl.textContent = '';
+                bodyEl.innerHTML = '<div class="text-sm text-rose-300">Failed to load: ' + escapeHtml(msg || 'Unknown error') + '</div>';
+            }
+
+            function setEmpty(label) {
+                titleEl.textContent = label || 'Details';
+                metaEl.textContent = '0 records';
+                bodyEl.innerHTML = '<div class="text-sm text-[var(--text-secondary)]">No records.</div>';
+            }
+
+            function renderTable(label, columns, rows, shown, limit) {
+                titleEl.textContent = label || 'Details';
+                metaEl.textContent = `${shown} shown (limit ${limit})`;
+                const thead = '<tr>' + columns.map(c =>
+                    '<th class="px-3 py-2 text-left text-xs font-semibold uppercase tracking-wide text-[var(--text-secondary)] border-b border-[var(--border-color)] whitespace-nowrap">' + escapeHtml(c) + '</th>'
+                ).join('') + '</tr>';
+
+                const tbody = rows.map(r => {
+                    return '<tr class="border-b border-[var(--border-color)]/70 hover:bg-white/5">' +
+                        columns.map(c => {
+                            const v = (r && Object.prototype.hasOwnProperty.call(r, c)) ? r[c] : '';
+                            return '<td class="px-3 py-2 text-sm text-[var(--text-primary)] align-top whitespace-nowrap">' + escapeHtml(v) + '</td>';
+                        }).join('') +
+                        '</tr>';
+                }).join('');
+
+                bodyEl.innerHTML = `
+                    <div class="rounded-xl overflow-hidden border border-[var(--border-color)] bg-[var(--bg-tertiary)]">
+                        <div class="max-h-[330px] overflow-auto scrollbar-custom">
+                            <table class="w-full text-left">
+                                <thead class="sticky top-0 bg-[var(--bg-tertiary)]">${thead}</thead>
+                                <tbody>${tbody}</tbody>
+                            </table>
+                        </div>
+                    </div>
+                `;
+            }
+
+            async function loadDetails(key) {
+                if (!key) return;
+                setLoading('Details');
+                try {
+                    const res = await fetch(apiUrl + '?key=' + encodeURIComponent(key), { credentials: 'same-origin' });
+                    const data = await res.json();
+                    if (!res.ok || !data || !data.ok) {
+                        throw new Error((data && (data.message || data.error)) || ('HTTP ' + res.status));
+                    }
+                    const title = data.title || 'Details';
+                    const columns = data.columns || [];
+                    const rows = data.rows || [];
+                    if (!rows.length) return setEmpty(title);
+                    return renderTable(title, columns, rows, data.shown || rows.length, data.limit || rows.length);
+                } catch (e) {
+                    return setError('Details', e && e.message ? e.message : String(e));
+                }
+            }
+
+            function setActive(el) {
+                document.querySelectorAll('[data-detail-key]').forEach(x => {
+                    x.classList.remove('ring-2', 'ring-offset-2', 'ring-offset-transparent');
+                    x.style.boxShadow = '';
+                });
+                if (el) {
+                    el.classList.add('ring-2', 'ring-offset-2', 'ring-offset-transparent');
+                    el.style.boxShadow = '0 0 0 2px var(--company-primary)';
+                }
+            }
+
+            function wireClickable(el) {
+                const key = el.getAttribute('data-detail-key');
+                if (!key) return;
+                el.addEventListener('click', () => {
+                    setActive(el);
+                    loadDetails(key);
+                });
+                el.addEventListener('keydown', (e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        setActive(el);
+                        loadDetails(key);
+                    }
+                });
+            }
+
+            document.querySelectorAll('[data-detail-key]').forEach(wireClickable);
+
+            // Apply widths for the status progress bars (avoids template-inlined CSS parsing issues).
+            document.querySelectorAll('.progress-bar[data-pct]').forEach((bar) => {
+                const pct = parseInt(bar.getAttribute('data-pct') || '0', 10);
+                bar.style.width = (Number.isFinite(pct) ? pct : 0) + '%';
+            });
+
+            // Expose a tiny hook so other widgets (e.g., charts) can load the same Details panel.
+            window.__bmOverview = {
+                loadDetails: loadDetails,
+                setActiveByKey: function (detailKey) {
+                    const el = document.querySelector('[data-detail-key="' + CSS.escape(detailKey) + '"]');
+                    if (el) setActive(el);
+                }
+            };
+        })();
+    </script>
+
+    <script>
+        (function () {
+            const el = document.getElementById('bidsByStatusChart');
+            if (!el || !window.Chart) return;
+
+            const labels = ['Incoming', 'Pending', 'Submitted', 'Unknown'];
+            let status = {};
+            try {
+                const dataEl = document.getElementById('bidsByStatusData');
+                status = JSON.parse((dataEl && dataEl.textContent) ? dataEl.textContent : '{}') || {};
+            } catch (e) {
+                status = {};
+            }
+            const values = [
+                Number(status.incoming || 0),
+                Number(status.pending || 0),
+                Number(status.submitted || 0),
+                Number(status.unknown || 0),
+            ];
+
+            const css = getComputedStyle(document.documentElement);
+            const colors = [
+                css.getPropertyValue('--accent-cyan').trim() || '#06b6d4',
+                css.getPropertyValue('--accent-amber').trim() || '#f59e0b',
+                css.getPropertyValue('--accent-emerald').trim() || '#10b981',
+                css.getPropertyValue('--text-secondary').trim() || '#94a3b8'
+            ];
+
+            // eslint-disable-next-line no-new
+            new Chart(el, {
+                type: 'doughnut',
+                data: {
+                    labels,
+                    datasets: [{
+                        data: values,
+                        backgroundColor: colors,
+                        borderColor: 'rgba(0,0,0,0)',
+                        hoverOffset: 6,
+                    }],
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    animation: { duration: 500 },
+                    onClick: function (_evt, elements) {
+                        try {
+                            const first = elements && elements[0];
+                            if (!first) return;
+                            const idx = first.index;
+                            const map = ['status_incoming', 'status_pending', 'status_submitted', 'status_unknown'];
+                            const key = map[idx];
+                            if (!key) return;
+                            if (window.__bmOverview && typeof window.__bmOverview.setActiveByKey === 'function') {
+                                window.__bmOverview.setActiveByKey(key);
+                            }
+                            if (window.__bmOverview && typeof window.__bmOverview.loadDetails === 'function') {
+                                window.__bmOverview.loadDetails(key);
+                            }
+                        } catch (e) {
+                            // no-op
+                        }
+                    },
+                    plugins: {
+                        legend: {
+                            display: true,
+                            position: 'bottom',
+                            labels: {
+                                color: css.getPropertyValue('--text-secondary').trim() || '#94a3b8',
+                                boxWidth: 10,
+                                boxHeight: 10,
+                                padding: 14,
+                                usePointStyle: true,
+                                pointStyle: 'circle',
+                            }
+                        },
+                        tooltip: {
+                            callbacks: {
+                                label: function (ctx) {
+                                    const v = ctx.parsed || 0;
+                                    const total = values.reduce((a, b) => a + b, 0) || 1;
+                                    const pct = Math.round((v / total) * 100);
+                                    return ` ${ctx.label}: ${v} (${pct}%)`;
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        })();
+    </script>
+
+    <script>
+        (function () {
+            const modal = document.getElementById('projectManageModal');
+            if (!modal) return;
+
+            const titleEl = document.getElementById('projectManageTitle');
+            const currentSelect = document.getElementById('projectCurrentStage');
+            const currentBtn = document.getElementById('projectCurrentStageBtn');
+            const addName = document.getElementById('projectAddStageName');
+            const addOrder = document.getElementById('projectAddStageOrder');
+            const addBtn = document.getElementById('projectAddStageBtn');
+            const listEl = document.getElementById('projectStagesList');
+            let activeProjectId = null;
+
+            function postProjectTimeline(url, payload) {
+                return fetch(url, {
+                    method: 'POST',
+                    body: payload,
+                    headers: {
+                        'X-Requested-With': 'XMLHttpRequest'
+                    }
+                });
+            }
+
+            function openModal() {
+                modal.classList.remove('hidden');
+                modal.classList.add('flex');
+            }
+
+            function closeModal() {
+                modal.classList.add('hidden');
+                modal.classList.remove('flex');
+            }
+
+            function escapeHtml(v) {
+                const s = (v === null || v === undefined) ? '' : String(v);
+                return s
+                    .replaceAll('&', '&amp;')
+                    .replaceAll('<', '&lt;')
+                    .replaceAll('>', '&gt;')
+                    .replaceAll('"', '&quot;')
+                    .replaceAll("'", '&#039;');
+            }
+
+            function renderStages(stages, currentStageId) {
+                currentSelect.innerHTML = stages.map((st) => {
+                    const selected = String(st.id) === String(currentStageId) ? 'selected' : '';
+                    return `<option value="${escapeHtml(st.id)}" ${selected}>${escapeHtml(st.name)}</option>`;
+                }).join('');
+
+                listEl.innerHTML = stages.map((st) => {
+                    return `
+                        <div class="grid grid-cols-[1fr_100px_110px_160px] gap-2 items-center border border-[var(--border-color)] rounded-md p-2 bg-[var(--bg-tertiary)]" data-stage-id="${escapeHtml(st.id)}">
+                            <div class="flex items-center gap-2">
+                                <span class="project-stage-handle cursor-move text-xs px-2 py-1 rounded bg-[var(--bg-secondary)] border border-[var(--border-color)]" draggable="true">Drag</span>
+                                <input type="text" class="project-stage-name w-full rounded-md border px-2 py-1 bg-white border-[var(--border-color)]" value="${escapeHtml(st.name)}">
+                            </div>
+                            <input type="number" class="project-stage-order w-full rounded-md border px-2 py-1 bg-white border-[var(--border-color)]" value="${escapeHtml(st.order)}" min="0">
+                            <input type="number" class="project-stage-progress w-full rounded-md border px-2 py-1 bg-white border-[var(--border-color)]" value="${escapeHtml(st.progress)}" min="0" max="100">
+                            <div class="flex gap-2">
+                                <button type="button" class="project-stage-save flex-1 text-xs font-semibold px-2 py-1 rounded-md text-white" style="background: var(--company-primary);">Save</button>
+                                <button type="button" class="project-stage-delete flex-1 text-xs font-semibold px-2 py-1 rounded-md text-white bg-rose-500">Delete</button>
+                            </div>
+                        </div>
+                    `;
+                }).join('');
+            }
+
+            function updateStageOrderInputs() {
+                const rows = Array.from(listEl.querySelectorAll('[data-stage-id]'));
+                rows.forEach((row, idx) => {
+                    const orderInput = row.querySelector('.project-stage-order');
+                    if (orderInput) orderInput.value = String(idx);
+                });
+            }
+
+            async function persistStageOrder() {
+                if (!activeProjectId) return;
+                const rows = Array.from(listEl.querySelectorAll('[data-stage-id]'));
+                for (const row of rows) {
+                    const stageId = row.getAttribute('data-stage-id');
+                    const orderInput = row.querySelector('.project-stage-order');
+                    const stageOrder = orderInput ? orderInput.value : '';
+                    if (!stageId || stageOrder === '') continue;
+                    const payload = new FormData();
+                    payload.append('project_id', activeProjectId);
+                    payload.append('stage_id', stageId);
+                    payload.append('stage_order', stageOrder);
+                    const resp = await postProjectTimeline('/business-manager/project-timeline/stage/update', payload);
+                    const data = await resp.json().catch(() => ({}));
+                    if (!resp.ok || !data.ok) {
+                        throw new Error(data.error || 'Failed to update stage order.');
+                    }
+                }
+            }
+
+            document.querySelectorAll('[data-modal-close]').forEach((btn) => {
+                btn.addEventListener('click', closeModal);
+            });
+
+            let draggingRow = null;
+            listEl.addEventListener('dragstart', (e) => {
+                const handle = e.target.closest ? e.target.closest('.project-stage-handle') : null;
+                if (!handle) return;
+                const row = handle.closest('[data-stage-id]');
+                if (!row) return;
+                draggingRow = row;
+                row.classList.add('opacity-60');
+                if (e.dataTransfer) {
+                    e.dataTransfer.effectAllowed = 'move';
+                    e.dataTransfer.setData('text/plain', row.getAttribute('data-stage-id') || '');
+                }
+            });
+
+            listEl.addEventListener('dragover', (e) => {
+                if (!draggingRow) return;
+                e.preventDefault();
+                const row = e.target.closest ? e.target.closest('[data-stage-id]') : null;
+                if (!row || row === draggingRow) return;
+                const rect = row.getBoundingClientRect();
+                const shouldSwap = (e.clientY - rect.top) > (rect.height / 2);
+                listEl.insertBefore(draggingRow, shouldSwap ? row.nextSibling : row);
+            });
+
+            listEl.addEventListener('drop', async (e) => {
+                if (!draggingRow) return;
+                e.preventDefault();
+                updateStageOrderInputs();
+                try {
+                    await persistStageOrder();
+                } catch (err) {
+                    alert(err && err.message ? err.message : 'Failed to update stage order.');
+                }
+            });
+
+            listEl.addEventListener('dragend', () => {
+                if (draggingRow) draggingRow.classList.remove('opacity-60');
+                draggingRow = null;
+            });
+
+            document.querySelectorAll('.project-actions-toggle').forEach((btn) => {
+                btn.addEventListener('click', () => {
+                    const card = btn.closest('[data-project-id]');
+                    if (!card) return;
+                    activeProjectId = card.getAttribute('data-project-id');
+                    const stagesRaw = card.getAttribute('data-stages') || '[]';
+                    const currentStageId = card.getAttribute('data-current-stage-id');
+                    let stages = [];
+                    try {
+                        stages = JSON.parse(stagesRaw) || [];
+                    } catch (e) {
+                        stages = [];
+                    }
+                    renderStages(stages, currentStageId);
+                    const title = card.querySelector('h4')?.textContent?.trim() || 'Project';
+                    titleEl.textContent = title;
+                    addName.value = '';
+                    addOrder.value = '';
+                    openModal();
+                });
+            });
+
+            currentBtn.addEventListener('click', async () => {
+                const stageId = currentSelect.value;
+                if (!activeProjectId || !stageId) return;
+                const payload = new FormData();
+                payload.append('project_id', activeProjectId);
+                payload.append('stage_id', stageId);
+                try {
+                    const resp = await postProjectTimeline('/business-manager/project-timeline/stage/current', payload);
+                    const data = await resp.json();
+                    if (!resp.ok || !data.ok) throw new Error(data.error || 'Failed to update stage.');
+                    window.location.reload();
+                } catch (err) {
+                    alert(err.message || 'Failed to update stage.');
+                }
+            });
+
+            addBtn.addEventListener('click', async () => {
+                const stageName = (addName.value || '').trim();
+                const stageOrder = (addOrder.value || '').trim();
+                if (!activeProjectId || !stageName) {
+                    alert('Enter a stage name.');
+                    return;
+                }
+                const payload = new FormData();
+                payload.append('project_id', activeProjectId);
+                payload.append('stage_name', stageName);
+                if (stageOrder !== '') payload.append('stage_order', stageOrder);
+                try {
+                    const resp = await postProjectTimeline('/business-manager/project-timeline/stage/add', payload);
+                    const data = await resp.json();
+                    if (!resp.ok || !data.ok) throw new Error(data.error || 'Failed to add stage.');
+                    window.location.reload();
+                } catch (err) {
+                    alert(err.message || 'Failed to add stage.');
+                }
+            });
+
+            listEl.addEventListener('click', async (e) => {
+                const target = e.target;
+                if (!target) return;
+                const row = target.closest('[data-stage-id]');
+                if (!row || !activeProjectId) return;
+                const stageId = row.getAttribute('data-stage-id');
+
+                if (target.classList.contains('project-stage-save')) {
+                    const stageName = (row.querySelector('.project-stage-name')?.value || '').trim();
+                    const stageOrder = (row.querySelector('.project-stage-order')?.value || '').trim();
+                    const progressPct = (row.querySelector('.project-stage-progress')?.value || '').trim();
+                    const payload = new FormData();
+                    payload.append('project_id', activeProjectId);
+                    payload.append('stage_id', stageId);
+                    if (stageName) payload.append('stage_name', stageName);
+                    if (stageOrder !== '') payload.append('stage_order', stageOrder);
+                    if (progressPct !== '') payload.append('progress_pct', progressPct);
+                    try {
+                        const resp = await postProjectTimeline('/business-manager/project-timeline/stage/update', payload);
+                        const data = await resp.json();
+                        if (!resp.ok || !data.ok) throw new Error(data.error || 'Failed to update stage.');
+                        window.location.reload();
+                    } catch (err) {
+                        alert(err.message || 'Failed to update stage.');
+                    }
+                }
+
+                if (target.classList.contains('project-stage-delete')) {
+                    if (!confirm('Delete this stage?')) return;
+                    const payload = new FormData();
+                    payload.append('project_id', activeProjectId);
+                    payload.append('stage_id', stageId);
+                    try {
+                        const resp = await postProjectTimeline('/business-manager/project-timeline/stage/delete', payload);
+                        const data = await resp.json();
+                        if (!resp.ok || !data.ok) throw new Error(data.error || 'Failed to delete stage.');
+                        window.location.reload();
+                    } catch (err) {
+                        alert(err.message || 'Failed to delete stage.');
+                    }
+                }
+            });
+
+            document.addEventListener('keydown', (e) => {
+                if (e.key === 'Escape') closeModal();
+            });
+        })();
+    </script>
+</body>
+</html>

@@ -1,0 +1,2242 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Top Level Admin Dashboard - ESCO Intelligence Suite</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Sora:wght@300;400;500;600;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        * {
+            font-family: 'Sora', sans-serif;
+        }
+        .mono {
+            font-family: 'Space Mono', monospace;
+        }
+        :root {
+            --bg-primary: #0f172a;
+            --bg-secondary: #1e293b;
+            --bg-tertiary: #334155;
+            --border-color: #475569;
+            --text-primary: #f1f5f9;
+            --text-secondary: #94a3b8;
+            --accent-emerald: #10b981;
+            --accent-cyan: #06b6d4;
+            --accent-violet: #8b5cf6;
+            --accent-amber: #f59e0b;
+            --accent-rose: #f43f5e;
+        }
+        body {
+            background: linear-gradient(135deg, var(--bg-primary) 0%, #0c1220 100%);
+            color: var(--text-primary);
+            min-height: 100vh;
+        }
+        .glass-card {
+            background: rgba(30, 41, 59, 0.7);
+            border: 1px solid var(--border-color);
+            backdrop-filter: blur(12px);
+        }
+        .glow-emerald {
+            box-shadow: 0 0 30px rgba(16, 185, 129, 0.2);
+        }
+        .glow-violet {
+            box-shadow: 0 0 30px rgba(139, 92, 246, 0.2);
+        }
+        .stat-card {
+            background: linear-gradient(135deg, rgba(30, 41, 59, 0.8) 0%, rgba(51, 65, 85, 0.6) 100%);
+            border: 1px solid var(--border-color);
+            transition: all 0.3s ease;
+        }
+        .stat-card:hover {
+            transform: translateY(-4px);
+            border-color: var(--accent-emerald);
+        }
+        .nav-item {
+            transition: all 0.2s ease;
+            border-left: 3px solid transparent;
+        }
+        .nav-item:hover, .nav-item.active {
+            background: rgba(16, 185, 129, 0.1);
+            border-left-color: var(--accent-emerald);
+        }
+        .progress-bar {
+            background: linear-gradient(90deg, var(--accent-emerald) 0%, var(--accent-cyan) 100%);
+        }
+        .scrollbar-custom::-webkit-scrollbar {
+            width: 6px;
+        }
+        .scrollbar-custom::-webkit-scrollbar-track {
+            background: var(--bg-secondary);
+        }
+        .scrollbar-custom::-webkit-scrollbar-thumb {
+            background: var(--border-color);
+            border-radius: 3px;
+        }
+        .permission-toggle {
+            position: relative;
+            width: 44px;
+            height: 24px;
+            background: var(--bg-tertiary);
+            border-radius: 12px;
+            cursor: pointer;
+            transition: background 0.3s ease;
+        }
+        .permission-toggle.active {
+            background: var(--accent-emerald);
+        }
+        .permission-toggle::after {
+            content: '';
+            position: absolute;
+            width: 18px;
+            height: 18px;
+            background: white;
+            border-radius: 50%;
+            top: 3px;
+            left: 3px;
+            transition: transform 0.3s ease;
+        }
+        .permission-toggle.active::after {
+            transform: translateX(20px);
+        }
+        .module-card {
+            background: var(--bg-tertiary);
+            border: 1px solid var(--border-color);
+            transition: all 0.2s ease;
+        }
+        .module-card:hover {
+            border-color: var(--accent-cyan);
+        }
+        .module-card.disabled {
+            opacity: 0.5;
+        }
+        @keyframes pulse-glow {
+            0%, 100% { box-shadow: 0 0 10px rgba(16, 185, 129, 0.3); }
+            50% { box-shadow: 0 0 20px rgba(16, 185, 129, 0.5); }
+        }
+        .pulse-glow {
+            animation: pulse-glow 2s infinite;
+        }
+    </style>
+    <link rel="stylesheet" href="{{ url_for('static', filename='light_theme_overrides.css') }}">
+</head>
+<body>
+    <div class="flex h-screen">
+        <!-- Sidebar -->
+        <aside class="w-72 bg-[var(--bg-secondary)] flex flex-col border-r border-[var(--border-color)]">
+            <!-- Logo -->
+            <div class="p-6 border-b border-[var(--border-color)]">
+                <div class="flex items-center gap-3">
+                    <div class="w-12 h-12 rounded-xl bg-gradient-to-br from-emerald-500 to-cyan-500 flex items-center justify-center glow-emerald">
+                        <i class="fas fa-user-shield text-white text-xl"></i>
+                    </div>
+                    <div>
+                        <h1 class="text-xl font-bold text-white">ESCO Suite Admin</h1>
+                        <p class="text-xs text-[var(--text-secondary)]">Top Level Admin</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Navigation -->
+            <nav class="flex-1 p-4 overflow-y-auto scrollbar-custom">
+                <p class="text-xs text-[var(--text-secondary)] uppercase tracking-wider mb-3 px-3 font-semibold">Overview</p>
+                <ul class="space-y-1">
+                    <li>
+                        <a href="#" onclick="showTab('dashboard')" id="nav-dashboard" class="nav-item active flex items-center gap-3 px-4 py-3 rounded-lg text-sm">
+                            <i class="fas fa-th-large w-5"></i>
+                            <span>Dashboard</span>
+                        </a>
+                    </li>
+                    <li>
+                        <a href="#" onclick="showTab('team-access')" id="nav-team-access" class="nav-item flex items-center gap-3 px-4 py-3 rounded-lg text-sm">
+                            <i class="fas fa-key w-5"></i>
+                            <span>Team Access Control</span>
+                        </a>
+                    </li>
+                    <li>
+                        <a href="#" onclick="showTab('projects')" id="nav-projects" class="nav-item flex items-center gap-3 px-4 py-3 rounded-lg text-sm">
+                            <i class="fas fa-project-diagram w-5"></i>
+                            <span>All Projects</span>
+                        </a>
+                    </li>
+                    <li>
+                        <a href="#" onclick="showTab('company-analytics')" id="nav-company-analytics" class="nav-item flex items-center gap-3 px-4 py-3 rounded-lg text-sm">
+                            <i class="fas fa-building w-5"></i>
+                            <span>Company Analytics</span>
+                        </a>
+                    </li>
+                </ul>
+
+                <p class="text-xs text-[var(--text-secondary)] uppercase tracking-wider mt-6 mb-3 px-3 font-semibold">Team Management</p>
+                <ul class="space-y-1">
+                    <li>
+                        <a href="#" onclick="showTab('team-leads')" id="nav-team-leads" class="nav-item flex items-center gap-3 px-4 py-3 rounded-lg text-sm">
+                            <i class="fas fa-user-tie w-5"></i>
+                            <span>Team Leads</span>
+                        </a>
+                    </li>
+                    <li>
+                        <a href="#" onclick="showTab('members')" id="nav-members" class="nav-item flex items-center gap-3 px-4 py-3 rounded-lg text-sm">
+                            <i class="fas fa-users w-5"></i>
+                            <span>All Members</span>
+                        </a>
+                    </li>
+                </ul>
+
+                <p class="text-xs text-[var(--text-secondary)] uppercase tracking-wider mt-6 mb-3 px-3 font-semibold">Root Controls</p>
+                <ul class="space-y-1">
+                    <li>
+                        <a href="{{ url_for('manager_dashboard') }}" class="nav-item flex items-center gap-3 px-4 py-3 rounded-lg text-sm">
+                            <i class="fas fa-sitemap w-5"></i>
+                            <span>Manager Hub</span>
+                        </a>
+                    </li>
+                    <li>
+                        <a href="{{ url_for('business_manager_dashboard') }}" class="nav-item flex items-center gap-3 px-4 py-3 rounded-lg text-sm">
+                            <i class="fas fa-briefcase w-5"></i>
+                            <span>Business Manager</span>
+                        </a>
+                    </li>
+                    <li>
+                        <a href="{{ url_for('design_manager_dashboard') }}" class="nav-item flex items-center gap-3 px-4 py-3 rounded-lg text-sm">
+                            <i class="fas fa-paint-brush w-5"></i>
+                            <span>Design Manager</span>
+                        </a>
+                    </li>
+                    <li>
+                        <a href="{{ url_for('operation_manager_dashboard') }}" class="nav-item flex items-center gap-3 px-4 py-3 rounded-lg text-sm">
+                            <i class="fas fa-cogs w-5"></i>
+                            <span>Operations Manager</span>
+                        </a>
+                    </li>
+                    <li>
+                        <a href="{{ url_for('site_manager_dashboard') }}" class="nav-item flex items-center gap-3 px-4 py-3 rounded-lg text-sm">
+                            <i class="fas fa-hard-hat w-5"></i>
+                            <span>Site Manager</span>
+                        </a>
+                    </li>
+                    <li>
+                        <a href="{{ url_for('team_lead_dashboard') }}" class="nav-item flex items-center gap-3 px-4 py-3 rounded-lg text-sm">
+                            <i class="fas fa-user-tie w-5"></i>
+                            <span>Team Lead Dashboard</span>
+                        </a>
+                    </li>
+                    <li>
+                        <a href="{{ url_for('users_admin') }}" class="nav-item flex items-center gap-3 px-4 py-3 rounded-lg text-sm">
+                            <i class="fas fa-users-cog w-5"></i>
+                            <span>User Directory</span>
+                        </a>
+                    </li>
+                </ul>
+
+                <p class="text-xs text-[var(--text-secondary)] uppercase tracking-wider mt-6 mb-3 px-3 font-semibold">Quick Access</p>
+                <ul class="space-y-1">
+                    {% if user_permissions.get('bid_analyzer', True) %}
+                    <li>
+                        <a href="{{ url_for('bid_timeline') }}" class="nav-item flex items-center gap-3 px-4 py-3 rounded-lg text-sm">
+                            <i class="fas fa-chart-line w-5"></i>
+                            <span>Bid Timeline</span>
+                        </a>
+                    </li>
+                    {% endif %}
+                </ul>
+            </nav>
+
+            <!-- User Profile -->
+            <div class="p-4 border-t border-[var(--border-color)]">
+                <div class="flex items-center gap-3 p-3 rounded-lg bg-[var(--bg-tertiary)]">
+                    <div class="w-10 h-10 rounded-full bg-gradient-to-br from-emerald-500 to-cyan-500 flex items-center justify-center">
+                        <i class="fas fa-crown text-white"></i>
+                    </div>
+                    <div class="flex-1">
+                        <p class="text-sm font-semibold text-white">{{ current_user.email.split('@')[0] | title }}</p>
+                        <span class="px-2 py-0.5 text-[10px] font-bold bg-gradient-to-r from-emerald-500 to-cyan-500 text-white rounded-full">TOP ADMIN</span>
+                    </div>
+                    <a href="{{ url_for('logout') }}" class="text-[var(--text-secondary)] hover:text-[var(--accent-rose)]">
+                        <i class="fas fa-sign-out-alt"></i>
+                    </a>
+                </div>
+            </div>
+        </aside>
+
+        <!-- Main Content -->
+        <main class="flex-1 overflow-y-auto scrollbar-custom">
+            <!-- Header -->
+            <header class="sticky top-0 z-10 bg-[var(--bg-primary)]/95 backdrop-blur-sm border-b border-[var(--border-color)] px-8 py-4">
+                <div class="flex items-center justify-between">
+                    <div>
+                        <h2 class="text-2xl font-bold text-white" id="page-title">Dashboard</h2>
+                        <p class="text-sm text-[var(--text-secondary)]" id="page-subtitle">Welcome back, {{ current_user.email.split('@')[0] | title }}</p>
+                    </div>
+                    <div class="flex items-center gap-4">
+                        <div class="relative">
+                            <input type="text" placeholder="Search..." class="bg-[var(--bg-tertiary)] border border-[var(--border-color)] text-white px-4 py-2 pl-10 rounded-lg focus:outline-none focus:border-[var(--accent-emerald)] w-64">
+                            <i class="fas fa-search absolute left-3 top-1/2 -translate-y-1/2 text-[var(--text-secondary)]"></i>
+                        </div>
+                        <button class="w-10 h-10 rounded-lg bg-[var(--bg-tertiary)] border border-[var(--border-color)] flex items-center justify-center hover:border-[var(--accent-emerald)]">
+                            <i class="fas fa-bell text-[var(--text-secondary)]"></i>
+                        </button>
+                    </div>
+                </div>
+            </header>
+
+            <div class="p-8">
+                <!-- Dashboard Tab -->
+                <div id="tab-dashboard" class="tab-content">
+                    <!-- Stats Grid -->
+                    <div class="grid grid-cols-4 gap-6 mb-8">
+                        <div class="stat-card rounded-xl p-6">
+                            <div class="flex items-center justify-between mb-4">
+                                <div class="w-12 h-12 rounded-xl bg-emerald-500/20 flex items-center justify-center">
+                                    <i class="fas fa-users text-[var(--accent-emerald)] text-xl"></i>
+                                </div>
+                                <span class="text-[var(--accent-emerald)] text-sm font-semibold mono">+5</span>
+                            </div>
+                            <p class="text-3xl font-bold text-white mb-1">{{ team_leads | length }}</p>
+                            <p class="text-sm text-[var(--text-secondary)]">Team Leads</p>
+                        </div>
+                        <div class="stat-card rounded-xl p-6">
+                            <div class="flex items-center justify-between mb-4">
+                                <div class="w-12 h-12 rounded-xl bg-cyan-500/20 flex items-center justify-center">
+                                    <i class="fas fa-user-friends text-[var(--accent-cyan)] text-xl"></i>
+                                </div>
+                            </div>
+                            <p class="text-3xl font-bold text-white mb-1">{{ members | length }}</p>
+                            <p class="text-sm text-[var(--text-secondary)]">Team Members</p>
+                        </div>
+                        <div class="stat-card rounded-xl p-6">
+                            <div class="flex items-center justify-between mb-4">
+                                <div class="w-12 h-12 rounded-xl bg-violet-500/20 flex items-center justify-center">
+                                    <i class="fas fa-folder-open text-[var(--accent-violet)] text-xl"></i>
+                                </div>
+                            </div>
+                            <p class="text-3xl font-bold text-white mb-1">{{ active_projects }}</p>
+                            <p class="text-sm text-[var(--text-secondary)]">Active Projects</p>
+                        </div>
+                        <div class="stat-card rounded-xl p-6">
+                            <div class="flex items-center justify-between mb-4">
+                                <div class="w-12 h-12 rounded-xl bg-amber-500/20 flex items-center justify-center">
+                                    <i class="fas fa-tasks text-[var(--accent-amber)] text-xl"></i>
+                                </div>
+                            </div>
+                            <p class="text-3xl font-bold text-white mb-1">{{ pending_tasks }}</p>
+                            <p class="text-sm text-[var(--text-secondary)]">Pending Tasks</p>
+                        </div>
+                    </div>
+
+                    <!-- BID Timeline Section -->
+                    <div class="glass-card rounded-xl p-6 mb-6">
+                        <div class="mb-6">
+                            <h3 class="text-xl font-bold text-white mb-1">
+                                <i class="fas fa-chart-line text-[var(--accent-cyan)] mr-2"></i>BID Timeline
+                            </h3>
+                            <p class="text-sm text-[var(--text-secondary)]">Top 5 High Priority BIDs</p>
+                        </div>
+                        
+                        <div class="space-y-6" id="go-projects-top">
+                        {% for item in go_projects_top5 %}
+                        <!-- BID Timeline Tracker {{ loop.index }} -->
+                        <div class="bg-[var(--bg-tertiary)] p-6 rounded-xl border border-[var(--border-color)]" data-bid-card="{{ item.g_id }}" data-stage-map='{{ (item.stage_progress_map|default({}))|tojson|safe }}'>
+                            <div class="flex justify-between items-center mb-8">
+                                <h4 class="text-lg font-semibold text-white">{{ item.b_name }}</h4>
+                                <div class="flex items-center space-x-3">
+                                    <span class="px-3 py-1 bg-cyan-500/20 text-cyan-400 text-sm font-semibold rounded-full">{{ item.company }}</span>
+                                    <button class="timeline-summary-toggle flex items-center text-sm font-semibold text-[var(--accent-cyan)] hover:text-cyan-300">
+                                        <span>Details</span>
+                                        <i class="fas fa-chevron-down ml-2"></i>
+                                    </button>
+                                </div>
+                            </div>
+                            <div class="relative w-full">
+                                <div class="absolute top-4 left-0 w-full h-1 bg-[var(--bg-primary)] rounded-full"></div>
+                                <div class="timeline-segments">
+                                    {% set seg_count = (item.stages|length - 1) if (item.stages|length - 1) > 0 else 0 %}
+                                    {% if seg_count > 0 %}
+                                        {% for i in range(seg_count) %}
+                                            {% set seg_stage = item.stages[i] %}
+                                            {% set map = item.stage_progress_map or {} %}
+                                            {% set sp = map.get(seg_stage, 0) %}
+                                            {% set leftpct = (100 * i / seg_count) %}
+                                            {% set widthpct = (sp / seg_count) %}
+                                            <div class="segment-progress absolute top-4 h-1 bg-gradient-to-r from-emerald-500 to-cyan-500 rounded-full" data-stage="{{ seg_stage }}" style="left: {{ '%.2f'|format(leftpct) }}%; width: {{ '%.2f'|format(widthpct) }}%; z-index: 1; margin-left: 12px;"></div>
+                                        {% endfor %}
+                                    {% endif %}
+                                </div>
+                                <div class="relative flex justify-between">
+                                    {% for st in item.stages %}
+                                    <div class="timeline-checkpoint text-center cursor-pointer" data-stage="{{ st }}">
+                                        {% set index = loop.index0 %}
+                                        {% set pct = (100 * index // (item.stages|length - 1)) if (item.stages|length - 1) > 0 else 0 %}
+                                        <div class="relative w-8 h-8 rounded-full mx-auto border-2 border-[var(--bg-primary)] {% if item.stage_progress >= pct %}bg-emerald-500/30{% else %}bg-[var(--bg-primary)]{% endif %}">
+                                            <div class="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-3 h-3 {% if item.stage_progress >= pct %}bg-emerald-500{% else %}bg-[var(--border-color)]{% endif %} rounded-full"></div>
+                                        </div>
+                                        <p class="mt-2 text-xs font-semibold text-[var(--text-secondary)]">{{ get_stage_display_name(st) }}</p>
+                                        <div class="mt-1 w-16 mx-auto">
+                                            {% set map = item.stage_progress_map or {} %}
+                                            {% set sp = map.get(st, 0) %}
+                                            <p class="text-[10px] text-[var(--accent-emerald)] text-center">{{ sp }}%</p>
+                                        </div>
+                                    </div>
+                                    {% endfor %}
+                                </div>
+                            </div>
+                            <!-- Summary Panel (Hidden by default) -->
+                            <div class="timeline-summary hidden mt-8 p-4 bg-[var(--bg-secondary)] rounded-lg border border-[var(--border-color)]">
+                                <h5 class="text-sm font-semibold text-[var(--accent-cyan)] mb-4">{{ item.b_name }} - Summary</h5>
+                                <div class="grid grid-cols-2 gap-6 text-sm">
+                                    <div class="space-y-2">
+                                        <div class="flex justify-between">
+                                            <span class="text-[var(--text-secondary)]">Company:</span>
+                                            <span class="text-white">{{ item.company }}</span>
+                                        </div>
+                                        <div class="flex justify-between">
+                                            <span class="text-[var(--text-secondary)]">Due Date:</span>
+                                            <span class="text-white">{{ item.due_date }}</span>
+                                        </div>
+                                        <div class="flex justify-between">
+                                            <span class="text-[var(--text-secondary)]">Status:</span>
+                                            <span class="text-white">{{ item.project_status }}</span>
+                                        </div>
+                                    </div>
+                                    <div>
+                                        <p class="text-[var(--text-secondary)] mb-2">Work Progress</p>
+                                        <div class="w-full bg-[var(--bg-primary)] rounded-full h-2">
+                                            <div class="h-full progress-bar rounded-full" style="width: {{ item.work_progress_pct }}%"></div>
+                                        </div>
+                                        <p class="text-xs text-[var(--accent-emerald)] mt-1 text-right">{{ item.work_progress_pct }}%</p>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        {% else %}
+                        <div class="text-center py-8 text-[var(--text-secondary)]">
+                            <i class="fas fa-inbox text-4xl mb-3 opacity-50"></i>
+                            <p>No active BIDs at the moment</p>
+                        </div>
+                        {% endfor %}
+                        </div>
+
+                        <!-- Show More BIDs Button -->
+                        {% if go_projects_more and go_projects_more|length > 0 %}
+                        <div class="text-center mt-6">
+                            <button id="toggle-more-bids-btn" onclick="toggleMoreBids()" data-count="{{ go_projects_more|length }}"
+                                    class="px-6 py-3 bg-gradient-to-r from-cyan-500 to-emerald-500 text-white rounded-xl font-semibold hover:opacity-90 transition-all shadow-lg hover:shadow-cyan-500/25">
+                                <i class="fas fa-chevron-down mr-2" id="toggle-more-icon"></i>
+                                <span id="toggle-more-text">Show More BIDs</span> 
+                                <span class="ml-1 px-2 py-0.5 bg-white/20 rounded-full text-sm" id="toggle-more-count">({{ go_projects_more|length }})</span>
+                            </button>
+                        </div>
+
+                        <!-- Additional BIDs (Hidden by default) -->
+                        <div id="go-projects-more" class="space-y-6 mt-6 hidden">
+                        {% for item in go_projects_more %}
+                        <!-- BID Timeline Tracker (More) -->
+                        <div class="bg-[var(--bg-tertiary)] p-6 rounded-xl border border-[var(--border-color)]" data-bid-card="{{ item.g_id }}" data-stage-map='{{ (item.stage_progress_map|default({}))|tojson|safe }}'>
+                            <div class="flex justify-between items-center mb-8">
+                                <h4 class="text-lg font-semibold text-white">{{ item.b_name }}</h4>
+                                <div class="flex items-center space-x-3">
+                                    <span class="px-3 py-1 bg-cyan-500/20 text-cyan-400 text-sm font-semibold rounded-full">{{ item.company }}</span>
+                                    <button class="timeline-summary-toggle flex items-center text-sm font-semibold text-[var(--accent-cyan)] hover:text-cyan-300">
+                                        <span>Details</span>
+                                        <i class="fas fa-chevron-down ml-2"></i>
+                                    </button>
+                                </div>
+                            </div>
+                            <div class="relative w-full">
+                                <div class="absolute top-4 left-0 w-full h-1 bg-[var(--bg-primary)] rounded-full"></div>
+                                <div class="timeline-segments">
+                                    {% set seg_count = (item.stages|length - 1) if (item.stages|length - 1) > 0 else 0 %}
+                                    {% if seg_count > 0 %}
+                                        {% for i in range(seg_count) %}
+                                            {% set seg_stage = item.stages[i] %}
+                                            {% set map = item.stage_progress_map or {} %}
+                                            {% set sp = map.get(seg_stage, 0) %}
+                                            {% set leftpct = (100 * i / seg_count) %}
+                                            {% set widthpct = (sp / seg_count) %}
+                                            <div class="segment-progress absolute top-4 h-1 bg-gradient-to-r from-emerald-500 to-cyan-500 rounded-full" data-stage="{{ seg_stage }}" style="left: {{ '%.2f'|format(leftpct) }}%; width: {{ '%.2f'|format(widthpct) }}%; z-index: 1; margin-left: 12px;"></div>
+                                        {% endfor %}
+                                    {% endif %}
+                                </div>
+                                <div class="relative flex justify-between">
+                                    {% for st in item.stages %}
+                                    <div class="timeline-checkpoint text-center cursor-pointer" data-stage="{{ st }}">
+                                        {% set index = loop.index0 %}
+                                        {% set pct = (100 * index // (item.stages|length - 1)) if (item.stages|length - 1) > 0 else 0 %}
+                                        <div class="relative w-8 h-8 rounded-full mx-auto border-2 border-[var(--bg-primary)] {% if item.stage_progress >= pct %}bg-emerald-500/30{% else %}bg-[var(--bg-primary)]{% endif %}">
+                                            <div class="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-3 h-3 {% if item.stage_progress >= pct %}bg-emerald-500{% else %}bg-[var(--border-color)]{% endif %} rounded-full"></div>
+                                        </div>
+                                        <p class="mt-2 text-xs font-semibold text-[var(--text-secondary)]">{{ get_stage_display_name(st) }}</p>
+                                        <div class="mt-1 w-16 mx-auto">
+                                            {% set map = item.stage_progress_map or {} %}
+                                            {% set sp = map.get(st, 0) %}
+                                            <p class="text-[10px] text-[var(--accent-emerald)] text-center">{{ sp }}%</p>
+                                        </div>
+                                    </div>
+                                    {% endfor %}
+                                </div>
+                            </div>
+                            <!-- Summary Panel (Hidden by default) -->
+                            <div class="timeline-summary hidden mt-8 p-4 bg-[var(--bg-secondary)] rounded-lg border border-[var(--border-color)]">
+                                <h5 class="text-sm font-semibold text-[var(--accent-cyan)] mb-4">{{ item.b_name }} - Summary</h5>
+                                <div class="grid grid-cols-2 gap-6 text-sm">
+                                    <div class="space-y-2">
+                                        <div class="flex justify-between">
+                                            <span class="text-[var(--text-secondary)]">Company:</span>
+                                            <span class="text-white">{{ item.company }}</span>
+                                        </div>
+                                        <div class="flex justify-between">
+                                            <span class="text-[var(--text-secondary)]">Due Date:</span>
+                                            <span class="text-white">{{ item.due_date }}</span>
+                                        </div>
+                                        <div class="flex justify-between">
+                                            <span class="text-[var(--text-secondary)]">Status:</span>
+                                            <span class="text-white">{{ item.project_status }}</span>
+                                        </div>
+                                    </div>
+                                    <div>
+                                        <p class="text-[var(--text-secondary)] mb-2">Work Progress</p>
+                                        <div class="w-full bg-[var(--bg-primary)] rounded-full h-2">
+                                            <div class="h-full progress-bar rounded-full" style="width: {{ item.work_progress_pct }}%"></div>
+                                        </div>
+                                        <p class="text-xs text-[var(--accent-emerald)] mt-1 text-right">{{ item.work_progress_pct }}%</p>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        {% endfor %}
+                        </div>
+                        {% endif %}
+                    </div>
+
+                    <!-- Project Timeline Section -->
+                    <div class="glass-card rounded-xl p-6 mb-6">
+                        <div class="mb-6">
+                            <h3 class="text-xl font-bold text-white mb-1">
+                                <i class="fas fa-trophy text-[var(--accent-amber)] mr-2"></i>Project Timeline
+                            </h3>
+                            <p class="text-sm text-[var(--text-secondary)]">Latest Won Projects</p>
+                        </div>
+                        
+                        <div class="space-y-6">
+                        {% for item in project_timeline_items %}
+                        <!-- Won Project Timeline {{ loop.index }} -->
+                        <div class="bg-[var(--bg-tertiary)] p-6 rounded-xl border border-[var(--border-color)]" data-bid-card="{{ item.g_id }}">
+                            <div class="flex justify-between items-center mb-8">
+                                <h4 class="text-lg font-semibold text-white">{{ item.b_name }}</h4>
+                                <div class="flex items-center space-x-3">
+                                    <span class="px-3 py-1 bg-emerald-500/20 text-emerald-400 text-sm font-semibold rounded-full">{{ item.company }}</span>
+                                </div>
+                            </div>
+                            <div class="relative w-full">
+                                <div class="absolute top-4 left-0 w-full h-1 bg-[var(--bg-primary)] rounded-full"></div>
+                                <div class="absolute top-4 left-0 h-1 bg-gradient-to-r from-amber-500 to-orange-400 rounded-full" style="width: {{ item.stage_progress or 0 }}%;"></div>
+                                <div class="relative flex justify-between">
+                                    {% for st in item.stages %}
+                                    <div class="text-center">
+                                        {% set index = loop.index0 %}
+                                        {% set pct = (100 * index // (item.stages|length - 1)) if (item.stages|length - 1) > 0 else 0 %}
+                                        <div class="relative w-8 h-8 rounded-full mx-auto border-2 border-[var(--bg-primary)] {% if item.stage_progress >= pct %}bg-amber-500/30{% else %}bg-[var(--bg-primary)]{% endif %}">
+                                            <div class="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-3 h-3 {% if item.stage_progress >= pct %}bg-amber-500{% else %}bg-[var(--border-color)]{% endif %} rounded-full"></div>
+                                        </div>
+                                        <p class="mt-2 text-xs font-semibold text-[var(--text-secondary)]">{{ st.name }}</p>
+                                        <p class="text-[10px] text-[var(--accent-amber)]">{{ st.progress }}%</p>
+                                    </div>
+                                    {% endfor %}
+                                </div>
+                            </div>
+                        </div>
+                        {% else %}
+                        <div class="text-center py-8 text-[var(--text-secondary)]">
+                            <i class="fas fa-trophy text-4xl mb-3 opacity-50"></i>
+                            <p>No won projects yet</p>
+                        </div>
+                        {% endfor %}
+                        </div>
+                    </div>
+
+                    <!-- Quick Actions Row -->
+                    <div class="grid grid-cols-3 gap-4">
+                        <a href="#" onclick="showTab('team-access')" class="glass-card rounded-xl p-4 flex items-center gap-3 cursor-pointer hover:border-[var(--accent-emerald)] transition-all">
+                            <div class="w-10 h-10 rounded-lg bg-emerald-500/20 flex items-center justify-center">
+                                <i class="fas fa-key text-[var(--accent-emerald)]"></i>
+                            </div>
+                            <div>
+                                <p class="font-semibold text-white text-sm">Manage Access</p>
+                                <p class="text-xs text-[var(--text-secondary)]">Control team permissions</p>
+                            </div>
+                        </a>
+                        <a href="{{ url_for('logs_page') }}" class="glass-card rounded-xl p-4 flex items-center gap-3 cursor-pointer hover:border-[var(--accent-violet)] transition-all">
+                            <div class="w-10 h-10 rounded-lg bg-violet-500/20 flex items-center justify-center">
+                                <i class="fas fa-history text-[var(--accent-violet)]"></i>
+                            </div>
+                            <div>
+                                <p class="font-semibold text-white text-sm">Activity Logs</p>
+                                <p class="text-xs text-[var(--text-secondary)]">View recent activity</p>
+                            </div>
+                        </a>
+                    </div>
+
+                    <!-- Visualization Section -->
+                    <div class="mt-6 glass-card rounded-xl p-6">
+                        <div class="flex items-center justify-between mb-6">
+                            <h3 class="text-lg font-semibold text-white">
+                                <i class="fas fa-chart-bar text-[var(--accent-cyan)] mr-2"></i>Visualization
+                            </h3>
+                            <span class="text-sm text-[var(--accent-amber)]">Real-time Analytics</span>
+                        </div>
+                        
+                        <div class="grid grid-cols-3 gap-6">
+                            <!-- Total Overview Chart -->
+                            <div class="bg-[var(--bg-tertiary)] rounded-xl p-4">
+                                <div class="flex items-center justify-between mb-4">
+                                    <h4 class="text-sm font-semibold text-white">Project Overview</h4>
+                                    <button class="text-[var(--text-secondary)] hover:text-white">
+                                        <i class="fas fa-expand-alt"></i>
+                                    </button>
+                                </div>
+                                <div class="relative h-48">
+                                    <canvas id="overviewChart"></canvas>
+                                </div>
+                                <div class="flex justify-center gap-4 mt-3">
+                                    <div class="flex items-center gap-2">
+                                        <span class="w-3 h-3 rounded bg-cyan-500"></span>
+                                        <span class="text-xs text-[var(--text-secondary)]">Projects</span>
+                                    </div>
+                                    <div class="flex items-center gap-2">
+                                        <span class="w-3 h-3 rounded bg-violet-500"></span>
+                                        <span class="text-xs text-[var(--text-secondary)]">Team Leads</span>
+                                    </div>
+                                    <div class="flex items-center gap-2">
+                                        <span class="w-3 h-3 rounded bg-emerald-500"></span>
+                                        <span class="text-xs text-[var(--text-secondary)]">Members</span>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- Team Distribution Chart -->
+                            <div class="bg-[var(--bg-tertiary)] rounded-xl p-4">
+                                <div class="flex items-center justify-between mb-4">
+                                    <h4 class="text-sm font-semibold text-white">Team Distribution</h4>
+                                    <button class="text-[var(--text-secondary)] hover:text-white">
+                                        <i class="fas fa-expand-alt"></i>
+                                    </button>
+                                </div>
+                                <div class="relative h-48">
+                                    <canvas id="teamDistChart"></canvas>
+                                </div>
+                            </div>
+
+                            <!-- Employee Department Chart -->
+                            <div class="bg-[var(--bg-tertiary)] rounded-xl p-4">
+                                <div class="flex items-center justify-between mb-4">
+                                    <h4 class="text-sm font-semibold text-white">Employees by Department</h4>
+                                    <button class="text-[var(--text-secondary)] hover:text-white">
+                                        <i class="fas fa-expand-alt"></i>
+                                    </button>
+                                </div>
+                                <div class="relative h-48">
+                                    <canvas id="deptChart"></canvas>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Second Row of Charts -->
+                        <div class="grid grid-cols-3 gap-6 mt-6">
+                            <!-- Active Status Chart -->
+                            <div class="bg-[var(--bg-tertiary)] rounded-xl p-4">
+                                <div class="flex items-center justify-between mb-4">
+                                    <h4 class="text-sm font-semibold text-white">User Status</h4>
+                                    <button class="text-[var(--text-secondary)] hover:text-white">
+                                        <i class="fas fa-expand-alt"></i>
+                                    </button>
+                                </div>
+                                <div class="relative h-48">
+                                    <canvas id="statusChart"></canvas>
+                                </div>
+                            </div>
+
+                            <!-- Team Leads by Role Chart -->
+                            <div class="bg-[var(--bg-tertiary)] rounded-xl p-4">
+                                <div class="flex items-center justify-between mb-4">
+                                    <h4 class="text-sm font-semibold text-white">Team Leads by Role</h4>
+                                    <button class="text-[var(--text-secondary)] hover:text-white">
+                                        <i class="fas fa-expand-alt"></i>
+                                    </button>
+                                </div>
+                                <div class="relative h-48">
+                                    <canvas id="rolesChart"></canvas>
+                                </div>
+                            </div>
+
+                            <!-- Activity Summary Chart -->
+                            <div class="bg-[var(--bg-tertiary)] rounded-xl p-4">
+                                <div class="flex items-center justify-between mb-4">
+                                    <h4 class="text-sm font-semibold text-white">System Summary</h4>
+                                    <button class="text-[var(--text-secondary)] hover:text-white">
+                                        <i class="fas fa-expand-alt"></i>
+                                    </button>
+                                </div>
+                                <div class="relative h-48">
+                                    <canvas id="summaryChart"></canvas>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Team Access Control Tab -->
+                <div id="tab-team-access" class="tab-content hidden">
+                    <div class="glass-card rounded-xl p-6 mb-6">
+                        <div class="flex items-center justify-between mb-6">
+                            <div>
+                                <h3 class="text-lg font-semibold text-white">
+                                    <i class="fas fa-key text-[var(--accent-emerald)] mr-2"></i>Module Access Control
+                                </h3>
+                                <p class="text-sm text-[var(--text-secondary)]">Enable or disable module access for team leads and members</p>
+                            </div>
+                            <button onclick="saveAllAccessChanges()" class="px-4 py-2 bg-gradient-to-r from-emerald-500 to-cyan-500 text-white rounded-lg font-semibold hover:opacity-90 transition-opacity">
+                                <i class="fas fa-save mr-2"></i>Save All Changes
+                            </button>
+                        </div>
+
+                        <!-- Permission Matrix -->
+                        <div class="overflow-x-auto">
+                            <table class="w-full">
+                                <thead>
+                                    <tr class="border-b border-[var(--border-color)]">
+                                        <th class="text-left py-3 px-4 text-sm font-semibold text-[var(--text-secondary)]">Module</th>
+                                        <th class="text-center py-3 px-2 text-xs font-semibold text-[var(--text-secondary)]">Business Dev</th>
+                                        <th class="text-center py-3 px-2 text-xs font-semibold text-[var(--text-secondary)]">Design</th>
+                                        <th class="text-center py-3 px-2 text-xs font-semibold text-[var(--text-secondary)]">Operations</th>
+                                        <th class="text-center py-3 px-2 text-xs font-semibold text-[var(--text-secondary)]">Site Engineer</th>
+                                        <th class="text-center py-3 px-2 text-xs font-semibold text-[var(--text-secondary)]">Members</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="access-control-matrix">
+                                    {% for module in modules %}
+                                    <tr class="border-b border-[var(--border-color)] hover:bg-[var(--bg-tertiary)]/50">
+                                        <td class="py-4 px-4">
+                                            <div class="flex items-center gap-3">
+                                                <div class="w-8 h-8 rounded-lg bg-{{ module.color | default('blue') }}-500/20 flex items-center justify-center">
+                                                    <i class="fas fa-{{ module.icon | default('cube') }} text-{{ module.color | default('blue') }}-400 text-sm"></i>
+                                                </div>
+                                                <span class="font-medium text-white">{{ module.name }}</span>
+                                            </div>
+                                        </td>
+                                        <td class="text-center py-4 px-2">
+                                            <div class="permission-toggle {{ 'active' if module.business_dev else '' }} mx-auto" 
+                                                 onclick="toggleAccess('{{ module.key }}', 'business dev', this)" 
+                                                 data-module="{{ module.key }}" data-role="business dev"></div>
+                                        </td>
+                                        <td class="text-center py-4 px-2">
+                                            <div class="permission-toggle {{ 'active' if module.design else '' }} mx-auto" 
+                                                 onclick="toggleAccess('{{ module.key }}', 'design', this)"
+                                                 data-module="{{ module.key }}" data-role="design"></div>
+                                        </td>
+                                        <td class="text-center py-4 px-2">
+                                            <div class="permission-toggle {{ 'active' if module.operations else '' }} mx-auto" 
+                                                 onclick="toggleAccess('{{ module.key }}', 'operations', this)"
+                                                 data-module="{{ module.key }}" data-role="operations"></div>
+                                        </td>
+                                        <td class="text-center py-4 px-2">
+                                            <div class="permission-toggle {{ 'active' if module.site_engineer else '' }} mx-auto" 
+                                                 onclick="toggleAccess('{{ module.key }}', 'site_engineer', this)"
+                                                 data-module="{{ module.key }}" data-role="site_engineer"></div>
+                                        </td>
+                                        <td class="text-center py-4 px-2">
+                                            <div class="permission-toggle {{ 'active' if module.member else '' }} mx-auto" 
+                                                 onclick="toggleAccess('{{ module.key }}', 'member', this)"
+                                                 data-module="{{ module.key }}" data-role="member"></div>
+                                        </td>
+                                    </tr>
+                                    {% endfor %}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+
+                    <!-- Info Panel -->
+                    <div class="glass-card rounded-xl p-6">
+                        <h4 class="font-semibold text-white mb-3">
+                            <i class="fas fa-info-circle text-[var(--accent-cyan)] mr-2"></i>How Access Control Works
+                        </h4>
+                        <div class="grid grid-cols-2 gap-4 text-sm">
+                            <div class="p-4 bg-[var(--bg-tertiary)] rounded-lg">
+                                <p class="font-medium text-white mb-2">Real-time Updates</p>
+                                <p class="text-[var(--text-secondary)]">Changes take effect immediately when team leads and members refresh their dashboards.</p>
+                            </div>
+                            <div class="p-4 bg-[var(--bg-tertiary)] rounded-lg">
+                                <p class="font-medium text-white mb-2">Role-based Access</p>
+                                <p class="text-[var(--text-secondary)]">Each role can have different modules enabled based on their responsibilities.</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Team Leads Tab -->
+                <div id="tab-team-leads" class="tab-content hidden">
+                    <div class="glass-card rounded-xl p-6">
+                        <h3 class="text-lg font-semibold text-white mb-6">
+                            <i class="fas fa-user-tie text-[var(--accent-violet)] mr-2"></i>Team Leads
+                        </h3>
+                        <div class="grid grid-cols-2 gap-4">
+                            {% for lead in team_leads %}
+                            <div class="module-card rounded-xl p-4">
+                                <div class="flex items-center gap-4">
+                                    <div class="w-12 h-12 rounded-full bg-gradient-to-br from-violet-500 to-purple-500 flex items-center justify-center">
+                                        <span class="text-white font-bold">{{ lead.email[0] | upper }}</span>
+                                    </div>
+                                    <div class="flex-1">
+                                        <p class="font-semibold text-white">{{ lead.email.split('@')[0] | title }}</p>
+                                        <p class="text-xs text-[var(--text-secondary)]">{{ lead.email }}</p>
+                                        <span class="inline-block mt-1 px-2 py-0.5 text-[10px] font-bold bg-violet-500/20 text-violet-400 rounded">{{ lead.role | upper }}</span>
+                                    </div>
+                                    <button onclick="editTeamLeadAccess({{ lead.id }})" class="px-3 py-2 bg-[var(--bg-primary)] rounded-lg text-sm hover:bg-[var(--accent-emerald)] hover:text-white transition-colors">
+                                        <i class="fas fa-cog"></i>
+                                    </button>
+                                </div>
+                            </div>
+                            {% else %}
+                            <p class="text-[var(--text-secondary)] col-span-2 text-center py-8">No team leads found</p>
+                            {% endfor %}
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Members Tab -->
+                <div id="tab-members" class="tab-content hidden">
+                    <div class="glass-card rounded-xl p-6">
+                        <div class="flex items-center justify-between mb-6">
+                            <h3 class="text-lg font-semibold text-white">
+                                <i class="fas fa-users text-[var(--accent-cyan)] mr-2"></i>All Team Members
+                            </h3>
+                            <div class="flex items-center gap-3">
+                                <span class="px-3 py-1 bg-cyan-500/20 text-cyan-400 text-sm font-semibold rounded-full">
+                                    {{ members | length }} Members
+                                </span>
+                                <span class="px-3 py-1 bg-violet-500/20 text-violet-400 text-sm font-semibold rounded-full">
+                                    {{ team_leads | length }} Team Leads
+                                </span>
+                            </div>
+                        </div>
+
+                        <!-- Member Stats -->
+                        <div class="grid grid-cols-4 gap-4 mb-6">
+                            <div class="p-4 bg-[var(--bg-tertiary)] rounded-lg border border-[var(--border-color)]">
+                                <div class="flex items-center gap-3">
+                                    <div class="w-10 h-10 rounded-lg bg-cyan-500/20 flex items-center justify-center">
+                                        <i class="fas fa-users text-[var(--accent-cyan)]"></i>
+                                    </div>
+                                    <div>
+                                        <p class="text-2xl font-bold text-white">{{ (members | length) + (team_leads | length) }}</p>
+                                        <p class="text-xs text-[var(--text-secondary)]">Total Users</p>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="p-4 bg-[var(--bg-tertiary)] rounded-lg border border-[var(--border-color)]">
+                                <div class="flex items-center gap-3">
+                                    <div class="w-10 h-10 rounded-lg bg-violet-500/20 flex items-center justify-center">
+                                        <i class="fas fa-user-tie text-[var(--accent-violet)]"></i>
+                                    </div>
+                                    <div>
+                                        <p class="text-2xl font-bold text-white">{{ team_leads | length }}</p>
+                                        <p class="text-xs text-[var(--text-secondary)]">Team Leads</p>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="p-4 bg-[var(--bg-tertiary)] rounded-lg border border-[var(--border-color)]">
+                                <div class="flex items-center gap-3">
+                                    <div class="w-10 h-10 rounded-lg bg-emerald-500/20 flex items-center justify-center">
+                                        <i class="fas fa-user-friends text-[var(--accent-emerald)]"></i>
+                                    </div>
+                                    <div>
+                                        <p class="text-2xl font-bold text-white">{{ members | length }}</p>
+                                        <p class="text-xs text-[var(--text-secondary)]">Members</p>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="p-4 bg-[var(--bg-tertiary)] rounded-lg border border-[var(--border-color)]">
+                                <div class="flex items-center gap-3">
+                                    <div class="w-10 h-10 rounded-lg bg-amber-500/20 flex items-center justify-center">
+                                        <i class="fas fa-user-check text-[var(--accent-amber)]"></i>
+                                    </div>
+                                    <div>
+                                        {% set active_count = (members | selectattr('is_active', 'equalto', true) | list | length) + (team_leads | selectattr('is_active', 'equalto', true) | list | length) %}
+                                        <p class="text-2xl font-bold text-white">{{ active_count }}</p>
+                                        <p class="text-xs text-[var(--text-secondary)]">Active</p>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Team Leads Section -->
+                        {% if team_leads | length > 0 %}
+                        <div class="mb-6">
+                            <h4 class="text-sm font-semibold text-[var(--text-secondary)] uppercase tracking-wider mb-4">
+                                <i class="fas fa-user-tie mr-2"></i>Team Leads
+                            </h4>
+                            <div class="grid grid-cols-2 gap-4">
+                                {% for lead in team_leads %}
+                                <div class="module-card rounded-xl p-4">
+                                    <div class="flex items-center gap-4">
+                                        <div class="w-12 h-12 rounded-full bg-gradient-to-br 
+                                            {% if lead.role == 'business dev' %}from-cyan-500 to-blue-500
+                                            {% elif lead.role == 'design' %}from-rose-500 to-pink-500
+                                            {% elif lead.role == 'operations' %}from-amber-500 to-orange-500
+                                            {% else %}from-yellow-500 to-amber-500{% endif %} flex items-center justify-center">
+                                            <span class="text-white font-bold">{{ lead.email[0] | upper }}</span>
+                                        </div>
+                                        <div class="flex-1">
+                                            <p class="font-semibold text-white">{{ lead.email.split('@')[0] | title }}</p>
+                                            <p class="text-xs text-[var(--text-secondary)]">{{ lead.email }}</p>
+                                            <span class="inline-block mt-1 px-2 py-0.5 text-[10px] font-bold rounded
+                                                {% if lead.role == 'business dev' %}bg-cyan-500/20 text-cyan-400
+                                                {% elif lead.role == 'design' %}bg-rose-500/20 text-rose-400
+                                                {% elif lead.role == 'operations' %}bg-amber-500/20 text-amber-400
+                                                {% else %}bg-yellow-500/20 text-yellow-400{% endif %}">
+                                                {{ lead.role | upper }}
+                                            </span>
+                                        </div>
+                                        <div class="flex items-center gap-2">
+                                            <span class="w-2 h-2 rounded-full {{ 'bg-emerald-400' if lead.is_active else 'bg-gray-500' }}"></span>
+                                            <span class="text-xs text-[var(--text-secondary)]">{{ 'Active' if lead.is_active else 'Inactive' }}</span>
+                                        </div>
+                                    </div>
+                                </div>
+                                {% endfor %}
+                            </div>
+                        </div>
+                        {% endif %}
+
+                        <!-- Team Members Table -->
+                        <div>
+                            <h4 class="text-sm font-semibold text-[var(--text-secondary)] uppercase tracking-wider mb-4">
+                                <i class="fas fa-users mr-2"></i>Team Members
+                            </h4>
+                            <div class="overflow-x-auto">
+                                <table class="w-full">
+                                    <thead>
+                                        <tr class="border-b border-[var(--border-color)]">
+                                            <th class="text-left py-3 px-4 text-sm font-semibold text-[var(--text-secondary)]">Member</th>
+                                            <th class="text-left py-3 px-4 text-sm font-semibold text-[var(--text-secondary)]">Role</th>
+                                            <th class="text-left py-3 px-4 text-sm font-semibold text-[var(--text-secondary)]">Status</th>
+                                            <th class="text-left py-3 px-4 text-sm font-semibold text-[var(--text-secondary)]">Last Active</th>
+                                            <th class="text-center py-3 px-4 text-sm font-semibold text-[var(--text-secondary)]">Actions</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {% for member in members %}
+                                        <tr class="border-b border-[var(--border-color)] hover:bg-[var(--bg-tertiary)]/50">
+                                            <td class="py-4 px-4">
+                                                <div class="flex items-center gap-3">
+                                                    <div class="w-10 h-10 rounded-full bg-gradient-to-br from-cyan-500 to-blue-500 flex items-center justify-center">
+                                                        <span class="text-white font-semibold text-sm">{{ (member.name or member.email)[0] | upper }}</span>
+                                                    </div>
+                                                    <div>
+                                                        <p class="font-medium text-white">{{ member.name or member.email.split('@')[0] | title }}</p>
+                                                        <p class="text-xs text-[var(--text-secondary)]">{{ member.email }}</p>
+                                                    </div>
+                                                </div>
+                                            </td>
+                                            <td class="py-4 px-4">
+                                                <span class="px-2 py-1 text-xs font-semibold 
+                                                    {% if member.department == 'design' %}bg-rose-500/20 text-rose-400
+                                                    {% elif member.department == 'operations' %}bg-amber-500/20 text-amber-400
+                                                    {% elif member.department == 'business' or member.department == 'business dev' %}bg-cyan-500/20 text-cyan-400
+                                                    {% else %}bg-violet-500/20 text-violet-400{% endif %} rounded">
+                                                    {{ (member.department or member.role or 'Member') | title }}
+                                                </span>
+                                            </td>
+                                            <td class="py-4 px-4">
+                                                <div class="flex items-center gap-2">
+                                                    <span class="w-2 h-2 rounded-full {{ 'bg-emerald-400' if member.is_active else 'bg-gray-500' }}"></span>
+                                                    <span class="text-sm text-[var(--text-secondary)]">{{ 'Active' if member.is_active else 'Inactive' }}</span>
+                                                </div>
+                                            </td>
+                                            <td class="py-4 px-4 text-sm text-[var(--text-secondary)]">
+                                                {{ member.created_at.strftime('%b %d, %Y') if member.created_at else 'N/A' }}
+                                            </td>
+                                            <td class="py-4 px-4 text-center">
+                                                <button onclick="viewMemberDetails({{ member.id }})" class="px-3 py-1 bg-[var(--bg-primary)] rounded text-sm hover:bg-[var(--accent-cyan)] hover:text-white transition-colors">
+                                                    <i class="fas fa-eye mr-1"></i>View
+                                                </button>
+                                            </td>
+                                        </tr>
+                                        {% else %}
+                                        <tr>
+                                            <td colspan="5" class="py-12 text-center">
+                                                <div class="w-16 h-16 mx-auto rounded-full bg-[var(--bg-tertiary)] flex items-center justify-center mb-4">
+                                                    <i class="fas fa-users text-3xl text-[var(--text-secondary)]"></i>
+                                                </div>
+                                                <p class="text-[var(--text-secondary)]">No team members found</p>
+                                                <p class="text-xs text-[var(--text-secondary)] mt-1">Members will appear here once created</p>
+                                            </td>
+                                        </tr>
+                                        {% endfor %}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Projects Tab -->
+                <div id="tab-projects" class="tab-content hidden">
+                    <div class="glass-card rounded-xl p-6">
+                        <div class="flex items-center justify-between mb-6">
+                            <h3 class="text-lg font-semibold text-white">
+                                <i class="fas fa-project-diagram text-[var(--accent-amber)] mr-2"></i>All Projects
+                            </h3>
+                            <div class="flex items-center gap-3">
+                                <span class="px-3 py-1 bg-emerald-500/20 text-emerald-400 text-sm font-semibold rounded-full">
+                                    {{ active_projects }} Active
+                                </span>
+                            </div>
+                        </div>
+                        
+                        <!-- Project Stats -->
+                        <div class="grid grid-cols-4 gap-4 mb-6">
+                            <div class="p-4 bg-[var(--bg-tertiary)] rounded-lg border border-[var(--border-color)]">
+                                <div class="flex items-center gap-3">
+                                    <div class="w-10 h-10 rounded-lg bg-cyan-500/20 flex items-center justify-center">
+                                        <i class="fas fa-folder-open text-[var(--accent-cyan)]"></i>
+                                    </div>
+                                    <div>
+                                        <p class="text-2xl font-bold text-white">{{ projects | length }}</p>
+                                        <p class="text-xs text-[var(--text-secondary)]">Total Projects</p>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="p-4 bg-[var(--bg-tertiary)] rounded-lg border border-[var(--border-color)]">
+                                <div class="flex items-center gap-3">
+                                    <div class="w-10 h-10 rounded-lg bg-emerald-500/20 flex items-center justify-center">
+                                        <i class="fas fa-play-circle text-[var(--accent-emerald)]"></i>
+                                    </div>
+                                    <div>
+                                        <p class="text-2xl font-bold text-white">{{ active_projects }}</p>
+                                        <p class="text-xs text-[var(--text-secondary)]">In Progress</p>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="p-4 bg-[var(--bg-tertiary)] rounded-lg border border-[var(--border-color)]">
+                                <div class="flex items-center gap-3">
+                                    <div class="w-10 h-10 rounded-lg bg-violet-500/20 flex items-center justify-center">
+                                        <i class="fas fa-trophy text-[var(--accent-violet)]"></i>
+                                    </div>
+                                    <div>
+                                        {% set won_count = projects | selectattr('stage', 'equalto', 'handover') | list | length %}
+                                        <p class="text-2xl font-bold text-white">{{ won_count }}</p>
+                                        <p class="text-xs text-[var(--text-secondary)]">Completed</p>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="p-4 bg-[var(--bg-tertiary)] rounded-lg border border-[var(--border-color)]">
+                                <div class="flex items-center gap-3">
+                                    <div class="w-10 h-10 rounded-lg bg-amber-500/20 flex items-center justify-center">
+                                        <i class="fas fa-building text-[var(--accent-amber)]"></i>
+                                    </div>
+                                    <div>
+                                        {% set companies = projects | map(attribute='company') | select | unique | list %}
+                                        <p class="text-2xl font-bold text-white">{{ companies | length }}</p>
+                                        <p class="text-xs text-[var(--text-secondary)]">Companies</p>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Projects Grid -->
+                        <div class="grid grid-cols-3 gap-4">
+                            {% for project in projects %}
+                            <div class="module-card rounded-xl p-4">
+                                <div class="flex items-center justify-between mb-3">
+                                    <span class="px-2 py-1 text-xs font-semibold 
+                                        {% if project.stage == 'handover' %}bg-emerald-500/20 text-emerald-400
+                                        {% elif project.stage == 'business' %}bg-cyan-500/20 text-cyan-400
+                                        {% elif project.stage == 'design' %}bg-rose-500/20 text-rose-400
+                                        {% elif project.stage == 'operations' %}bg-amber-500/20 text-amber-400
+                                        {% elif project.stage == 'engineer' %}bg-yellow-500/20 text-yellow-400
+                                        {% else %}bg-violet-500/20 text-violet-400{% endif %} rounded">
+                                        {{ project.stage | title if project.stage else 'Analyzer' }}
+                                    </span>
+                                    <span class="text-xs text-[var(--text-secondary)] mono">{{ project.progress_pct | default(0) }}%</span>
+                                </div>
+                                <h4 class="font-semibold text-white mb-1 truncate" title="{{ project.title or project.b_name or project.g_id }}">
+                                    {{ project.title or project.b_name or project.g_id }}
+                                </h4>
+                                <p class="text-xs text-[var(--text-secondary)] mb-3">{{ project.company | title if project.company else 'N/A' }}</p>
+                                <div class="h-1.5 bg-[var(--bg-primary)] rounded-full overflow-hidden">
+                                    <div class="h-full progress-bar rounded-full" style="width: {{ project.progress_pct | default(0) }}%"></div>
+                                </div>
+                            </div>
+                            {% else %}
+                            <div class="col-span-3 text-center py-12">
+                                <div class="w-16 h-16 mx-auto rounded-full bg-[var(--bg-tertiary)] flex items-center justify-center mb-4">
+                                    <i class="fas fa-folder-open text-3xl text-[var(--text-secondary)]"></i>
+                                </div>
+                                <p class="text-[var(--text-secondary)]">No active projects</p>
+                                <p class="text-xs text-[var(--text-secondary)] mt-1">Projects will appear here once created</p>
+                            </div>
+                            {% endfor %}
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Company Analytics Tab -->
+                <div id="tab-company-analytics" class="tab-content hidden">
+                    <!-- Company Overview Stats -->
+                    <div class="grid grid-cols-3 gap-6 mb-6">
+                        <!-- IKIO Card -->
+                        <div class="glass-card rounded-xl p-6 glow-emerald hover:scale-[1.02] transition-transform cursor-pointer" onclick="filterByCompany('ikio')">
+                            <div class="flex items-center justify-between mb-4">
+                                <div class="w-14 h-14 rounded-xl bg-gradient-to-br from-emerald-500 to-teal-600 flex items-center justify-center shadow-lg shadow-emerald-500/30">
+                                    <span class="text-white font-bold text-xl">IK</span>
+                                </div>
+                                <span class="px-3 py-1 bg-emerald-500/20 text-emerald-400 text-xs font-bold rounded-full">ACTIVE</span>
+                            </div>
+                            <h3 class="text-xl font-bold text-white mb-1">IKIO</h3>
+                            <p class="text-sm text-[var(--text-secondary)] mb-4">Lighting Solutions</p>
+                            <div class="grid grid-cols-2 gap-4">
+                                <div class="text-center p-3 bg-[var(--bg-tertiary)] rounded-lg">
+                                    <p class="text-2xl font-bold text-[var(--accent-emerald)] mono" id="ikio-bids-count">0</p>
+                                    <p class="text-xs text-[var(--text-secondary)]">Active Bids</p>
+                                </div>
+                                <div class="text-center p-3 bg-[var(--bg-tertiary)] rounded-lg">
+                                    <p class="text-2xl font-bold text-[var(--accent-cyan)] mono" id="ikio-projects-count">0</p>
+                                    <p class="text-xs text-[var(--text-secondary)]">Projects</p>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Metco Card -->
+                        <div class="glass-card rounded-xl p-6 glow-violet hover:scale-[1.02] transition-transform cursor-pointer" onclick="filterByCompany('metco')">
+                            <div class="flex items-center justify-between mb-4">
+                                <div class="w-14 h-14 rounded-xl bg-gradient-to-br from-violet-500 to-purple-600 flex items-center justify-center shadow-lg shadow-violet-500/30">
+                                    <span class="text-white font-bold text-xl">ME</span>
+                                </div>
+                                <span class="px-3 py-1 bg-violet-500/20 text-violet-400 text-xs font-bold rounded-full">ACTIVE</span>
+                            </div>
+                            <h3 class="text-xl font-bold text-white mb-1">METCO</h3>
+                            <p class="text-sm text-[var(--text-secondary)] mb-4">Manufacturing Excellence</p>
+                            <div class="grid grid-cols-2 gap-4">
+                                <div class="text-center p-3 bg-[var(--bg-tertiary)] rounded-lg">
+                                    <p class="text-2xl font-bold text-[var(--accent-violet)] mono" id="metco-bids-count">0</p>
+                                    <p class="text-xs text-[var(--text-secondary)]">Active Bids</p>
+                                </div>
+                                <div class="text-center p-3 bg-[var(--bg-tertiary)] rounded-lg">
+                                    <p class="text-2xl font-bold text-[var(--accent-cyan)] mono" id="metco-projects-count">0</p>
+                                    <p class="text-xs text-[var(--text-secondary)]">Projects</p>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Sunsprint Card -->
+                        <div class="glass-card rounded-xl p-6 hover:scale-[1.02] transition-transform cursor-pointer" style="box-shadow: 0 0 30px rgba(245, 158, 11, 0.2);" onclick="filterByCompany('sunsprint')">
+                            <div class="flex items-center justify-between mb-4">
+                                <div class="w-14 h-14 rounded-xl bg-gradient-to-br from-amber-500 to-orange-600 flex items-center justify-center shadow-lg shadow-amber-500/30">
+                                    <span class="text-white font-bold text-xl">SS</span>
+                                </div>
+                                <span class="px-3 py-1 bg-amber-500/20 text-amber-400 text-xs font-bold rounded-full">ACTIVE</span>
+                            </div>
+                            <h3 class="text-xl font-bold text-white mb-1">SUNSPRINT</h3>
+                            <p class="text-sm text-[var(--text-secondary)] mb-4">Solar Energy Systems</p>
+                            <div class="grid grid-cols-2 gap-4">
+                                <div class="text-center p-3 bg-[var(--bg-tertiary)] rounded-lg">
+                                    <p class="text-2xl font-bold text-[var(--accent-amber)] mono" id="sunsprint-bids-count">0</p>
+                                    <p class="text-xs text-[var(--text-secondary)]">Active Bids</p>
+                                </div>
+                                <div class="text-center p-3 bg-[var(--bg-tertiary)] rounded-lg">
+                                    <p class="text-2xl font-bold text-[var(--accent-cyan)] mono" id="sunsprint-projects-count">0</p>
+                                    <p class="text-xs text-[var(--text-secondary)]">Projects</p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Company Comparison Charts -->
+                    <div class="glass-card rounded-xl p-6 mb-6">
+                        <div class="flex items-center justify-between mb-6">
+                            <h3 class="text-lg font-semibold text-white">
+                                <i class="fas fa-chart-bar text-[var(--accent-cyan)] mr-2"></i>Company Comparison
+                                </h3>
+                            <div class="flex items-center gap-2">
+                                <button onclick="setCompanyChartView('bids')" id="btn-chart-bids" class="px-4 py-2 bg-[var(--accent-cyan)] text-white rounded-lg text-sm font-semibold">Bids</button>
+                                <button onclick="setCompanyChartView('projects')" id="btn-chart-projects" class="px-4 py-2 bg-[var(--bg-tertiary)] text-[var(--text-secondary)] rounded-lg text-sm font-semibold hover:bg-[var(--border-color)]">Projects</button>
+                                <button onclick="setCompanyChartView('progress')" id="btn-chart-progress" class="px-4 py-2 bg-[var(--bg-tertiary)] text-[var(--text-secondary)] rounded-lg text-sm font-semibold hover:bg-[var(--border-color)]">Progress</button>
+                            </div>
+                        </div>
+
+                        <div class="grid grid-cols-2 gap-6">
+                            <!-- Main Comparison Bar Chart -->
+                            <div class="bg-[var(--bg-tertiary)] rounded-xl p-4">
+                                <h4 class="text-sm font-semibold text-white mb-4">Bids & Projects by Company</h4>
+                                <div class="relative h-64">
+                                    <canvas id="companyComparisonChart"></canvas>
+                                    </div>
+                                </div>
+
+                            <!-- Company Distribution Pie -->
+                            <div class="bg-[var(--bg-tertiary)] rounded-xl p-4">
+                                <h4 class="text-sm font-semibold text-white mb-4">Distribution</h4>
+                                <div class="relative h-64">
+                                    <canvas id="companyDistributionChart"></canvas>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Company-wise Details Grid -->
+                    <div class="grid grid-cols-3 gap-6 mb-6">
+                        <!-- IKIO Details -->
+                        <div class="glass-card rounded-xl p-6">
+                            <div class="flex items-center gap-3 mb-4">
+                                <div class="w-10 h-10 rounded-lg bg-gradient-to-br from-emerald-500 to-teal-600 flex items-center justify-center">
+                                    <span class="text-white font-bold text-sm">IK</span>
+                                </div>
+                                <div>
+                                    <h4 class="font-semibold text-white">IKIO</h4>
+                                    <p class="text-xs text-[var(--text-secondary)]">Detailed Metrics</p>
+                                </div>
+                            </div>
+                                <div class="space-y-3">
+                                    <div class="flex justify-between items-center">
+                                    <span class="text-sm text-[var(--text-secondary)]">Won Bids</span>
+                                    <span class="font-semibold text-white mono" id="ikio-won">0</span>
+                                    </div>
+                                    <div class="flex justify-between items-center">
+                                    <span class="text-sm text-[var(--text-secondary)]">In Progress</span>
+                                    <span class="font-semibold text-[var(--accent-cyan)] mono" id="ikio-progress">0</span>
+                                    </div>
+                                    <div class="flex justify-between items-center">
+                                    <span class="text-sm text-[var(--text-secondary)]">Pending</span>
+                                    <span class="font-semibold text-[var(--accent-amber)] mono" id="ikio-pending">0</span>
+                                    </div>
+                                <div class="pt-3 border-t border-[var(--border-color)]">
+                                    <div class="flex justify-between items-center mb-2">
+                                        <span class="text-xs text-[var(--text-secondary)]">Avg Progress</span>
+                                        <span class="text-xs text-[var(--accent-emerald)]" id="ikio-avg-progress">0%</span>
+                                </div>
+                                    <div class="h-2 bg-[var(--bg-primary)] rounded-full overflow-hidden">
+                                        <div class="h-full bg-gradient-to-r from-emerald-500 to-teal-500 rounded-full" id="ikio-progress-bar" style="width: 0%"></div>
+                                    </div>
+                                </div>
+                                </div>
+                            </div>
+
+                        <!-- Metco Details -->
+                        <div class="glass-card rounded-xl p-6">
+                            <div class="flex items-center gap-3 mb-4">
+                                <div class="w-10 h-10 rounded-lg bg-gradient-to-br from-violet-500 to-purple-600 flex items-center justify-center">
+                                    <span class="text-white font-bold text-sm">ME</span>
+                                    </div>
+                                <div>
+                                    <h4 class="font-semibold text-white">METCO</h4>
+                                    <p class="text-xs text-[var(--text-secondary)]">Detailed Metrics</p>
+                                </div>
+                            </div>
+                                <div class="space-y-3">
+                                    <div class="flex justify-between items-center">
+                                    <span class="text-sm text-[var(--text-secondary)]">Won Bids</span>
+                                    <span class="font-semibold text-white mono" id="metco-won">0</span>
+                                    </div>
+                                    <div class="flex justify-between items-center">
+                                    <span class="text-sm text-[var(--text-secondary)]">In Progress</span>
+                                    <span class="font-semibold text-[var(--accent-cyan)] mono" id="metco-progress">0</span>
+                                    </div>
+                                    <div class="flex justify-between items-center">
+                                    <span class="text-sm text-[var(--text-secondary)]">Pending</span>
+                                    <span class="font-semibold text-[var(--accent-amber)] mono" id="metco-pending">0</span>
+                                    </div>
+                                <div class="pt-3 border-t border-[var(--border-color)]">
+                                    <div class="flex justify-between items-center mb-2">
+                                        <span class="text-xs text-[var(--text-secondary)]">Avg Progress</span>
+                                        <span class="text-xs text-[var(--accent-violet)]" id="metco-avg-progress">0%</span>
+                                </div>
+                                    <div class="h-2 bg-[var(--bg-primary)] rounded-full overflow-hidden">
+                                        <div class="h-full bg-gradient-to-r from-violet-500 to-purple-500 rounded-full" id="metco-progress-bar" style="width: 0%"></div>
+                                    </div>
+                                </div>
+                                </div>
+                            </div>
+
+                        <!-- Sunsprint Details -->
+                        <div class="glass-card rounded-xl p-6">
+                            <div class="flex items-center gap-3 mb-4">
+                                <div class="w-10 h-10 rounded-lg bg-gradient-to-br from-amber-500 to-orange-600 flex items-center justify-center">
+                                    <span class="text-white font-bold text-sm">SS</span>
+                                    </div>
+                                <div>
+                                    <h4 class="font-semibold text-white">SUNSPRINT</h4>
+                                    <p class="text-xs text-[var(--text-secondary)]">Detailed Metrics</p>
+                                </div>
+                            </div>
+                                <div class="space-y-3">
+                                    <div class="flex justify-between items-center">
+                                    <span class="text-sm text-[var(--text-secondary)]">Won Bids</span>
+                                    <span class="font-semibold text-white mono" id="sunsprint-won">0</span>
+                                    </div>
+                                    <div class="flex justify-between items-center">
+                                    <span class="text-sm text-[var(--text-secondary)]">In Progress</span>
+                                    <span class="font-semibold text-[var(--accent-cyan)] mono" id="sunsprint-progress">0</span>
+                                    </div>
+                                    <div class="flex justify-between items-center">
+                                    <span class="text-sm text-[var(--text-secondary)]">Pending</span>
+                                    <span class="font-semibold text-[var(--accent-amber)] mono" id="sunsprint-pending">0</span>
+                                    </div>
+                                <div class="pt-3 border-t border-[var(--border-color)]">
+                                    <div class="flex justify-between items-center mb-2">
+                                        <span class="text-xs text-[var(--text-secondary)]">Avg Progress</span>
+                                        <span class="text-xs text-[var(--accent-amber)]" id="sunsprint-avg-progress">0%</span>
+                                </div>
+                                    <div class="h-2 bg-[var(--bg-primary)] rounded-full overflow-hidden">
+                                        <div class="h-full bg-gradient-to-r from-amber-500 to-orange-500 rounded-full" id="sunsprint-progress-bar" style="width: 0%"></div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Stage Progress by Company -->
+                    <div class="glass-card rounded-xl p-6 mb-6">
+                        <div class="flex items-center justify-between mb-6">
+                            <h3 class="text-lg font-semibold text-white">
+                                <i class="fas fa-tasks text-[var(--accent-amber)] mr-2"></i>Stage Progress by Company
+                            </h3>
+                        </div>
+
+                        <div class="grid grid-cols-3 gap-6">
+                            <!-- IKIO Stage Chart -->
+                            <div class="bg-[var(--bg-tertiary)] rounded-xl p-4">
+                                <div class="flex items-center gap-2 mb-4">
+                                    <div class="w-8 h-8 rounded-lg bg-gradient-to-br from-emerald-500 to-teal-600 flex items-center justify-center">
+                                        <span class="text-white font-bold text-xs">IK</span>
+                            </div>
+                                    <h4 class="text-sm font-semibold text-white">IKIO Stages</h4>
+                            </div>
+                                <div class="relative h-48">
+                                    <canvas id="ikioStageChart"></canvas>
+                        </div>
+                    </div>
+
+                            <!-- Metco Stage Chart -->
+                            <div class="bg-[var(--bg-tertiary)] rounded-xl p-4">
+                                <div class="flex items-center gap-2 mb-4">
+                                    <div class="w-8 h-8 rounded-lg bg-gradient-to-br from-violet-500 to-purple-600 flex items-center justify-center">
+                                        <span class="text-white font-bold text-xs">ME</span>
+                            </div>
+                                    <h4 class="text-sm font-semibold text-white">METCO Stages</h4>
+                                </div>
+                                <div class="relative h-48">
+                                    <canvas id="metcoStageChart"></canvas>
+                            </div>
+                        </div>
+
+                            <!-- Sunsprint Stage Chart -->
+                            <div class="bg-[var(--bg-tertiary)] rounded-xl p-4">
+                                <div class="flex items-center gap-2 mb-4">
+                                    <div class="w-8 h-8 rounded-lg bg-gradient-to-br from-amber-500 to-orange-600 flex items-center justify-center">
+                                        <span class="text-white font-bold text-xs">SS</span>
+                            </div>
+                                    <h4 class="text-sm font-semibold text-white">SUNSPRINT Stages</h4>
+                            </div>
+                                <div class="relative h-48">
+                                    <canvas id="sunsprintStageChart"></canvas>
+                        </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Recent Activity by Company -->
+                    <div class="glass-card rounded-xl p-6">
+                        <div class="flex items-center justify-between mb-6">
+                            <h3 class="text-lg font-semibold text-white">
+                                <i class="fas fa-clock text-[var(--accent-cyan)] mr-2"></i>Recent Bids by Company
+                            </h3>
+                            <div class="flex items-center gap-2">
+                                <button onclick="filterCompanyBids('all')" class="company-filter-btn active px-3 py-1 text-sm rounded-lg bg-[var(--accent-cyan)] text-white">All</button>
+                                <button onclick="filterCompanyBids('ikio')" class="company-filter-btn px-3 py-1 text-sm rounded-lg bg-[var(--bg-tertiary)] text-[var(--text-secondary)] hover:bg-emerald-500/20 hover:text-emerald-400">IKIO</button>
+                                <button onclick="filterCompanyBids('metco')" class="company-filter-btn px-3 py-1 text-sm rounded-lg bg-[var(--bg-tertiary)] text-[var(--text-secondary)] hover:bg-violet-500/20 hover:text-violet-400">METCO</button>
+                                <button onclick="filterCompanyBids('sunsprint')" class="company-filter-btn px-3 py-1 text-sm rounded-lg bg-[var(--bg-tertiary)] text-[var(--text-secondary)] hover:bg-amber-500/20 hover:text-amber-400">SUNSPRINT</button>
+                            </div>
+                        </div>
+
+                        <div class="overflow-x-auto">
+                            <table class="w-full">
+                                <thead>
+                                    <tr class="border-b border-[var(--border-color)]">
+                                        <th class="text-left py-3 px-4 text-sm font-semibold text-[var(--text-secondary)]">BID Name</th>
+                                        <th class="text-left py-3 px-4 text-sm font-semibold text-[var(--text-secondary)]">Company</th>
+                                        <th class="text-left py-3 px-4 text-sm font-semibold text-[var(--text-secondary)]">Stage</th>
+                                        <th class="text-left py-3 px-4 text-sm font-semibold text-[var(--text-secondary)]">Progress</th>
+                                        <th class="text-left py-3 px-4 text-sm font-semibold text-[var(--text-secondary)]">Due Date</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="company-bids-table">
+                                    {% for item in go_projects_top5 + go_projects_more %}
+                                    <tr class="company-bid-row border-b border-[var(--border-color)] hover:bg-[var(--bg-tertiary)]/50" data-company="{{ item.company | lower }}">
+                                        <td class="py-3 px-4">
+                                            <span class="font-medium text-white">{{ item.b_name }}</span>
+                                        </td>
+                                        <td class="py-3 px-4">
+                                            <span class="px-2 py-1 text-xs font-semibold rounded
+                                                {% if 'ikio' in (item.company | lower) %}bg-emerald-500/20 text-emerald-400
+                                                {% elif 'metco' in (item.company | lower) %}bg-violet-500/20 text-violet-400
+                                                {% elif 'sunsprint' in (item.company | lower) %}bg-amber-500/20 text-amber-400
+                                                {% else %}bg-cyan-500/20 text-cyan-400{% endif %}">
+                                                {{ item.company }}
+                                    </span>
+                                        </td>
+                                        <td class="py-3 px-4 text-sm text-[var(--text-secondary)]">{{ item.project_status | title }}</td>
+                                        <td class="py-3 px-4">
+                                            <div class="flex items-center gap-2">
+                                                <div class="w-16 h-2 bg-[var(--bg-primary)] rounded-full overflow-hidden">
+                                                    <div class="h-full progress-bar rounded-full" style="width: {{ item.work_progress_pct }}%"></div>
+                                </div>
+                                                <span class="text-xs text-[var(--accent-emerald)] mono">{{ item.work_progress_pct }}%</span>
+                                </div>
+                                        </td>
+                                        <td class="py-3 px-4 text-sm text-[var(--text-secondary)]">{{ item.due_date }}</td>
+                                    </tr>
+                            {% else %}
+                                    <tr>
+                                        <td colspan="5" class="py-8 text-center text-[var(--text-secondary)]">
+                                            <i class="fas fa-inbox text-3xl mb-2 opacity-50"></i>
+                                            <p>No bids found</p>
+                                        </td>
+                                    </tr>
+                            {% endfor %}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <script>
+        // Tab Navigation
+        function showTab(tabName) {
+            // Hide all tabs
+            document.querySelectorAll('.tab-content').forEach(tab => tab.classList.add('hidden'));
+            // Remove active class from nav items
+            document.querySelectorAll('.nav-item').forEach(item => item.classList.remove('active'));
+            
+            // Show selected tab
+            document.getElementById('tab-' + tabName).classList.remove('hidden');
+            // Add active class to nav item
+            document.getElementById('nav-' + tabName)?.classList.add('active');
+            
+            // Update header
+            const titles = {
+                'dashboard': ['Dashboard', 'Welcome back, {{ current_user.email.split("@")[0] | title }}'],
+                'team-access': ['Team Access Control', 'Manage module permissions for team leads and members'],
+                'team-leads': ['Team Leads', 'View and manage team lead accounts'],
+                'members': ['All Members', 'View all team members across departments'],
+                'projects': ['All Projects', 'Overview of all active and completed projects'],
+                'company-analytics': ['Company Analytics', 'Compare bids and projects across IKIO, Metco & Sunsprint']
+            };
+            document.getElementById('page-title').textContent = titles[tabName][0];
+            document.getElementById('page-subtitle').textContent = titles[tabName][1];
+            
+            // Initialize company charts when tab is shown
+            if (tabName === 'company-analytics') {
+                setTimeout(initCompanyCharts, 100);
+            }
+        }
+
+        // Toggle access permission
+        function toggleAccess(module, role, element) {
+            element.classList.toggle('active');
+            const enabled = element.classList.contains('active');
+            
+            // Save to server
+            fetch('/api/admin/permissions/update', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ module, role, enabled })
+            })
+            .then(res => res.json())
+            .then(data => {
+                if (!data.success) {
+                    element.classList.toggle('active'); // Revert on error
+                    showNotification('Error updating permission', 'error');
+                } else {
+                    showNotification(`Permission updated! ${role.replace('_', ' ').toUpperCase()} users will see changes on refresh.`, 'success');
+                }
+            })
+            .catch(err => {
+                element.classList.toggle('active'); // Revert on error
+                showNotification('Error updating permission', 'error');
+                console.error(err);
+            });
+        }
+
+        // Save all access changes
+        function saveAllAccessChanges() {
+            showNotification('All changes saved successfully!', 'success');
+        }
+
+        // Edit team lead access
+        function editTeamLeadAccess(leadId) {
+            showTab('team-access');
+            showNotification('Showing access controls for selected team lead', 'info');
+        }
+
+        // View member details
+        function viewMemberDetails(memberId) {
+            window.location.href = `/api/admin/user/${memberId}`;
+        }
+
+        // Show notification
+        function showNotification(message, type) {
+            const colors = {
+                'success': 'from-emerald-500 to-green-500',
+                'error': 'from-rose-500 to-red-500',
+                'info': 'from-cyan-500 to-blue-500'
+            };
+            
+            const notification = document.createElement('div');
+            notification.className = `fixed top-4 right-4 px-6 py-3 rounded-lg bg-gradient-to-r ${colors[type]} text-white font-medium z-50 transition-all transform translate-x-full`;
+            notification.textContent = message;
+            document.body.appendChild(notification);
+            
+            setTimeout(() => notification.classList.remove('translate-x-full'), 100);
+            setTimeout(() => {
+                notification.classList.add('translate-x-full');
+                setTimeout(() => notification.remove(), 300);
+            }, 3000);
+        }
+
+        // Timeline Summary Toggle
+        document.addEventListener('DOMContentLoaded', function() {
+            document.querySelectorAll('.timeline-summary-toggle').forEach(btn => {
+                btn.addEventListener('click', function() {
+                    const card = this.closest('[data-bid-card]');
+                    const summary = card.querySelector('.timeline-summary');
+                    const icon = this.querySelector('i');
+                    
+                    if (summary) {
+                        summary.classList.toggle('hidden');
+                        if (icon) {
+                            icon.classList.toggle('fa-chevron-down');
+                            icon.classList.toggle('fa-chevron-up');
+                        }
+                    }
+                });
+            });
+        });
+
+        // Toggle More BIDs
+        function toggleMoreBids() {
+            const moreSection = document.getElementById('go-projects-more');
+            const btn = document.getElementById('toggle-more-bids-btn');
+            const icon = document.getElementById('toggle-more-icon');
+            const text = document.getElementById('toggle-more-text');
+            const countSpan = document.getElementById('toggle-more-count');
+            
+            if (moreSection && btn) {
+                const isHidden = moreSection.classList.contains('hidden');
+                moreSection.classList.toggle('hidden');
+                
+                if (isHidden) {
+                    // Now showing more
+                    icon.classList.remove('fa-chevron-down');
+                    icon.classList.add('fa-chevron-up');
+                    text.textContent = 'Show Less';
+                    countSpan.style.display = 'none';
+                    // Smooth scroll to the more section
+                    setTimeout(() => {
+                        moreSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                    }, 100);
+                } else {
+                    // Now hidden
+                    icon.classList.remove('fa-chevron-up');
+                    icon.classList.add('fa-chevron-down');
+                    text.textContent = 'Show More BIDs';
+                    countSpan.style.display = 'inline';
+                }
+            }
+        }
+
+        // ==================== CHART INITIALIZATION ====================
+        
+        document.addEventListener('DOMContentLoaded', function() {
+            // Chart.js default configuration
+            Chart.defaults.color = '#94a3b8';
+            Chart.defaults.borderColor = '#475569';
+            
+            // Actual data from backend
+            const totalProjects = {{ projects | length }};
+            const totalTeamLeads = {{ team_leads | length }};
+            const totalMembers = {{ members | length }};
+            const activeProjects = {{ active_projects }};
+            
+            // Count team leads by role
+            const businessDevCount = {{ team_leads | selectattr('role', 'equalto', 'business dev') | list | length }};
+            const designCount = {{ team_leads | selectattr('role', 'equalto', 'design') | list | length }};
+            const operationsCount = {{ team_leads | selectattr('role', 'equalto', 'operations') | list | length }};
+            const engineerCount = {{ team_leads | selectattr('role', 'in', ['site_engineer', 'site engineer']) | list | length }};
+            
+            // Count employees by department
+            const deptData = {};
+            {% for member in members %}
+            {% if member.department %}
+            deptData['{{ member.department | title }}'] = (deptData['{{ member.department | title }}'] || 0) + 1;
+            {% endif %}
+            {% endfor %}
+            
+            // Count active/inactive
+            let activeTeamLeads = 0;
+            let inactiveTeamLeads = 0;
+            {% for lead in team_leads %}
+            {% if lead.is_active %}
+            activeTeamLeads++;
+            {% else %}
+            inactiveTeamLeads++;
+            {% endif %}
+            {% endfor %}
+            
+            let activeMembers = 0;
+            let inactiveMembers = 0;
+            {% for member in members %}
+            {% if member.is_active %}
+            activeMembers++;
+            {% else %}
+            inactiveMembers++;
+            {% endif %}
+            {% endfor %}
+
+            // 1. Overview Bar Chart - Shows total counts
+            const overviewCtx = document.getElementById('overviewChart');
+            if (overviewCtx) {
+                new Chart(overviewCtx, {
+                    type: 'bar',
+                    data: {
+                        labels: ['Projects', 'Team Leads', 'Members'],
+                        datasets: [{
+                            data: [totalProjects || 1, totalTeamLeads, totalMembers],
+                            backgroundColor: [
+                                'rgba(6, 182, 212, 0.9)',
+                                'rgba(139, 92, 246, 0.9)',
+                                'rgba(16, 185, 129, 0.9)'
+                            ],
+                            borderRadius: 6,
+                            borderSkipped: false,
+                            barThickness: 45
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        scales: {
+                            x: { grid: { display: false } },
+                            y: {
+                                beginAtZero: true,
+                                grid: { color: 'rgba(71, 85, 105, 0.3)' }
+                            }
+                        },
+                        plugins: { legend: { display: false } }
+                    }
+                });
+            }
+
+            // 2. Team Distribution Doughnut Chart
+            const teamDistCtx = document.getElementById('teamDistChart');
+            if (teamDistCtx) {
+                new Chart(teamDistCtx, {
+                    type: 'doughnut',
+                    data: {
+                        labels: ['Business Dev', 'Design', 'Operations', 'Engineering'],
+                        datasets: [{
+                            data: [
+                                businessDevCount || 1,
+                                designCount || 1,
+                                operationsCount || 1,
+                                engineerCount || 1
+                            ],
+                            backgroundColor: [
+                                'rgba(6, 182, 212, 0.8)',
+                                'rgba(244, 63, 94, 0.8)',
+                                'rgba(245, 158, 11, 0.8)',
+                                'rgba(234, 179, 8, 0.8)'
+                            ],
+                            borderWidth: 0,
+                            hoverOffset: 8
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        cutout: '55%',
+                        plugins: {
+                            legend: {
+                                position: 'bottom',
+                                labels: { boxWidth: 10, padding: 6, font: { size: 9 } }
+                            }
+                        }
+                    }
+                });
+            }
+
+            // 3. Employees by Department Horizontal Bar
+            const deptCtx = document.getElementById('deptChart');
+            if (deptCtx) {
+                const deptLabels = Object.keys(deptData).length > 0 ? Object.keys(deptData) : ['Design', 'Operations', 'Business', 'Engineering'];
+                const deptValues = Object.keys(deptData).length > 0 ? Object.values(deptData) : [0, 0, 0, 0];
+                
+                // If no data, show team leads as placeholder
+                const displayValues = deptValues.some(v => v > 0) ? deptValues : [
+                    businessDevCount + designCount,
+                    operationsCount,
+                    engineerCount,
+                    totalMembers
+                ];
+                const displayLabels = deptValues.some(v => v > 0) ? deptLabels : ['Team Leads', 'Operations', 'Engineering', 'Members'];
+                
+                new Chart(deptCtx, {
+                    type: 'bar',
+                    data: {
+                        labels: displayLabels,
+                        datasets: [{
+                            data: displayValues,
+                            backgroundColor: [
+                                'rgba(6, 182, 212, 0.8)',
+                                'rgba(245, 158, 11, 0.8)',
+                                'rgba(234, 179, 8, 0.8)',
+                                'rgba(16, 185, 129, 0.8)'
+                            ],
+                            borderRadius: 6,
+                            borderSkipped: false,
+                            barThickness: 20
+                        }]
+                    },
+                    options: {
+                        indexAxis: 'y',
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        scales: {
+                            x: {
+                                beginAtZero: true,
+                                grid: { color: 'rgba(71, 85, 105, 0.3)' }
+                            },
+                            y: { grid: { display: false } }
+                        },
+                        plugins: { legend: { display: false } }
+                    }
+                });
+            }
+
+            // 4. User Status Doughnut
+            const statusCtx = document.getElementById('statusChart');
+            if (statusCtx) {
+                const totalActive = activeTeamLeads + activeMembers;
+                const totalInactive = inactiveTeamLeads + inactiveMembers;
+                
+                new Chart(statusCtx, {
+                    type: 'doughnut',
+                    data: {
+                        labels: ['Active', 'Inactive'],
+                        datasets: [{
+                            data: [totalActive || totalTeamLeads + totalMembers, totalInactive],
+                            backgroundColor: [
+                                'rgba(16, 185, 129, 0.8)',
+                                'rgba(107, 114, 128, 0.6)'
+                            ],
+                            borderWidth: 0,
+                            hoverOffset: 8
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        cutout: '60%',
+                        plugins: {
+                            legend: {
+                                position: 'bottom',
+                                labels: { boxWidth: 12, padding: 10 }
+                            }
+                        }
+                    }
+                });
+            }
+
+            // 5. Team Leads by Role Bar Chart
+            const rolesCtx = document.getElementById('rolesChart');
+            if (rolesCtx) {
+                new Chart(rolesCtx, {
+                    type: 'bar',
+                    data: {
+                        labels: ['Business Dev', 'Design', 'Operations', 'Site Eng.'],
+                        datasets: [{
+                            data: [businessDevCount, designCount, operationsCount, engineerCount],
+                            backgroundColor: [
+                                'rgba(6, 182, 212, 0.9)',
+                                'rgba(244, 63, 94, 0.9)',
+                                'rgba(245, 158, 11, 0.9)',
+                                'rgba(234, 179, 8, 0.9)'
+                            ],
+                            borderRadius: 6,
+                            borderSkipped: false,
+                            barThickness: 30
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        scales: {
+                            x: { grid: { display: false } },
+                            y: {
+                                beginAtZero: true,
+                                grid: { color: 'rgba(71, 85, 105, 0.3)' },
+                                ticks: { stepSize: 1 }
+                            }
+                        },
+                        plugins: { legend: { display: false } }
+                    }
+                });
+            }
+
+            // 6. System Summary - Polar Area
+            const summaryCtx = document.getElementById('summaryChart');
+            if (summaryCtx) {
+                new Chart(summaryCtx, {
+                    type: 'polarArea',
+                    data: {
+                        labels: ['Projects', 'Team Leads', 'Members', 'Active'],
+                        datasets: [{
+                            data: [
+                                totalProjects || 1,
+                                totalTeamLeads || 1,
+                                totalMembers || 1,
+                                activeProjects || 1
+                            ],
+                            backgroundColor: [
+                                'rgba(6, 182, 212, 0.7)',
+                                'rgba(139, 92, 246, 0.7)',
+                                'rgba(16, 185, 129, 0.7)',
+                                'rgba(245, 158, 11, 0.7)'
+                            ],
+                            borderWidth: 2,
+                            borderColor: [
+                                'rgba(6, 182, 212, 1)',
+                                'rgba(139, 92, 246, 1)',
+                                'rgba(16, 185, 129, 1)',
+                                'rgba(245, 158, 11, 1)'
+                            ]
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        scales: {
+                            r: {
+                                grid: { color: 'rgba(71, 85, 105, 0.3)' },
+                                ticks: { display: false }
+                            }
+                        },
+                        plugins: {
+                            legend: {
+                                position: 'bottom',
+                                labels: { boxWidth: 10, padding: 6, font: { size: 9 } }
+                            }
+                        }
+                    }
+                });
+            }
+        });
+
+        // ==================== COMPANY ANALYTICS ====================
+        
+        // Company data from backend
+        let companyData = {
+            ikio: { bids: 0, projects: 0, won: 0, inProgress: 0, pending: 0, avgProgress: 0, stages: {} },
+            metco: { bids: 0, projects: 0, won: 0, inProgress: 0, pending: 0, avgProgress: 0, stages: {} },
+            sunsprint: { bids: 0, projects: 0, won: 0, inProgress: 0, pending: 0, avgProgress: 0, stages: {} }
+        };
+        
+        let companyCharts = {};
+        
+        // Calculate company data from projects
+        function calculateCompanyData() {
+            // Reset counts
+            Object.keys(companyData).forEach(key => {
+                companyData[key] = { bids: 0, projects: 0, won: 0, inProgress: 0, pending: 0, avgProgress: 0, stages: {}, totalProgress: 0 };
+            });
+            
+            // Count from go_projects (bids)
+            {% for item in go_projects_top5 + go_projects_more %}
+            (function() {
+                const company = '{{ item.company | lower }}'.trim();
+                const progress = {{ item.work_progress_pct | default(0) }};
+                const status = '{{ item.project_status | lower }}';
+                const stage = '{{ item.stage | default("business") }}';
+                
+                let companyKey = null;
+                if (company.includes('ikio')) companyKey = 'ikio';
+                else if (company.includes('metco')) companyKey = 'metco';
+                else if (company.includes('sunsprint')) companyKey = 'sunsprint';
+                
+                if (companyKey && companyData[companyKey]) {
+                    companyData[companyKey].bids++;
+                    companyData[companyKey].totalProgress += progress;
+                    
+                    if (status === 'won' || status === 'completed' || status === 'handover') {
+                        companyData[companyKey].won++;
+                    } else if (status === 'in progress' || status === 'active') {
+                        companyData[companyKey].inProgress++;
+                    } else {
+                        companyData[companyKey].pending++;
+                    }
+                    
+                    // Count stages
+                    companyData[companyKey].stages[stage] = (companyData[companyKey].stages[stage] || 0) + 1;
+                }
+            })();
+            {% endfor %}
+            
+            // Count from won_projects
+            {% for item in won_projects %}
+            (function() {
+                const company = '{{ item.company | lower }}'.trim();
+                
+                let companyKey = null;
+                if (company.includes('ikio')) companyKey = 'ikio';
+                else if (company.includes('metco')) companyKey = 'metco';
+                else if (company.includes('sunsprint')) companyKey = 'sunsprint';
+                
+                if (companyKey && companyData[companyKey]) {
+                    companyData[companyKey].projects++;
+                }
+            })();
+            {% endfor %}
+            
+            // Count from all projects
+            {% for project in projects %}
+            (function() {
+                const company = '{{ project.company | lower }}'.trim();
+                
+                let companyKey = null;
+                if (company.includes('ikio')) companyKey = 'ikio';
+                else if (company.includes('metco')) companyKey = 'metco';
+                else if (company.includes('sunsprint')) companyKey = 'sunsprint';
+                
+                if (companyKey && companyData[companyKey]) {
+                    companyData[companyKey].projects++;
+                }
+            })();
+            {% endfor %}
+            
+            // Calculate averages
+            Object.keys(companyData).forEach(key => {
+                if (companyData[key].bids > 0) {
+                    companyData[key].avgProgress = Math.round(companyData[key].totalProgress / companyData[key].bids);
+                }
+            });
+        }
+        
+        // Update company stats display
+        function updateCompanyStats() {
+            // IKIO
+            document.getElementById('ikio-bids-count').textContent = companyData.ikio.bids;
+            document.getElementById('ikio-projects-count').textContent = companyData.ikio.projects;
+            document.getElementById('ikio-won').textContent = companyData.ikio.won;
+            document.getElementById('ikio-progress').textContent = companyData.ikio.inProgress;
+            document.getElementById('ikio-pending').textContent = companyData.ikio.pending;
+            document.getElementById('ikio-avg-progress').textContent = companyData.ikio.avgProgress + '%';
+            document.getElementById('ikio-progress-bar').style.width = companyData.ikio.avgProgress + '%';
+            
+            // Metco
+            document.getElementById('metco-bids-count').textContent = companyData.metco.bids;
+            document.getElementById('metco-projects-count').textContent = companyData.metco.projects;
+            document.getElementById('metco-won').textContent = companyData.metco.won;
+            document.getElementById('metco-progress').textContent = companyData.metco.inProgress;
+            document.getElementById('metco-pending').textContent = companyData.metco.pending;
+            document.getElementById('metco-avg-progress').textContent = companyData.metco.avgProgress + '%';
+            document.getElementById('metco-progress-bar').style.width = companyData.metco.avgProgress + '%';
+            
+            // Sunsprint
+            document.getElementById('sunsprint-bids-count').textContent = companyData.sunsprint.bids;
+            document.getElementById('sunsprint-projects-count').textContent = companyData.sunsprint.projects;
+            document.getElementById('sunsprint-won').textContent = companyData.sunsprint.won;
+            document.getElementById('sunsprint-progress').textContent = companyData.sunsprint.inProgress;
+            document.getElementById('sunsprint-pending').textContent = companyData.sunsprint.pending;
+            document.getElementById('sunsprint-avg-progress').textContent = companyData.sunsprint.avgProgress + '%';
+            document.getElementById('sunsprint-progress-bar').style.width = companyData.sunsprint.avgProgress + '%';
+        }
+        
+        // Initialize company charts
+        function initCompanyCharts() {
+            calculateCompanyData();
+            updateCompanyStats();
+            
+            // Destroy existing charts if they exist
+            Object.values(companyCharts).forEach(chart => {
+                if (chart) chart.destroy();
+            });
+            
+            // 1. Company Comparison Bar Chart
+            const comparisonCtx = document.getElementById('companyComparisonChart');
+            if (comparisonCtx) {
+                companyCharts.comparison = new Chart(comparisonCtx, {
+                    type: 'bar',
+                    data: {
+                        labels: ['IKIO', 'METCO', 'SUNSPRINT'],
+                        datasets: [
+                            {
+                                label: 'Active Bids',
+                                data: [companyData.ikio.bids, companyData.metco.bids, companyData.sunsprint.bids],
+                                backgroundColor: [
+                                    'rgba(16, 185, 129, 0.8)',
+                                    'rgba(139, 92, 246, 0.8)',
+                                    'rgba(245, 158, 11, 0.8)'
+                                ],
+                                borderRadius: 6,
+                                barThickness: 35
+                            },
+                            {
+                                label: 'Projects',
+                                data: [companyData.ikio.projects, companyData.metco.projects, companyData.sunsprint.projects],
+                            backgroundColor: [
+                                    'rgba(6, 182, 212, 0.8)',
+                                    'rgba(168, 85, 247, 0.8)',
+                                    'rgba(251, 191, 36, 0.8)'
+                                ],
+                                borderRadius: 6,
+                                barThickness: 35
+                            }
+                        ]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        scales: {
+                            x: { grid: { display: false } },
+                            y: {
+                                beginAtZero: true,
+                                grid: { color: 'rgba(71, 85, 105, 0.3)' },
+                                ticks: { stepSize: 1 }
+                            }
+                        },
+                        plugins: {
+                            legend: {
+                                position: 'bottom',
+                                labels: { boxWidth: 12, padding: 15 }
+                            }
+                        }
+                    }
+                });
+            }
+            
+            // 2. Company Distribution Doughnut
+            const distributionCtx = document.getElementById('companyDistributionChart');
+            if (distributionCtx) {
+                const totalBids = companyData.ikio.bids + companyData.metco.bids + companyData.sunsprint.bids;
+                companyCharts.distribution = new Chart(distributionCtx, {
+                    type: 'doughnut',
+                    data: {
+                        labels: ['IKIO', 'METCO', 'SUNSPRINT'],
+                        datasets: [{
+                            data: [
+                                companyData.ikio.bids || 1,
+                                companyData.metco.bids || 1,
+                                companyData.sunsprint.bids || 1
+                            ],
+                            backgroundColor: [
+                                'rgba(16, 185, 129, 0.9)',
+                                'rgba(139, 92, 246, 0.9)',
+                                'rgba(245, 158, 11, 0.9)'
+                            ],
+                            borderWidth: 0,
+                            hoverOffset: 10
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        cutout: '55%',
+                        plugins: {
+                            legend: {
+                                position: 'bottom',
+                                labels: { boxWidth: 12, padding: 15 }
+                            }
+                        }
+                    }
+                });
+            }
+            
+            // 3. IKIO Stage Chart
+            const ikioStageCtx = document.getElementById('ikioStageChart');
+            if (ikioStageCtx) {
+                const stages = ['business', 'design', 'operations', 'engineer', 'handover'];
+                const ikioStageData = stages.map(s => companyData.ikio.stages[s] || 0);
+                
+                companyCharts.ikioStage = new Chart(ikioStageCtx, {
+                    type: 'radar',
+                    data: {
+                        labels: ['Business', 'Design', 'Operations', 'Engineer', 'Handover'],
+                        datasets: [{
+                            label: 'IKIO',
+                            data: ikioStageData.some(v => v > 0) ? ikioStageData : [1, 1, 1, 1, 1],
+                            backgroundColor: 'rgba(16, 185, 129, 0.2)',
+                            borderColor: 'rgba(16, 185, 129, 1)',
+                                borderWidth: 2,
+                            pointBackgroundColor: 'rgba(16, 185, 129, 1)',
+                            pointRadius: 4
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        scales: {
+                            r: {
+                                grid: { color: 'rgba(71, 85, 105, 0.3)' },
+                                angleLines: { color: 'rgba(71, 85, 105, 0.3)' },
+                                ticks: { display: false },
+                                beginAtZero: true
+                            }
+                        },
+                        plugins: { legend: { display: false } }
+                    }
+                });
+            }
+            
+            // 4. Metco Stage Chart
+            const metcoStageCtx = document.getElementById('metcoStageChart');
+            if (metcoStageCtx) {
+                const stages = ['business', 'design', 'operations', 'engineer', 'handover'];
+                const metcoStageData = stages.map(s => companyData.metco.stages[s] || 0);
+                
+                companyCharts.metcoStage = new Chart(metcoStageCtx, {
+                    type: 'radar',
+                    data: {
+                        labels: ['Business', 'Design', 'Operations', 'Engineer', 'Handover'],
+                        datasets: [{
+                            label: 'METCO',
+                            data: metcoStageData.some(v => v > 0) ? metcoStageData : [1, 1, 1, 1, 1],
+                            backgroundColor: 'rgba(139, 92, 246, 0.2)',
+                            borderColor: 'rgba(139, 92, 246, 1)',
+                            borderWidth: 2,
+                            pointBackgroundColor: 'rgba(139, 92, 246, 1)',
+                            pointRadius: 4
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        scales: {
+                            r: {
+                                grid: { color: 'rgba(71, 85, 105, 0.3)' },
+                                angleLines: { color: 'rgba(71, 85, 105, 0.3)' },
+                                ticks: { display: false },
+                                beginAtZero: true
+                            }
+                        },
+                        plugins: { legend: { display: false } }
+                    }
+                });
+            }
+            
+            // 5. Sunsprint Stage Chart
+            const sunsprintStageCtx = document.getElementById('sunsprintStageChart');
+            if (sunsprintStageCtx) {
+                const stages = ['business', 'design', 'operations', 'engineer', 'handover'];
+                const sunsprintStageData = stages.map(s => companyData.sunsprint.stages[s] || 0);
+                
+                companyCharts.sunsprintStage = new Chart(sunsprintStageCtx, {
+                    type: 'radar',
+                    data: {
+                        labels: ['Business', 'Design', 'Operations', 'Engineer', 'Handover'],
+                        datasets: [{
+                            label: 'SUNSPRINT',
+                            data: sunsprintStageData.some(v => v > 0) ? sunsprintStageData : [1, 1, 1, 1, 1],
+                            backgroundColor: 'rgba(245, 158, 11, 0.2)',
+                            borderColor: 'rgba(245, 158, 11, 1)',
+                            borderWidth: 2,
+                            pointBackgroundColor: 'rgba(245, 158, 11, 1)',
+                            pointRadius: 4
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        scales: {
+                            r: {
+                                grid: { color: 'rgba(71, 85, 105, 0.3)' },
+                                angleLines: { color: 'rgba(71, 85, 105, 0.3)' },
+                                ticks: { display: false },
+                                beginAtZero: true
+                            }
+                        },
+                        plugins: { legend: { display: false } }
+                    }
+                });
+            }
+        }
+        
+        // Filter company bids in table
+        function filterCompanyBids(company) {
+            const rows = document.querySelectorAll('.company-bid-row');
+            const buttons = document.querySelectorAll('.company-filter-btn');
+            
+            // Update button styles
+            buttons.forEach(btn => {
+                btn.classList.remove('active', 'bg-[var(--accent-cyan)]', 'text-white');
+                btn.classList.add('bg-[var(--bg-tertiary)]', 'text-[var(--text-secondary)]');
+            });
+            event.target.classList.add('active', 'bg-[var(--accent-cyan)]', 'text-white');
+            event.target.classList.remove('bg-[var(--bg-tertiary)]', 'text-[var(--text-secondary)]');
+            
+            // Filter rows
+            rows.forEach(row => {
+                if (company === 'all') {
+                    row.style.display = '';
+                } else {
+                    const rowCompany = row.getAttribute('data-company') || '';
+                    row.style.display = rowCompany.includes(company) ? '' : 'none';
+                }
+            });
+        }
+        
+        // Filter by company (click on company card)
+        function filterByCompany(company) {
+            filterCompanyBids(company);
+            showNotification(`Showing ${company.toUpperCase()} bids`, 'info');
+        }
+        
+        // Set company chart view
+        function setCompanyChartView(view) {
+            const btnBids = document.getElementById('btn-chart-bids');
+            const btnProjects = document.getElementById('btn-chart-projects');
+            const btnProgress = document.getElementById('btn-chart-progress');
+            
+            // Reset all buttons
+            [btnBids, btnProjects, btnProgress].forEach(btn => {
+                btn.classList.remove('bg-[var(--accent-cyan)]', 'text-white');
+                btn.classList.add('bg-[var(--bg-tertiary)]', 'text-[var(--text-secondary)]');
+            });
+            
+            // Highlight active button
+            const activeBtn = view === 'bids' ? btnBids : (view === 'projects' ? btnProjects : btnProgress);
+            activeBtn.classList.remove('bg-[var(--bg-tertiary)]', 'text-[var(--text-secondary)]');
+            activeBtn.classList.add('bg-[var(--accent-cyan)]', 'text-white');
+            
+            // Update chart data
+            if (companyCharts.comparison) {
+                if (view === 'bids') {
+                    companyCharts.comparison.data.datasets[0].data = [companyData.ikio.bids, companyData.metco.bids, companyData.sunsprint.bids];
+                    companyCharts.comparison.data.datasets[0].label = 'Active Bids';
+                } else if (view === 'projects') {
+                    companyCharts.comparison.data.datasets[0].data = [companyData.ikio.projects, companyData.metco.projects, companyData.sunsprint.projects];
+                    companyCharts.comparison.data.datasets[0].label = 'Projects';
+                } else {
+                    companyCharts.comparison.data.datasets[0].data = [companyData.ikio.avgProgress, companyData.metco.avgProgress, companyData.sunsprint.avgProgress];
+                    companyCharts.comparison.data.datasets[0].label = 'Avg Progress %';
+                }
+                companyCharts.comparison.update();
+            }
+        }
+    </script>
+</body>
+</html>
+

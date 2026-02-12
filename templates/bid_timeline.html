@@ -1,0 +1,451 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bid Timeline - ESCO</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        .timeline-checkpoint { transition: transform 0.2s ease; }
+        .timeline-checkpoint:hover { transform: scale(1.05); }
+    </style>
+    <link rel="stylesheet" href="{{ url_for('static', filename='light_theme_overrides.css') }}">
+</head>
+<body class="{% if dark_mode %}bg-slate-950 text-slate-100{% else %}bg-gray-50 text-gray-800{% endif %}">
+    <div class="{% if embed_mode %}block{% else %}flex h-screen{% endif %}">
+        {% if not embed_mode %}
+        {% set _role_key = (user_role or '') | lower | replace('_', '') | replace(' ', '') | replace('-', '') %}
+        {% if _role_key in ['teamlead', 'teamleader'] %}
+            {% set team = active_department_key or 'business' %}
+            {% set sidebar_mode = 'team_lead' %}
+            {% set hide_notifications = true %}
+            {% include 'sidebar.html' %}
+        {% else %}
+            {% include 'sidebar.html' %}
+        {% endif %}
+        {% endif %}
+
+        <main class="{% if embed_mode %}w-full p-4{% else %}flex-1 p-8 overflow-y-auto{% endif %}">
+            {% if not embed_mode %}
+            <div class="flex items-center justify-between mb-6">
+                <div>
+                    <h2 class="text-2xl font-bold {% if dark_mode %}text-white{% else %}text-gray-900{% endif %}">Bid Timeline</h2>
+                    <p class="text-sm {% if dark_mode %}text-slate-400{% else %}text-gray-600{% endif %}">Track GO bids progress across stages</p>
+                </div>
+                <div class="text-xs {% if dark_mode %}text-slate-400{% else %}text-gray-500{% endif %}">
+                    <span class="px-2 py-1 rounded {% if dark_mode %}bg-slate-900 border border-slate-800{% else %}bg-gray-100{% endif %}">Role: {{ user_role|replace('_',' ')|title }}</span>
+                </div>
+            </div>
+            {% endif %}
+
+            <div class="{% if dark_mode %}bg-slate-900 border-slate-800{% else %}bg-white border-gray-100{% endif %} rounded-lg shadow-md border p-6">
+                <div class="flex items-center justify-between mb-6">
+                    <h3 class="text-lg font-semibold {% if dark_mode %}text-white{% else %}text-gray-900{% endif %}">
+                        <i class="fas fa-chart-line {% if dark_mode %}text-cyan-300{% else %}text-blue-600{% endif %} mr-2"></i>BID Timeline
+                    </h3>
+                    <div class="text-xs {% if dark_mode %}text-slate-400{% else %}text-gray-500{% endif %}">Top 5 High Priority BIDs</div>
+                </div>
+
+                <div class="space-y-6" id="go-projects-top">
+                {% for item in go_projects_top5 %}
+                    <div class="p-6 rounded-lg border {% if dark_mode %}border-slate-800 bg-slate-950/30{% else %}border-gray-200 bg-white{% endif %}" data-bid-card="{{ item.g_id }}" data-stage-map='{{ (item.stage_progress_map|default({}))|tojson|safe }}'>
+                        <div class="flex flex-wrap justify-between items-center gap-3 mb-8">
+                            <h4 class="text-lg font-semibold {% if dark_mode %}text-white{% else %}text-gray-900{% endif %}">{{ item.b_name }}</h4>
+                            <div class="flex items-center gap-3">
+                                <span class="px-3 py-1 text-sm font-semibold rounded-full {% if dark_mode %}bg-slate-800 text-slate-100 border border-slate-700{% else %}bg-blue-50 text-blue-700{% endif %}">{{ item.company }}</span>
+                                <button type="button" class="timeline-summary-toggle flex items-center text-sm font-semibold {% if dark_mode %}text-cyan-300 hover:text-cyan-200{% else %}text-blue-700 hover:text-blue-800{% endif %}">
+                                    <span>Details</span>
+                                    <i class="fas fa-chevron-down ml-2"></i>
+                                </button>
+                                <button type="button" class="timeline-actions-toggle flex items-center text-sm font-semibold {% if dark_mode %}text-emerald-300 hover:text-emerald-200{% else %}text-emerald-700 hover:text-emerald-800{% endif %}">
+                                    <span>Manage</span>
+                                    <i class="fas fa-sliders-h ml-2"></i>
+                                </button>
+                            </div>
+                        </div>
+
+                        <div class="relative w-full">
+                            <div class="absolute top-4 left-0 w-full h-1 {% if dark_mode %}bg-slate-800{% else %}bg-gray-200{% endif %} rounded-full"></div>
+                            <div class="timeline-segments">
+                                {% set seg_count = (item.stages|length - 1) if (item.stages|length - 1) > 0 else 0 %}
+                                {% if seg_count > 0 %}
+                                    {% for i in range(seg_count) %}
+                                        {% set seg_stage = item.stages[i] %}
+                                        {% set map = item.stage_progress_map or {} %}
+                                        {% set sp = map.get(seg_stage, 0) %}
+                                        {% set leftpct = (100 * i / seg_count) %}
+                                        {% set widthpct = (sp / seg_count) %}
+                                        <div class="segment-progress absolute top-4 h-1 bg-gradient-to-r {% if dark_mode %}from-emerald-400 to-cyan-400{% else %}from-blue-600 to-cyan-500{% endif %} rounded-full" data-stage="{{ seg_stage }}" style="left: {{ '%.2f'|format(leftpct) }}%; width: {{ '%.2f'|format(widthpct) }}%; z-index: 1; margin-left: 12px;"></div>
+                                    {% endfor %}
+                                {% endif %}
+                            </div>
+
+                            <div class="relative flex justify-between">
+                                {% for st in item.stages %}
+                                <div class="timeline-checkpoint text-center cursor-pointer" data-stage="{{ st }}">
+                                    {% set index = loop.index0 %}
+                                    {% set pct = (100 * index // (item.stages|length - 1)) if (item.stages|length - 1) > 0 else 0 %}
+                                    <div class="relative w-8 h-8 rounded-full mx-auto border-2 {% if dark_mode %}border-slate-900{% else %}border-white{% endif %} shadow-sm {% if item.stage_progress >= pct %}{% if dark_mode %}bg-emerald-500/20{% else %}bg-blue-100{% endif %}{% else %}{% if dark_mode %}bg-slate-900{% else %}bg-gray-100{% endif %}{% endif %}">
+                                        <div class="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-3 h-3 {% if item.stage_progress >= pct %}{% if dark_mode %}bg-emerald-400{% else %}bg-blue-600{% endif %}{% else %}{% if dark_mode %}bg-slate-600{% else %}bg-gray-400{% endif %}{% endif %} rounded-full"></div>
+                                    </div>
+                                    <p class="mt-2 text-xs font-semibold {% if dark_mode %}text-slate-400{% else %}text-gray-600{% endif %}">{{ get_stage_display_name(st) }}</p>
+                                    <div class="mt-1 w-16 mx-auto">
+                                        {% set map = item.stage_progress_map or {} %}
+                                        {% set sp = map.get(st, 0) %}
+                                        <p class="text-[10px] {% if dark_mode %}text-emerald-300{% else %}text-blue-700{% endif %} text-center">{{ sp }}%</p>
+                                    </div>
+                                </div>
+                                {% endfor %}
+                            </div>
+                        </div>
+
+                        <div class="timeline-summary hidden mt-8 p-4 rounded-lg border {% if dark_mode %}bg-slate-900 border-slate-800{% else %}bg-gray-50 border-gray-200{% endif %}">
+                            <h5 class="text-sm font-semibold {% if dark_mode %}text-emerald-300{% else %}text-blue-700{% endif %} mb-4">{{ item.b_name }} - Summary</h5>
+                            <div class="grid grid-cols-1 md:grid-cols-2 gap-6 text-sm">
+                                <div class="space-y-2">
+                                    <div class="flex justify-between gap-4">
+                                        <span class="{% if dark_mode %}text-slate-400{% else %}text-gray-500{% endif %}">Company:</span>
+                                        <span class="{% if dark_mode %}text-white{% else %}text-gray-900{% endif %} font-medium">{{ item.company }}</span>
+                                    </div>
+                                    <div class="flex justify-between gap-4">
+                                        <span class="{% if dark_mode %}text-slate-400{% else %}text-gray-500{% endif %}">Due Date:</span>
+                                        <span class="{% if dark_mode %}text-white{% else %}text-gray-900{% endif %} font-medium">{{ item.due_date }}</span>
+                                    </div>
+                                    <div class="flex justify-between gap-4">
+                                        <span class="{% if dark_mode %}text-slate-400{% else %}text-gray-500{% endif %}">Status:</span>
+                                        <span class="{% if dark_mode %}text-white{% else %}text-gray-900{% endif %} font-medium">{{ item.project_status }}</span>
+                                    </div>
+                                </div>
+                                <div>
+                                    <p class="{% if dark_mode %}text-slate-400{% else %}text-gray-500{% endif %} mb-2">Work Progress</p>
+                                    <div class="w-full {% if dark_mode %}bg-slate-800{% else %}bg-gray-200{% endif %} rounded-full h-2">
+                                        <div class="h-full bg-gradient-to-r {% if dark_mode %}from-emerald-400 to-cyan-400{% else %}from-blue-600 to-cyan-500{% endif %} rounded-full" style="width: {{ item.work_progress_pct }}%"></div>
+                                    </div>
+                                    <p class="text-xs {% if dark_mode %}text-emerald-300{% else %}text-blue-700{% endif %} mt-1 text-right">{{ item.work_progress_pct }}%</p>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="timeline-actions hidden mt-6 p-4 rounded-lg border {% if dark_mode %}bg-slate-900 border-slate-800{% else %}bg-gray-50 border-gray-200{% endif %}">
+                            <h5 class="text-sm font-semibold {% if dark_mode %}text-emerald-300{% else %}text-emerald-700{% endif %} mb-4">Timeline Actions</h5>
+                            <div class="grid grid-cols-1 md:grid-cols-3 gap-4 text-sm">
+                                {% if current_user and current_user.can_alter_timeline %}
+                                <div>
+                                    <label class="block text-xs mb-2 {% if dark_mode %}text-slate-400{% else %}text-gray-500{% endif %}">Set current stage</label>
+                                    <select class="timeline-set-stage w-full rounded-md border px-3 py-2 {% if dark_mode %}bg-slate-950 border-slate-700 text-slate-100{% else %}bg-white border-gray-300{% endif %}">
+                                        {% for st in item.stages %}
+                                        <option value="{{ st }}" {% if st == item.current_stage %}selected{% endif %}>{{ get_stage_display_name(st) }}</option>
+                                        {% endfor %}
+                                    </select>
+                                    <button type="button" class="timeline-set-stage-btn mt-3 w-full px-3 py-2 rounded-md font-semibold {% if dark_mode %}text-white bg-emerald-600 hover:bg-emerald-500{% else %}text-emerald-700 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200{% endif %}">
+                                        Update Stage
+                                    </button>
+                                </div>
+                                {% endif %}
+                                <div>
+                                    <label class="block text-xs mb-2 {% if dark_mode %}text-slate-400{% else %}text-gray-500{% endif %}">Add custom stage</label>
+                                    <input type="text" class="timeline-add-stage w-full rounded-md border px-3 py-2 {% if dark_mode %}bg-slate-950 border-slate-700 text-slate-100{% else %}bg-white border-gray-300{% endif %}" placeholder="e.g. Procurement">
+                                    <button type="button" class="timeline-add-stage-btn mt-3 w-full px-3 py-2 rounded-md font-semibold {% if dark_mode %}text-white bg-blue-600 hover:bg-blue-500{% else %}text-blue-700 bg-blue-50 hover:bg-blue-100 border border-blue-200{% endif %}">
+                                        Add Stage
+                                    </button>
+                                </div>
+                                <div>
+                                    <label class="block text-xs mb-2 {% if dark_mode %}text-slate-400{% else %}text-gray-500{% endif %}">Remove stage</label>
+                                    <select class="timeline-remove-stage w-full rounded-md border px-3 py-2 {% if dark_mode %}bg-slate-950 border-slate-700 text-slate-100{% else %}bg-white border-gray-300{% endif %}">
+                                        {% for st in item.stages %}
+                                        <option value="{{ st }}">{{ get_stage_display_name(st) }}</option>
+                                        {% endfor %}
+                                    </select>
+                                    <button type="button" class="timeline-remove-stage-btn mt-3 w-full px-3 py-2 rounded-md font-semibold {% if dark_mode %}text-white bg-rose-600 hover:bg-rose-500{% else %}text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200{% endif %}">
+                                        Remove Stage
+                                    </button>
+                                </div>
+                            </div>
+                            <p class="text-xs mt-4 {% if dark_mode %}text-slate-500{% else %}text-gray-500{% endif %}">Changes apply to this bid only and refresh the timeline after saving.</p>
+                        </div>
+                    </div>
+                {% else %}
+                    <div class="text-center py-10 {% if dark_mode %}text-slate-400{% else %}text-gray-500{% endif %}">
+                        <i class="fas fa-inbox text-4xl mb-3 opacity-50"></i>
+                        <p>No active BIDs at the moment</p>
+                    </div>
+                {% endfor %}
+                </div>
+
+                {% if go_projects_more and go_projects_more|length > 0 %}
+                <div class="text-center mt-6">
+                    <button id="toggle-more-bids-btn" type="button" onclick="toggleMoreBids()" data-count="{{ go_projects_more|length }}"
+                            class="px-6 py-3 bg-blue-50 text-blue-700 border border-blue-200 rounded-lg font-semibold hover:bg-blue-100 transition-all">
+                        <i class="fas fa-chevron-down mr-2" id="toggle-more-icon"></i>
+                        <span id="toggle-more-text">Show More BIDs</span>
+                        <span class="ml-1 px-2 py-0.5 bg-blue-100 text-blue-700 rounded-full text-sm" id="toggle-more-count">({{ go_projects_more|length }})</span>
+                    </button>
+                </div>
+
+                <div id="go-projects-more" class="space-y-6 mt-6 hidden">
+                    {% for item in go_projects_more %}
+                    <div class="p-6 rounded-lg border {% if dark_mode %}border-slate-800 bg-slate-950/30{% else %}border-gray-200 bg-white{% endif %}" data-bid-card="{{ item.g_id }}" data-stage-map='{{ (item.stage_progress_map|default({}))|tojson|safe }}'>
+                        <div class="flex flex-wrap justify-between items-center gap-3 mb-8">
+                            <h4 class="text-lg font-semibold {% if dark_mode %}text-white{% else %}text-gray-900{% endif %}">{{ item.b_name }}</h4>
+                            <div class="flex items-center gap-3">
+                                <span class="px-3 py-1 text-sm font-semibold rounded-full {% if dark_mode %}bg-slate-800 text-slate-100 border border-slate-700{% else %}bg-blue-50 text-blue-700{% endif %}">{{ item.company }}</span>
+                                <button type="button" class="timeline-summary-toggle flex items-center text-sm font-semibold {% if dark_mode %}text-cyan-300 hover:text-cyan-200{% else %}text-blue-700 hover:text-blue-800{% endif %}">
+                                    <span>Details</span>
+                                    <i class="fas fa-chevron-down ml-2"></i>
+                                </button>
+                                <button type="button" class="timeline-actions-toggle flex items-center text-sm font-semibold {% if dark_mode %}text-emerald-300 hover:text-emerald-200{% else %}text-emerald-700 hover:text-emerald-800{% endif %}">
+                                    <span>Manage</span>
+                                    <i class="fas fa-sliders-h ml-2"></i>
+                                </button>
+                            </div>
+                        </div>
+
+                        <div class="relative w-full">
+                            <div class="absolute top-4 left-0 w-full h-1 {% if dark_mode %}bg-slate-800{% else %}bg-gray-200{% endif %} rounded-full"></div>
+                            <div class="timeline-segments">
+                                {% set seg_count = (item.stages|length - 1) if (item.stages|length - 1) > 0 else 0 %}
+                                {% if seg_count > 0 %}
+                                    {% for i in range(seg_count) %}
+                                        {% set seg_stage = item.stages[i] %}
+                                        {% set map = item.stage_progress_map or {} %}
+                                        {% set sp = map.get(seg_stage, 0) %}
+                                        {% set leftpct = (100 * i / seg_count) %}
+                                        {% set widthpct = (sp / seg_count) %}
+                                        <div class="segment-progress absolute top-4 h-1 bg-gradient-to-r {% if dark_mode %}from-emerald-400 to-cyan-400{% else %}from-blue-600 to-cyan-500{% endif %} rounded-full" data-stage="{{ seg_stage }}" style="left: {{ '%.2f'|format(leftpct) }}%; width: {{ '%.2f'|format(widthpct) }}%; z-index: 1; margin-left: 12px;"></div>
+                                    {% endfor %}
+                                {% endif %}
+                            </div>
+
+                            <div class="relative flex justify-between">
+                                {% for st in item.stages %}
+                                <div class="timeline-checkpoint text-center cursor-pointer" data-stage="{{ st }}">
+                                    {% set index = loop.index0 %}
+                                    {% set pct = (100 * index // (item.stages|length - 1)) if (item.stages|length - 1) > 0 else 0 %}
+                                    <div class="relative w-8 h-8 rounded-full mx-auto border-2 {% if dark_mode %}border-slate-900{% else %}border-white{% endif %} shadow-sm {% if item.stage_progress >= pct %}{% if dark_mode %}bg-emerald-500/20{% else %}bg-blue-100{% endif %}{% else %}{% if dark_mode %}bg-slate-900{% else %}bg-gray-100{% endif %}{% endif %}">
+                                        <div class="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-3 h-3 {% if item.stage_progress >= pct %}{% if dark_mode %}bg-emerald-400{% else %}bg-blue-600{% endif %}{% else %}{% if dark_mode %}bg-slate-600{% else %}bg-gray-400{% endif %}{% endif %} rounded-full"></div>
+                                    </div>
+                                    <p class="mt-2 text-xs font-semibold {% if dark_mode %}text-slate-400{% else %}text-gray-600{% endif %}">{{ get_stage_display_name(st) }}</p>
+                                    <div class="mt-1 w-16 mx-auto">
+                                        {% set map = item.stage_progress_map or {} %}
+                                        {% set sp = map.get(st, 0) %}
+                                        <p class="text-[10px] {% if dark_mode %}text-emerald-300{% else %}text-blue-700{% endif %} text-center">{{ sp }}%</p>
+                                    </div>
+                                </div>
+                                {% endfor %}
+                            </div>
+                        </div>
+
+                        <div class="timeline-summary hidden mt-8 p-4 rounded-lg border {% if dark_mode %}bg-slate-900 border-slate-800{% else %}bg-gray-50 border-gray-200{% endif %}">
+                            <h5 class="text-sm font-semibold {% if dark_mode %}text-emerald-300{% else %}text-blue-700{% endif %} mb-4">{{ item.b_name }} - Summary</h5>
+                            <div class="grid grid-cols-1 md:grid-cols-2 gap-6 text-sm">
+                                <div class="space-y-2">
+                                    <div class="flex justify-between gap-4">
+                                        <span class="{% if dark_mode %}text-slate-400{% else %}text-gray-500{% endif %}">Company:</span>
+                                        <span class="{% if dark_mode %}text-white{% else %}text-gray-900{% endif %} font-medium">{{ item.company }}</span>
+                                    </div>
+                                    <div class="flex justify-between gap-4">
+                                        <span class="{% if dark_mode %}text-slate-400{% else %}text-gray-500{% endif %}">Due Date:</span>
+                                        <span class="{% if dark_mode %}text-white{% else %}text-gray-900{% endif %} font-medium">{{ item.due_date }}</span>
+                                    </div>
+                                    <div class="flex justify-between gap-4">
+                                        <span class="{% if dark_mode %}text-slate-400{% else %}text-gray-500{% endif %}">Status:</span>
+                                        <span class="{% if dark_mode %}text-white{% else %}text-gray-900{% endif %} font-medium">{{ item.project_status }}</span>
+                                    </div>
+                                </div>
+                                <div>
+                                    <p class="{% if dark_mode %}text-slate-400{% else %}text-gray-500{% endif %} mb-2">Work Progress</p>
+                                    <div class="w-full {% if dark_mode %}bg-slate-800{% else %}bg-gray-200{% endif %} rounded-full h-2">
+                                        <div class="h-full bg-gradient-to-r {% if dark_mode %}from-emerald-400 to-cyan-400{% else %}from-blue-600 to-cyan-500{% endif %} rounded-full" style="width: {{ item.work_progress_pct }}%"></div>
+                                    </div>
+                                    <p class="text-xs {% if dark_mode %}text-emerald-300{% else %}text-blue-700{% endif %} mt-1 text-right">{{ item.work_progress_pct }}%</p>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="timeline-actions hidden mt-6 p-4 rounded-lg border {% if dark_mode %}bg-slate-900 border-slate-800{% else %}bg-gray-50 border-gray-200{% endif %}">
+                            <h5 class="text-sm font-semibold {% if dark_mode %}text-emerald-300{% else %}text-emerald-700{% endif %} mb-4">Timeline Actions</h5>
+                            <div class="grid grid-cols-1 md:grid-cols-3 gap-4 text-sm">
+                                {% if current_user and current_user.can_alter_timeline %}
+                                <div>
+                                    <label class="block text-xs mb-2 {% if dark_mode %}text-slate-400{% else %}text-gray-500{% endif %}">Set current stage</label>
+                                    <select class="timeline-set-stage w-full rounded-md border px-3 py-2 {% if dark_mode %}bg-slate-950 border-slate-700 text-slate-100{% else %}bg-white border-gray-300{% endif %}">
+                                        {% for st in item.stages %}
+                                        <option value="{{ st }}" {% if st == item.current_stage %}selected{% endif %}>{{ get_stage_display_name(st) }}</option>
+                                        {% endfor %}
+                                    </select>
+                                    <button type="button" class="timeline-set-stage-btn mt-3 w-full px-3 py-2 rounded-md text-white font-semibold {% if dark_mode %}bg-emerald-600 hover:bg-emerald-500{% else %}bg-emerald-600 hover:bg-emerald-700{% endif %}">
+                                        Update Stage
+                                    </button>
+                                </div>
+                                {% endif %}
+                                <div>
+                                    <label class="block text-xs mb-2 {% if dark_mode %}text-slate-400{% else %}text-gray-500{% endif %}">Add custom stage</label>
+                                    <input type="text" class="timeline-add-stage w-full rounded-md border px-3 py-2 {% if dark_mode %}bg-slate-950 border-slate-700 text-slate-100{% else %}bg-white border-gray-300{% endif %}" placeholder="e.g. Procurement">
+                                    <button type="button" class="timeline-add-stage-btn mt-3 w-full px-3 py-2 rounded-md text-white font-semibold {% if dark_mode %}bg-blue-600 hover:bg-blue-500{% else %}bg-blue-600 hover:bg-blue-700{% endif %}">
+                                        Add Stage
+                                    </button>
+                                </div>
+                                <div>
+                                    <label class="block text-xs mb-2 {% if dark_mode %}text-slate-400{% else %}text-gray-500{% endif %}">Remove stage</label>
+                                    <select class="timeline-remove-stage w-full rounded-md border px-3 py-2 {% if dark_mode %}bg-slate-950 border-slate-700 text-slate-100{% else %}bg-white border-gray-300{% endif %}">
+                                        {% for st in item.stages %}
+                                        <option value="{{ st }}">{{ get_stage_display_name(st) }}</option>
+                                        {% endfor %}
+                                    </select>
+                                    <button type="button" class="timeline-remove-stage-btn mt-3 w-full px-3 py-2 rounded-md text-white font-semibold {% if dark_mode %}bg-rose-600 hover:bg-rose-500{% else %}bg-rose-600 hover:bg-rose-700{% endif %}">
+                                        Remove Stage
+                                    </button>
+                                </div>
+                            </div>
+                            <p class="text-xs mt-4 {% if dark_mode %}text-slate-500{% else %}text-gray-500{% endif %}">Changes apply to this bid only and refresh the timeline after saving.</p>
+                        </div>
+                    </div>
+                    {% endfor %}
+                </div>
+                {% endif %}
+            </div>
+        </main>
+    </div>
+
+    <script>
+        function postForm(url, payload) {
+            return fetch(url, {
+                method: 'POST',
+                body: payload,
+                headers: {
+                    'X-Requested-With': 'XMLHttpRequest'
+                }
+            });
+        }
+
+        // Toggle summary panels on cards
+        document.querySelectorAll('.timeline-summary-toggle').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const card = btn.closest('[data-bid-card]');
+                if (!card) return;
+                const summary = card.querySelector('.timeline-summary');
+                if (!summary) return;
+
+                summary.classList.toggle('hidden');
+                const icon = btn.querySelector('i');
+                if (icon) icon.classList.toggle('fa-chevron-up');
+            });
+        });
+
+        // Toggle CRUD panel on cards
+        document.querySelectorAll('.timeline-actions-toggle').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const card = btn.closest('[data-bid-card]');
+                if (!card) return;
+                const panel = card.querySelector('.timeline-actions');
+                if (!panel) return;
+                panel.classList.toggle('hidden');
+            });
+        });
+
+        // Add custom stage
+        document.querySelectorAll('.timeline-add-stage-btn').forEach(btn => {
+            btn.addEventListener('click', async () => {
+                const card = btn.closest('[data-bid-card]');
+                if (!card) return;
+                const input = card.querySelector('.timeline-add-stage');
+                const gId = card.getAttribute('data-bid-card');
+                const stage = (input?.value || '').trim();
+                if (!stage) {
+                    alert('Enter a stage name.');
+                    return;
+                }
+                const payload = new FormData();
+                payload.append('g_id', gId);
+                payload.append('new_stage', stage.toLowerCase());
+                try {
+                    const resp = await postForm('/team/stage/add', payload);
+                    const data = await resp.json();
+                    if (!resp.ok || !data.ok) {
+                        throw new Error(data.error || 'Failed to add stage.');
+                    }
+                    window.location.reload();
+                } catch (err) {
+                    alert(err.message || 'Failed to add stage.');
+                }
+            });
+        });
+
+        // Remove stage
+        document.querySelectorAll('.timeline-remove-stage-btn').forEach(btn => {
+            btn.addEventListener('click', async () => {
+                const card = btn.closest('[data-bid-card]');
+                if (!card) return;
+                const select = card.querySelector('.timeline-remove-stage');
+                const gId = card.getAttribute('data-bid-card');
+                const stage = (select?.value || '').trim();
+                if (!stage) {
+                    alert('Select a stage to remove.');
+                    return;
+                }
+                if (!confirm(`Remove stage "${stage}" from this bid?`)) {
+                    return;
+                }
+                const payload = new FormData();
+                payload.append('g_id', gId);
+                payload.append('stage', stage.toLowerCase());
+                try {
+                    const resp = await postForm('/team/stage/delete', payload);
+                    const data = await resp.json();
+                    if (!resp.ok || !data.ok) {
+                        throw new Error(data.error || 'Failed to remove stage.');
+                    }
+                    window.location.reload();
+                } catch (err) {
+                    alert(err.message || 'Failed to remove stage.');
+                }
+            });
+        });
+
+        // Set current stage (requires manage_timeline)
+        document.querySelectorAll('.timeline-set-stage-btn').forEach(btn => {
+            btn.addEventListener('click', async () => {
+                const card = btn.closest('[data-bid-card]');
+                if (!card) return;
+                const select = card.querySelector('.timeline-set-stage');
+                const gId = card.getAttribute('data-bid-card');
+                const stage = (select?.value || '').trim();
+                if (!stage) {
+                    alert('Select a stage to set.');
+                    return;
+                }
+                const payload = new FormData();
+                payload.append('g_id', gId);
+                payload.append('new_stage', stage.toLowerCase());
+                try {
+                    const resp = await postForm('/supervisor/set-stage', payload);
+                    if (!resp.ok) {
+                        throw new Error('Failed to update stage.');
+                    }
+                    window.location.reload();
+                } catch (err) {
+                    alert(err.message || 'Failed to update stage.');
+                }
+            });
+        });
+
+        function toggleMoreBids() {
+            const more = document.getElementById('go-projects-more');
+            const icon = document.getElementById('toggle-more-icon');
+            const text = document.getElementById('toggle-more-text');
+            if (!more) return;
+
+            const isHidden = more.classList.contains('hidden');
+            more.classList.toggle('hidden');
+
+            if (icon) {
+                icon.classList.toggle('fa-chevron-down', !isHidden);
+                icon.classList.toggle('fa-chevron-up', isHidden);
+            }
+            if (text) text.textContent = isHidden ? 'Show Less BIDs' : 'Show More BIDs';
+        }
+    </script>
+</body>
+</html>
+

@@ -1,0 +1,248 @@
+{% extends "top_admin_base.html" %}
+{% block title %}Role Access{% endblock %}
+{% block page_title %}Role Access Control{% endblock %}
+{% block page_subtitle %}Toggle access to pages and buttons for Manager, Team Lead, and Employee.{% endblock %}
+
+{% block content %}
+  <div class="bg-white border border-gray-200 rounded-xl p-5">
+    <div class="flex flex-col gap-1 md:flex-row md:items-center md:justify-between">
+      <div>
+        <div class="font-semibold text-gray-900">Page Access (Modules)</div>
+        <div class="text-xs text-gray-500 mt-1">Controls visibility of sidebar pages by role.</div>
+      </div>
+      <div class="text-[11px] text-gray-400">Hidden modules are not part of that role’s sidebar.</div>
+    </div>
+
+    <div class="mt-4 overflow-x-auto border border-gray-200 rounded-xl">
+      <table class="min-w-full text-sm">
+        <thead class="bg-gray-50 text-xs uppercase text-gray-500">
+          <tr>
+            <th class="text-left p-3">Module</th>
+            {% for role in access_roles %}
+            <th class="text-center p-3">{{ role.label }}</th>
+            {% endfor %}
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-gray-100">
+          {% for mod in access_modules %}
+          <tr class="hover:bg-gray-50">
+            <td class="p-3 font-semibold text-gray-900">{{ mod.name }}</td>
+            {% for role in access_roles %}
+            {% set perms = (access_module_matrix.get(role.key, {}).get(mod.key, {})) %}
+            <td class="p-3 text-center">
+              {% set _allowed = (role_allowed_modules.get(role.key, []) or []) %}
+              {% if role_allowed_modules and (mod.key not in _allowed) %}
+                <div class="flex flex-col items-center gap-2 text-[11px] text-gray-400">
+                  <div class="w-9 h-5 bg-gray-100 rounded-full"></div>
+                  <span>Hidden</span>
+                </div>
+              {% else %}
+              <div class="grid grid-cols-2 gap-2 justify-center text-[11px] text-gray-500">
+                <label class="inline-flex items-center gap-2 cursor-pointer justify-center">
+                  <input type="checkbox"
+                         class="sr-only peer"
+                         data-perm-type="module"
+                         data-role="{{ role.key }}"
+                         data-key="{{ mod.key }}"
+                         data-perm="view"
+                         {% if perms.get('can_view') %}checked{% endif %}>
+                  <div class="w-9 h-5 bg-gray-200 peer-focus:outline-none rounded-full peer peer-checked:bg-emerald-500 relative">
+                    <div class="w-3.5 h-3.5 bg-white rounded-full absolute top-0.5 left-0.5 peer-checked:translate-x-4 transition-transform"></div>
+                  </div>
+                  <span>View</span>
+                </label>
+                <label class="inline-flex items-center gap-2 cursor-pointer justify-center">
+                  <input type="checkbox"
+                         class="sr-only peer"
+                         data-perm-type="module"
+                         data-role="{{ role.key }}"
+                         data-key="{{ mod.key }}"
+                         data-perm="create"
+                         {% if perms.get('can_create') %}checked{% endif %}>
+                  <div class="w-9 h-5 bg-gray-200 peer-focus:outline-none rounded-full peer peer-checked:bg-emerald-500 relative">
+                    <div class="w-3.5 h-3.5 bg-white rounded-full absolute top-0.5 left-0.5 peer-checked:translate-x-4 transition-transform"></div>
+                  </div>
+                  <span>Create</span>
+                </label>
+                <label class="inline-flex items-center gap-2 cursor-pointer justify-center">
+                  <input type="checkbox"
+                         class="sr-only peer"
+                         data-perm-type="module"
+                         data-role="{{ role.key }}"
+                         data-key="{{ mod.key }}"
+                         data-perm="edit"
+                         {% if perms.get('can_edit') %}checked{% endif %}>
+                  <div class="w-9 h-5 bg-gray-200 peer-focus:outline-none rounded-full peer peer-checked:bg-emerald-500 relative">
+                    <div class="w-3.5 h-3.5 bg-white rounded-full absolute top-0.5 left-0.5 peer-checked:translate-x-4 transition-transform"></div>
+                  </div>
+                  <span>Update</span>
+                </label>
+                <label class="inline-flex items-center gap-2 cursor-pointer justify-center">
+                  <input type="checkbox"
+                         class="sr-only peer"
+                         data-perm-type="module"
+                         data-role="{{ role.key }}"
+                         data-key="{{ mod.key }}"
+                         data-perm="delete"
+                         {% if perms.get('can_delete') %}checked{% endif %}>
+                  <div class="w-9 h-5 bg-gray-200 peer-focus:outline-none rounded-full peer peer-checked:bg-emerald-500 relative">
+                    <div class="w-3.5 h-3.5 bg-white rounded-full absolute top-0.5 left-0.5 peer-checked:translate-x-4 transition-transform"></div>
+                  </div>
+                  <span>Delete</span>
+                </label>
+              </div>
+              {% endif %}
+            </td>
+            {% endfor %}
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="bg-white border border-gray-200 rounded-xl p-5 mt-6">
+    <div class="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+      <div>
+        <div class="font-semibold text-gray-900">Employees & Page Access</div>
+        <div class="text-xs text-gray-500 mt-1">Access shown based on current role permissions.</div>
+      </div>
+      <div class="flex flex-wrap items-center gap-2">
+        <input id="userFilter"
+               type="text"
+               placeholder="Search employees..."
+               class="w-60 rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-emerald-200">
+        <div class="text-xs text-gray-500">Showing <span id="userCount" class="font-semibold text-gray-700">0</span></div>
+      </div>
+    </div>
+
+    <div class="mt-4 overflow-x-auto border border-gray-200 rounded-xl">
+      <table class="min-w-full text-sm" id="employeeAccessTable">
+        <thead class="bg-gray-50 text-xs uppercase text-gray-500">
+          <tr>
+            <th class="text-left p-3">Employee</th>
+            <th class="text-left p-3">Role</th>
+            <th class="text-left p-3">Departments</th>
+            <th class="text-left p-3">Pages</th>
+            <th class="text-center p-3">Status</th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-gray-100">
+          {% for user in access_users %}
+          <tr class="hover:bg-gray-50 employee-row"
+              data-user-search="{{ (user.email ~ ' ' ~ (user.full_name or '') ~ ' ' ~ (user.role or '') ~ ' ' ~ (user.departments or '') ~ ' ' ~ (user.pages | join(' '))) | lower }}">
+            <td class="p-3">
+              <div class="font-semibold text-gray-900">{{ user.full_name or user.email }}</div>
+              <div class="text-xs text-gray-500">{{ user.email }}</div>
+            </td>
+            <td class="p-3 text-sm text-gray-700">{{ user.role or 'member' }}</td>
+            <td class="p-3 text-sm text-gray-500">{{ user.departments or '-' }}</td>
+            <td class="p-3">
+              <div class="flex flex-wrap gap-2">
+                {% if user.pages and user.pages|length > 0 %}
+                  {% for page in user.pages %}
+                  <span class="text-[11px] px-2 py-1 rounded-full bg-emerald-50 text-emerald-700">{{ page }}</span>
+                  {% endfor %}
+                {% else %}
+                  <span class="text-[11px] px-2 py-1 rounded-full bg-gray-100 text-gray-500">No access</span>
+                {% endif %}
+              </div>
+            </td>
+            <td class="p-3 text-center">
+              <span class="text-[10px] px-2 py-1 rounded-full {{ 'bg-emerald-100 text-emerald-700' if user.is_active else 'bg-gray-100 text-gray-500' }}">
+                {{ 'Active' if user.is_active else 'Inactive' }}
+              </span>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div id="roleAccessToast" class="fixed bottom-6 right-6 hidden px-4 py-2 rounded-lg text-sm font-semibold shadow-lg"></div>
+
+  <script>
+    (function () {
+      const toast = document.getElementById('roleAccessToast');
+      let toastTimer = null;
+
+      function showToast(msg, isError) {
+        if (!toast) return alert(msg);
+        toast.textContent = msg;
+        toast.className = 'fixed bottom-6 right-6 px-4 py-2 rounded-lg text-sm font-semibold shadow-lg ' +
+          (isError ? 'bg-rose-600 text-white' : 'bg-emerald-600 text-white');
+        toast.classList.remove('hidden');
+        if (toastTimer) window.clearTimeout(toastTimer);
+        toastTimer = window.setTimeout(() => {
+          toast.classList.add('hidden');
+        }, 2400);
+      }
+
+      const userFilter = document.getElementById('userFilter');
+      const userRows = Array.from(document.querySelectorAll('.employee-row'));
+      const userCount = document.getElementById('userCount');
+
+      function updateUserCount() {
+        if (!userCount) return;
+        const visible = document.querySelectorAll('.employee-row:not(.hidden)').length;
+        userCount.textContent = String(visible);
+      }
+
+      function applyUserFilter() {
+        if (!userFilter) return;
+        const query = userFilter.value.trim().toLowerCase();
+        userRows.forEach((row) => {
+          const hay = row.getAttribute('data-user-search') || '';
+          const matches = !query || hay.includes(query);
+          row.classList.toggle('hidden', !matches);
+        });
+        updateUserCount();
+      }
+
+      if (userFilter) {
+        userFilter.addEventListener('input', applyUserFilter);
+        applyUserFilter();
+      }
+
+      document.addEventListener('change', async (event) => {
+        const toggle = event.target;
+        if (!toggle || !toggle.matches('input[data-perm-type]')) return;
+        const permType = toggle.getAttribute('data-perm-type');
+        const role = toggle.getAttribute('data-role');
+        const key = toggle.getAttribute('data-key');
+        const perm = toggle.getAttribute('data-perm') || 'view';
+        const enabled = toggle.checked;
+        let url = '';
+        let payload = {};
+        if (permType === 'action') {
+          url = '/api/admin/actions/update';
+          payload = { action: key, enabled: enabled, role: role };
+        } else {
+          url = '/api/admin/permissions/update';
+          payload = { module: key, enabled: enabled, role: role, perm: perm };
+        }
+        try {
+          const res = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+          });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok || data.error) {
+            throw new Error(data.error || data.message || 'Update failed');
+          }
+          const row = toggle.closest('tr');
+          if (row) {
+            row.classList.add('bg-emerald-50');
+            window.setTimeout(() => row.classList.remove('bg-emerald-50'), 700);
+          }
+          showToast('Permissions updated');
+        } catch (e) {
+          toggle.checked = !enabled;
+          showToast(`Update failed${e && e.message ? `: ${e.message}` : ''}`, true);
+        }
+      });
+    })();
+  </script>
+{% endblock %}

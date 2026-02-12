@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ team|title }} Team - Employee Management</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link rel="stylesheet" href="{{ url_for('static', filename='light_theme_overrides.css') }}">
+</head>
+<body class="bg-gray-50 text-gray-800">
+    <div class="min-h-screen">
+        <main class="p-8">
+            <div class="flex items-center justify-between mb-6">
+                <h2 class="text-2xl font-bold text-gray-900">{{ team|title }} Team - Employee Management</h2>
+                <a href="/dashboard/{{ team }}" class="bg-gray-600 text-white px-4 py-2 rounded-lg hover:bg-gray-700 transition-colors">
+                    <i class="fas fa-arrow-left mr-2"></i>Back to Dashboard
+                </a>
+            </div>
+
+            <!-- Add Employee Form -->
+            <div class="bg-white p-6 rounded-lg shadow-md mb-8">
+                <h3 class="text-lg font-semibold mb-4">Add New Employee</h3>
+                <form method="POST" action="/team/{{ team }}/employees/create" class="grid grid-cols-1 md:grid-cols-3 gap-4" autocomplete="off">
+                    <!-- CSRF Token for Security -->
+                    <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
+                    <div>
+                        <label for="name" class="block text-sm font-medium text-gray-700 mb-2">Employee Name</label>
+                        <input type="text" id="name" name="name" required 
+                               class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                               autocomplete="name">
+                    </div>
+                    <div>
+                        <label for="email" class="block text-sm font-medium text-gray-700 mb-2">Email</label>
+                        <input type="email" id="email" name="email" required 
+                               class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                               autocomplete="email">
+                    </div>
+                    <div>
+                        <label for="team_lead_id" class="block text-sm font-medium text-gray-700 mb-2">Team Lead</label>
+                        <select id="team_lead_id" name="team_lead_id" 
+                                class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500">
+                            <option value="">Select Team Lead</option>
+                            {% for lead in team_leads %}
+                            <option value="{{ lead.id }}">{{ lead.email }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <div>
+                        <label for="password" class="block text-sm font-medium text-gray-700 mb-2">Password</label>
+                        <input type="password" id="password" name="password" required minlength="8"
+                               class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                               placeholder="Min 8 chars, uppercase, number, special" autocomplete="new-password">
+                        <p class="text-xs text-gray-500 mt-1">Password must contain: 8+ chars, uppercase, lowercase, number, special character</p>
+                    </div>
+                    <div class="md:col-span-3">
+                        <button type="submit" class="bg-blue-600 text-white px-6 py-2 rounded-lg hover:bg-blue-700 transition-colors">
+                            <i class="fas fa-plus mr-2"></i>Add Employee
+                        </button>
+                    </div>
+                </form>
+            </div>
+
+            <!-- Employees List -->
+            <div class="bg-white rounded-lg shadow-md">
+                <div class="p-6 border-b border-gray-200">
+                    <h3 class="text-lg font-semibold">Team Employees</h3>
+                </div>
+                <div class="overflow-x-auto">
+                    <table class="w-full">
+                        <thead class="bg-gray-50">
+                            <tr>
+                                <th class="p-3 text-left">Name</th>
+                                <th class="p-3 text-left">Email</th>
+                                <th class="p-3 text-left">Team Lead</th>
+                                <th class="p-3 text-left">Status</th>
+                                <th class="p-3 text-left">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for employee in employees %}
+                            <tr class="border-b hover:bg-gray-50">
+                                <td class="p-3 font-medium">{{ employee.name }}</td>
+                                <td class="p-3">{{ employee.email }}</td>
+                                <td class="p-3">{{ employee.team_lead_email or 'Not assigned' }}</td>
+                                <td class="p-3">
+                                    <span class="px-2 py-1 text-xs rounded-full 
+                                        {% if employee.is_active %}bg-green-100 text-green-800
+                                        {% else %}bg-red-100 text-red-800{% endif %}">
+                                        {{ 'Active' if employee.is_active else 'Inactive' }}
+                                    </span>
+                                </td>
+                                <td class="p-3">
+                                    <div class="flex space-x-2">
+                                        <button onclick="showEmployeeLogin({{ employee.id }}, '{{ employee.name }}', '{{ employee.email }}')" 
+                                                class="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded text-sm">
+                                            <i class="fas fa-sign-in-alt mr-1"></i>Login
+                                        </button>
+                                        <button class="px-3 py-1.5 bg-gray-600 hover:bg-gray-700 text-white rounded text-sm" 
+                                                onclick="toggleEmployeeStatus({{ employee.id }}, {{ employee.is_active|lower }})">
+                                            <i class="fas fa-{% if employee.is_active %}pause{% else %}play{% endif %} mr-1"></i>
+                                            {{ 'Deactivate' if employee.is_active else 'Activate' }}
+                                        </button>
+                                    </div>
+                                </td>
+                            </tr>
+                            {% endfor %}
+                            {% if employees|length == 0 %}
+                            <tr>
+                                <td colspan="5" class="p-6 text-center text-gray-500">
+                                    <i class="fas fa-users text-4xl text-gray-300 mb-2"></i>
+                                    <p>No employees found for {{ team|title }} team</p>
+                                </td>
+                            </tr>
+                            {% endif %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <!-- Employee Login Modal -->
+    <div id="employeeLoginModal" class="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full hidden z-50">
+        <div class="relative top-20 mx-auto p-5 border w-96 shadow-lg rounded-md bg-white">
+            <div class="mt-3">
+                <div class="flex items-center justify-between mb-4">
+                    <h3 class="text-lg font-semibold text-gray-900">Employee Login</h3>
+                    <button onclick="closeEmployeeLogin()" class="text-gray-400 hover:text-gray-600">
+                        <i class="fas fa-times text-xl"></i>
+                    </button>
+                </div>
+                
+                <div class="mb-4">
+                    <p class="text-sm text-gray-600">Login for: <span id="loginEmployeeName" class="font-semibold"></span></p>
+                    <p class="text-xs text-gray-500" id="loginEmployeeEmail"></p>
+                </div>
+                
+                <form id="employeeLoginForm" onsubmit="event.preventDefault(); submitEmployeeLogin();">
+                    <input type="hidden" id="loginEmployeeId" name="employee_id">
+                    
+                    <div class="mb-4">
+                        <label for="loginEmail" class="block text-sm font-medium text-gray-700 mb-2">Email</label>
+                        <input type="email" id="loginEmail" name="email" required 
+                               class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500">
+                    </div>
+                    
+                    <div class="mb-6">
+                        <label for="loginPassword" class="block text-sm font-medium text-gray-700 mb-2">Password</label>
+                        <input type="password" id="loginPassword" name="password" required 
+                               class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500">
+                    </div>
+                    
+                    <div class="flex justify-end space-x-3">
+                        <button type="button" onclick="closeEmployeeLogin()" class="px-4 py-2 bg-gray-300 text-gray-700 rounded-md hover:bg-gray-400">
+                            Cancel
+                        </button>
+                        <button type="submit" class="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700">
+                            Login
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        function showEmployeeLogin(employeeId, employeeName, employeeEmail) {
+            document.getElementById('loginEmployeeId').value = employeeId;
+            document.getElementById('loginEmployeeName').textContent = employeeName;
+            document.getElementById('loginEmployeeEmail').textContent = employeeEmail;
+            document.getElementById('loginEmail').value = employeeEmail;
+            document.getElementById('employeeLoginModal').classList.remove('hidden');
+        }
+
+        function closeEmployeeLogin() {
+            document.getElementById('employeeLoginModal').classList.add('hidden');
+            document.getElementById('employeeLoginForm').reset();
+        }
+
+        function submitEmployeeLogin() {
+            const form = document.getElementById('employeeLoginForm');
+            const formData = new FormData(form);
+            
+            fetch('/employee/login', {
+                method: 'POST',
+                body: formData
+            })
+            .then(async (response) => {
+                const data = await response.json().catch(() => ({}));
+                if (!response.ok) {
+                    const msg = data && data.error ? data.error : 'Login failed';
+                    alert(msg);
+                    throw new Error(msg);
+                }
+                return data;
+            })
+            .then(data => {
+                if (data && data.success) {
+                    window.location.href = `/employee/${data.employee_id}/dashboard`;
+                } else {
+                    alert((data && data.error) || 'Invalid credentials.');
+                }
+            })
+            .catch(error => {
+                console.error('Error:', error);
+            });
+        }
+
+        function toggleEmployeeStatus(employeeId, isActive) {
+            // This would need to be implemented as a separate route
+            alert(`Toggle employee ${employeeId} status to ${isActive ? 'inactive' : 'active'}`);
+        }
+    </script>
+</body>
+</html>

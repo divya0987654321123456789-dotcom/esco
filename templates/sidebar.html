@@ -1,0 +1,317 @@
+{% set _sidebar_fixed = sidebar_fixed|default(false) %}
+{% set _sidebar_context = (sidebar_context or '') %}
+{% set _path = (request.path if request is defined else '') %}
+{% set _is_top_admin = (_sidebar_context == 'top_admin') or (_path and _path.startswith('/top-admin')) %}
+{% set _employee_session = (session.get('employee_id') if session is defined else None) %}
+{% set _is_employee_view = (sidebar_mode == 'employee') or (_employee_session is not none) %}
+{% set _user_email = (topbar_user_email if topbar_user_email is defined else (current_user.email if current_user is defined else '')) %}
+{% set _user_name = (current_user.full_name if current_user is defined and current_user.full_name else '') %}
+{% set _user_label = (topbar_user_label if topbar_user_label is defined else (_user_name or _user_email or 'User')) %}
+{% set _user_initial = (topbar_user_initial if topbar_user_initial is defined else (_user_label[:1].upper() if _user_label else 'U')) %}
+{% set _settings_url = url_for('employee_settings') if _is_employee_view else url_for('user_settings') %}
+{% set _logout_url = url_for('employee_logout') if _is_employee_view else url_for('logout') %}
+
+{% if not _is_top_admin %}
+{% set _topbar_has_left = (topbar_left_html is defined and topbar_left_html) %}
+{% set _show_user_menu = (topbar_show_user_menu if topbar_show_user_menu is defined else (not _topbar_has_left)) %}
+<div class="global-topbar">
+    {% if _topbar_has_left %}
+        <div class="global-topbar__left">
+            {{ topbar_left_html|safe }}
+        </div>
+    {% else %}
+        <div class="global-topbar__title-group {{ '' if (topbar_title is defined and topbar_title) else 'hidden' }}">
+            <div class="global-topbar__title">{{ topbar_title }}</div>
+            {% if topbar_subtitle is defined and topbar_subtitle %}
+                <div class="global-topbar__subtitle">{{ topbar_subtitle }}</div>
+            {% endif %}
+        </div>
+    {% endif %}
+    {% if topbar_right_html is defined and topbar_right_html %}
+        <div class="global-topbar__right">
+            {{ topbar_right_html|safe }}
+        </div>
+    {% endif %}
+    {% if _show_user_menu and not (topbar_right_html is defined and topbar_right_html) %}
+    <div class="global-topbar__spacer"></div>
+    {% endif %}
+    {% if _show_user_menu %}
+    <div class="global-topbar__user">
+        <button type="button" class="global-topbar__btn" id="userMenuToggle" aria-haspopup="true" aria-expanded="false">
+            <span class="global-topbar__avatar">{{ _user_initial }}</span>
+            <span class="global-topbar__label">{{ _user_label }}</span>
+            <i class="fas fa-chevron-down text-xs"></i>
+        </button>
+        <div class="global-topbar__menu hidden" id="userMenuPanel" role="menu" aria-label="User menu">
+            <div class="global-topbar__menu-header">
+                <div class="global-topbar__menu-name">{{ _user_label }}</div>
+                {% if _user_email %}
+                <div class="global-topbar__menu-email">{{ _user_email }}</div>
+                {% endif %}
+            </div>
+            <a class="global-topbar__menu-item" href="{{ _settings_url }}" role="menuitem">
+                <i class="fas fa-gear"></i>
+                Settings
+            </a>
+            <a class="global-topbar__menu-item" href="{{ _logout_url }}" role="menuitem">
+                <i class="fas fa-arrow-right-from-bracket"></i>
+                Logout
+            </a>
+        </div>
+    </div>
+    {% endif %}
+</div>
+{% endif %}
+
+<aside class="w-64 bg-white p-6 flex flex-col justify-between border-r border-gray-200 {{ 'fixed inset-y-0 left-0 h-screen' if _sidebar_fixed else '' }}">
+    <div>
+        <div class="flex flex-col items-center text-center mb-10" id="logo-container">
+            <div id="sidebar-logo" class="flex items-center">
+                <img src="{{ url_for('static', filename='IKIO USA-01.png') }}" alt="Ikio Logo" class="h-12 w-auto object-contain">
+            </div>
+            <div class="mt-2 text-lg font-extrabold tracking-wide text-gray-800">Project Suite</div>
+        </div>
+        
+        {# Company/department switcher removed per dashboard cleanup request #}
+        <nav class="sidebar-nav">
+            <ul class="space-y-2">
+                {% if _is_top_admin %}
+                    <li class="text-[11px] font-semibold text-gray-500 uppercase tracking-wider px-3 mt-2 mb-2">Overview</li>
+                    <li>
+                        <a href="{{ url_for('top_admin_overview') }}" class="nav-link flex items-center gap-3 p-3 rounded-lg hover:bg-gray-100 text-[15px]">
+                            <i class="fas fa-chart-pie w-5"></i>Overview
+                        </a>
+                    </li>
+
+                    <li class="text-[11px] font-semibold text-gray-500 uppercase tracking-wider px-3 mt-6 mb-2">Administration</li>
+                    <li>
+                        <a href="{{ url_for('top_admin_role_hierarchy') }}" class="nav-link flex items-center gap-3 p-3 rounded-lg hover:bg-gray-100 text-[15px]">
+                            <i class="fas fa-sitemap w-5"></i>Role Hierarchy
+                        </a>
+                    </li>
+                    <li>
+                        <a href="{{ url_for('top_admin_role_access') }}" class="nav-link flex items-center gap-3 p-3 rounded-lg hover:bg-gray-100 text-[15px]">
+                            <i class="fas fa-toggle-on w-5"></i>Role Access
+                        </a>
+                    </li>
+
+                    <li class="text-[11px] font-semibold text-gray-500 uppercase tracking-wider px-3 mt-6 mb-2">Operations</li>
+                    <li>
+                        <a href="{{ url_for('top_admin_bid_dashboard') }}" class="nav-link flex items-center gap-3 p-3 rounded-lg hover:bg-gray-100 text-[15px]">
+                            <i class="fas fa-chart-line w-5"></i>Bid Dashboard
+                        </a>
+                    </li>
+                    <li>
+                        <a href="{{ url_for('top_admin_assigned_tasks') }}" class="nav-link flex items-center gap-3 p-3 rounded-lg hover:bg-gray-100 text-[15px]">
+                            <i class="fas fa-list-check w-5"></i>Assigned Tasks
+                        </a>
+                    </li>
+                    <li>
+                        <a href="{{ url_for('top_admin_approvals') }}" class="nav-link flex items-center gap-3 p-3 rounded-lg hover:bg-gray-100 text-[15px]">
+                            <i class="fas fa-check-circle w-5"></i>Approvals
+                        </a>
+                    </li>
+                {% else %}
+                    {% if sidebar_mode == 'employee' %}
+                        <li>
+                            <a href="{{ employee_dashboard_url or url_for('employee_dashboard_member') }}" class="nav-link flex items-center p-3 rounded-lg hover:bg-gray-100 text-[15px]">
+                                <i class="fas fa-list-check mr-3"></i>Assigned Tasks
+                            </a>
+                        </li>
+                    {% else %}
+                        {% set _role_raw = (user_role or (current_user.role if current_user is defined else '') or '') %}
+                        {% set _role_norm = _role_raw | lower | replace('_', ' ') %}
+                        {% set _dept = (active_department_key or '') %}
+                        {% if not _dept %}
+                            {% if _role_norm in ['business dev','business development','business manager'] %}{% set _dept = 'business' %}
+                            {% elif _role_norm in ['design','design manager'] %}{% set _dept = 'design' %}
+                            {% elif _role_norm in ['operations','operation manager','operations manager'] %}{% set _dept = 'operations' %}
+                            {% elif _role_norm in ['site engineer','site manager','engineering','engineer'] %}{% set _dept = 'engineer' %}
+                            {% endif %}
+                        {% endif %}
+                        {% if _dept in ['site_engineer','site engineer','engineering','engineer'] %}
+                            {% set _dept = 'engineer' %}
+                        {% endif %}
+                        {% set _is_manager = _role_norm in ['manager','project manager','business manager','design manager','operation manager','operations manager','site manager'] %}
+                        {% set _is_teamlead = _role_norm in ['teamlead','team lead','business dev','design','operations','site engineer','engineering'] %}
+                        {% set _assigned_ep = 'manager_assigned_tasks' if _is_manager else ('team_lead_assigned_tasks' if _is_teamlead else 'employee_dashboard_member') %}
+                        {% set _approvals_ep = 'manager_approvals' if _is_manager else ('team_lead_approvals' if _is_teamlead else '') %}
+                        {% if _role_norm == 'business manager' %}{% set _approvals_ep = 'business_manager_approvals' %}{% endif %}
+
+                        {% if user_permissions.get('bid_analyzer', False) or is_admin %}
+                        <li>
+                            <a href="{{ url_for('bid_analyzer') }}" class="nav-link flex items-center p-3 rounded-lg hover:bg-gray-100 text-[15px]">
+                                <i class="fas fa-chart-line mr-3"></i>Bid Dashboard
+                            </a>
+                        </li>
+                        {% endif %}
+
+                        {% if user_permissions.get('assigned_tasks', False) or is_admin %}
+                        <li>
+                            {% if employee_dashboard_url is defined and employee_dashboard_url %}
+                            <a href="{{ employee_dashboard_url }}" class="nav-link flex items-center p-3 rounded-lg hover:bg-gray-100 text-[15px]">
+                                <i class="fas fa-list-check mr-3"></i>Assigned Tasks
+                            </a>
+                            {% elif _assigned_ep == 'team_lead_assigned_tasks' %}
+                            <a href="{{ url_for(_assigned_ep, team=_dept or 'business') }}" class="nav-link flex items-center p-3 rounded-lg hover:bg-gray-100 text-[15px]">
+                                <i class="fas fa-list-check mr-3"></i>Assigned Tasks
+                            </a>
+                            {% else %}
+                            <a href="{{ url_for(_assigned_ep) }}" class="nav-link flex items-center p-3 rounded-lg hover:bg-gray-100 text-[15px]">
+                                <i class="fas fa-list-check mr-3"></i>Assigned Tasks
+                            </a>
+                            {% endif %}
+                        </li>
+                        {% endif %}
+
+                        {% if _approvals_ep and (user_permissions.get('approvals', False) or is_admin) %}
+                        <li>
+                            <a href="{{ url_for(_approvals_ep) }}" class="nav-link flex items-center p-3 rounded-lg hover:bg-gray-100 text-[15px]">
+                                <i class="fas fa-check-circle mr-3"></i>Approvals
+                            </a>
+                        </li>
+                        {% endif %}
+
+                    {% endif %}
+                {% endif %}
+            </ul>
+        </nav>
+    </div>
+    <div>
+        {% if _is_top_admin %}
+            <div class="text-xs text-gray-500 mb-2">
+                Logged in as <span class="font-semibold text-gray-700">{{ (current_user.email if current_user and current_user.email else 'top admin') }}</span>
+            </div>
+        {% endif %}
+    </div>
+</aside>
+
+<script>
+    (function () {
+        const toggle = document.getElementById('userMenuToggle');
+        const panel = document.getElementById('userMenuPanel');
+        if (!toggle || !panel) return;
+        try { document.body.classList.add('has-global-topbar'); } catch (e) {}
+
+        function closeMenu() {
+            panel.classList.add('hidden');
+            toggle.setAttribute('aria-expanded', 'false');
+        }
+
+        toggle.addEventListener('click', function (e) {
+            e.stopPropagation();
+            panel.classList.toggle('hidden');
+            toggle.setAttribute('aria-expanded', panel.classList.contains('hidden') ? 'false' : 'true');
+        });
+
+        document.addEventListener('click', function () {
+            if (!panel.classList.contains('hidden')) closeMenu();
+        });
+    })();
+</script>
+
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    const navLinks = document.querySelectorAll('.nav-link');
+    function setActive(link) {
+        navLinks.forEach(l => {
+            l.classList.remove('bg-blue-100', 'text-blue-600', 'font-semibold');
+            l.classList.add('hover:bg-gray-100');
+        });
+        link.classList.add('bg-blue-100', 'text-blue-600', 'font-semibold');
+        link.classList.remove('hover:bg-gray-100');
+    }
+    navLinks.forEach(link => {
+        link.addEventListener('click', function(e) {
+            setActive(this);
+        });
+    });
+
+    const path = window.location.pathname;
+    let matched = false;
+    navLinks.forEach(l => {
+        const href = l.getAttribute('href') || '';
+        if (href && path.startsWith(href)) {
+            setActive(l);
+            matched = true;
+        }
+    });
+    if (!matched && navLinks.length) {
+        setActive(navLinks[0]);
+    }
+    
+    // Listen for real-time permission changes via SocketIO
+    if (typeof io !== 'undefined') {
+        try {
+            const socket = io();
+            const userRole = '{{ user_role | default("member") | lower }}'.replace('_', ' ');
+            
+            socket.on('permission_changed', function(data) {
+                // Check if this permission change affects current user's role
+                if (data.roles && (data.roles.includes(userRole) || data.roles.includes(userRole.replace(' ', '_')))) {
+                    // Show notification about permission change
+                    const notification = document.createElement('div');
+                    notification.className = 'fixed top-4 right-4 bg-blue-600 text-white px-6 py-3 rounded-lg shadow-lg z-50 animate-pulse';
+                    notification.innerHTML = '<i class="fas fa-info-circle mr-2"></i>Your permissions have been updated. <a href="javascript:location.reload()" class="underline font-bold">Refresh</a> to see changes.';
+                    document.body.appendChild(notification);
+                    
+                    // Auto-remove after 10 seconds
+                    setTimeout(() => {
+                        notification.remove();
+                    }, 10000);
+                }
+            });
+
+        } catch (e) {
+            console.log('SocketIO not available for permission updates');
+        }
+    }
+
+    // Global date formatter: convert YYYY-MM-DD to Mon-DD-YYYY
+    (function formatDates() {
+        const month = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+        function fmt(val) {
+            if (!val) return null;
+            const m = String(val).trim().match(/^(\d{4})-(\d{2})-(\d{2})/);
+            if (!m) return null;
+            const y = parseInt(m[1], 10);
+            const mo = parseInt(m[2], 10) - 1;
+            const d = parseInt(m[3], 10);
+            if (isNaN(y) || isNaN(mo) || isNaN(d) || mo < 0 || mo > 11) return null;
+            return `${month[mo]}-${String(d).padStart(2, '0')}-${y}`;
+        }
+        const targets = document.querySelectorAll('[data-raw-date], td, span, time, div');
+        targets.forEach(el => {
+            const rawAttr = el.getAttribute('data-raw-date');
+            const raw = (rawAttr && rawAttr.trim()) || (el.childNodes.length === 1 ? el.textContent.trim() : '');
+            const formatted = fmt(raw);
+            if (formatted) el.textContent = formatted;
+        });
+    })();
+
+    // Calendar icon helper (for date inputs styled with an icon)
+    window.focusDateInput = function(iconBtn) {
+        const input = iconBtn?.parentElement?.querySelector('input[type="date"]');
+        if (input) input.showPicker ? input.showPicker() : input.focus();
+    }
+});
+</script>
+
+<script>
+    {% set _rn = (user_role or '') | lower | replace('_', ' ') %}
+    {% if not _employee_session and not (_rn == 'business manager' or (_rn == 'manager' and active_department_key == 'business')) %}
+    window.ESCO_NOTIF = {
+        mode: 'user',
+        unreadUrl: {{ url_for('api_notifications_unread_count')|tojson }},
+        recentUrl: {{ url_for('api_notifications_recent')|tojson }},
+        markReadUrl: {{ url_for('api_notifications_mark_read')|tojson }},
+        allUrl: {{ '/notifications'|tojson }},
+        csrf: {{ csrf_token()|tojson }},
+        badgeId: 'notifUnreadBadge'
+    };
+    {% endif %}
+</script>
+{% set _rn2 = (user_role or '') | lower | replace('_', ' ') %}
+{% if not _employee_session and not (_rn2 == 'business manager' or (_rn2 == 'manager' and active_department_key == 'business')) %}
+<script src="{{ url_for('static', filename='notifications.js') }}"></script>
+{% endif %}
