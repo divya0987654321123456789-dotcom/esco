@@ -1247,9 +1247,43 @@
         function canActOnApproval(statusValue, approvalTarget) {
             if (IS_EMPLOYEE_VIEW) return false;
             if (String(statusValue || '').toLowerCase() !== 'pending') return false;
-            const itemTarget = normalizeApprovalTarget(approvalTarget) || currentApprovalTarget();
-            if (itemTarget === currentApprovalTarget()) return true;
-            return IS_MANAGER_VIEW || IS_TEAM_LEAD_VIEW;
+            const itemTarget = normalizeApprovalTarget(approvalTarget);
+            if (!itemTarget) return false;
+            return itemTarget === currentApprovalTarget();
+        }
+
+        function approvalTargetLabel(raw) {
+            const t = normalizeApprovalTarget(raw || '');
+            if (!t) return '';
+            if (t === 'team_lead') return 'Team Lead';
+            if (t === 'manager') return 'Manager';
+            if (t === 'admin') return 'Top Admin';
+            return String(raw || '').replace('_', ' ').replace(/\b\w/g, s => s.toUpperCase());
+        }
+
+        function approvalBadge(statusValue, approvalTarget) {
+            const status = String(statusValue || '').toLowerCase();
+            const targetLabel = approvalTargetLabel(approvalTarget);
+            if (!status && !targetLabel) return '';
+            let text = '';
+            let cls = 'bg-gray-100 text-gray-600';
+            if (status === 'approved') {
+                text = 'Approved';
+                cls = 'bg-emerald-100 text-emerald-700';
+            } else if (status === 'rejected') {
+                text = 'Rejected';
+                cls = 'bg-rose-100 text-rose-700';
+            } else if (status === 'pending' || status === 'review') {
+                text = 'Pending';
+                cls = 'bg-amber-100 text-amber-700';
+            }
+            if (!text && targetLabel) {
+                text = 'Pending';
+                cls = 'bg-amber-100 text-amber-700';
+            }
+            if (!text) return '';
+            const suffix = targetLabel ? ` → ${escapeHtml(targetLabel)}` : '';
+            return `<span class="ml-2 inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold ${cls}">${text}${suffix}</span>`;
         }
 
         function generateProposal(bidId, bidName, company) {
@@ -2318,9 +2352,10 @@
                         }
                         link = btns.join(' ');
                     }
+                    const badge = (c.needs_approval || c.approval_target || statusRaw) ? approvalBadge(status, c.approval_target) : '';
                     items.push({
                         ts,
-                        html: buildActivityHtml(`${name}${taskName ? ` - ${taskName}` : ''}${deptLabel ? ` (${deptLabel})` : ''}`, ts, message, link)
+                        html: buildActivityHtml(`${name}${taskName ? ` - ${taskName}` : ''}${deptLabel ? ` (${deptLabel})` : ''}`, ts, `${message}${badge}`, link)
                     });
                 });
                 (t.employee_files || []).forEach(f => {
@@ -2363,9 +2398,10 @@
                         }
                     }
                     const link = linkParts.join(' ');
+                    const badge = (f.approval_target || statusRaw) ? approvalBadge(status, f.approval_target) : '';
                     items.push({
                         ts,
-                        html: buildActivityHtml(`${name}${taskName ? ` - ${taskName}` : ''}${target}`, ts, message, link)
+                        html: buildActivityHtml(`${name}${taskName ? ` - ${taskName}` : ''}${target}`, ts, `${message}${badge}`, link)
                     });
                 });
                 (t.manager_files || []).forEach(f => {
@@ -2408,9 +2444,10 @@
                         }
                     }
                     const link = linkParts.join(' ');
+                    const badge = (f.approval_target || statusRaw) ? approvalBadge(status, f.approval_target) : '';
                     items.push({
                         ts,
-                        html: buildActivityHtml(`${name}${taskName ? ` - ${taskName}` : ''}${target}`, ts, message, link)
+                        html: buildActivityHtml(`${name}${taskName ? ` - ${taskName}` : ''}${target}`, ts, `${message}${badge}`, link)
                     });
                 });
             });

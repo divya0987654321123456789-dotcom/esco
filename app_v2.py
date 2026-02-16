@@ -882,6 +882,46 @@ def _basic_bid_timeline_rows(cur, company_sql_clause: str, company_params: tuple
 def _compute_stage_progress_for_bid(cur, g_id: int, default_stages: list[str]):
     stage_map = {k: 0 for k in default_stages}
     counts = {k: {'total': 0, 'completed': 0} for k in default_stages}
+    def _merge_meta(stage_map_local, counts_local):
+        try:
+            _ensure_bid_assign_meta_table()
+            cur.execute("SELECT data FROM bid_assign_meta WHERE g_id=%s", (int(g_id),))
+            row = cur.fetchone() or {}
+            meta = {}
+            try:
+                meta = json.loads(row.get('data') or "{}")
+            except Exception:
+                meta = {}
+            checklist = meta.get('checklist') if isinstance(meta, dict) else None
+            if isinstance(checklist, list) and checklist:
+                meta_buckets = {k: [] for k in default_stages}
+                for item in checklist:
+                    if not isinstance(item, dict):
+                        continue
+                    stage = _normalize_stage_key(
+                        item.get('dept') or item.get('stage') or item.get('department') or item.get('team') or ''
+                    )
+                    if not stage or stage not in meta_buckets:
+                        continue
+                    st = (item.get('status') or '').strip().lower()
+                    pct = item.get('progress_pct')
+                    if pct is None:
+                        pct = 100 if st in ('completed', 'submitted') else 50 if st in ('in_progress', 'in progress') else 0
+                    try:
+                        pct = max(0, min(100, int(pct)))
+                    except Exception:
+                        pct = 0
+                    meta_buckets[stage].append(pct)
+                def _avg(lst):
+                    return int(round(sum(lst) / len(lst))) if lst else 0
+                for stage_key, vals in meta_buckets.items():
+                    if vals and (counts_local.get(stage_key, {}).get('total', 0) == 0 or _avg(vals) > stage_map_local.get(stage_key, 0)):
+                        stage_map_local[stage_key] = _avg(vals)
+                        counts_local[stage_key]['total'] = len(vals)
+                        counts_local[stage_key]['completed'] = len([v for v in vals if v >= 100])
+        except Exception:
+            pass
+        return stage_map_local, counts_local
     try:
         _ensure_bid_team_progress_table(cur)
         cur.execute(
@@ -902,6 +942,7 @@ def _compute_stage_progress_for_bid(cur, g_id: int, default_stages: list[str]):
                         'total': int(r.get('total_tasks') or 0),
                         'completed': int(r.get('completed_tasks') or 0),
                     }
+            stage_map, counts = _merge_meta(stage_map, counts)
             return stage_map, counts
     except Exception:
         pass
@@ -971,6 +1012,166 @@ def _compute_stage_progress_for_bid(cur, g_id: int, default_stages: list[str]):
         pass
 
     return stage_map, counts
+
+
+def _compute_stage_progress_from_checklists(cur, g_id: int, default_stages: list[str]):
+    stage_map = {k: 0 for k in default_stages}
+    counts = {k: {'total': 0, 'completed': 0} for k in default_stages}
+    try:
+        cur.execute(
+            """
+            SELECT progress_pct, status, stage
+            FROM bid_checklists
+            WHERE g_id=%s
+            """,
+            (int(g_id),),
+        )
+        rows = cur.fetchall() or []
+    except Exception:
+        return stage_map, counts
+    buckets = {k: [] for k in default_stages}
+    for r in rows:
+        stage = _normalize_stage_key(r.get('stage'))
+        if not stage or stage not in buckets:
+            continue
+        pct = r.get('progress_pct')
+        if pct is None:
+            st = (r.get('status') or '').strip().lower()
+            pct = 100 if st in ('completed', 'submitted') else 50 if st in ('in_progress', 'in progress') else 0
+        try:
+            pct = max(0, min(100, int(pct)))
+        except Exception:
+            pct = 0
+        buckets[stage].append(pct)
+        counts[stage]['total'] += 1
+        if pct >= 100 or (r.get('status') or '').strip().lower() in ('completed', 'submitted'):
+            counts[stage]['completed'] += 1
+    for k, vals in buckets.items():
+        if vals:
+            stage_map[k] = int(round(sum(vals) / len(vals)))
+    return stage_map, counts
+
+
+def _bid_has_checklists(cur, g_id: int) -> bool:
+    try:
+        cur.execute("SELECT 1 FROM bid_checklists WHERE g_id=%s LIMIT 1", (int(g_id),))
+        return cur.fetchone() is not None
+    except Exception:
+        return False
+
+
+def _compute_stage_progress_from_meta(cur, g_id: int, default_stages: list[str]):
+    stage_map = {k: 0 for k in default_stages}
+    counts = {k: {'total': 0, 'completed': 0} for k in default_stages}
+    try:
+        _ensure_bid_assign_meta_table()
+        cur.execute("SELECT data FROM bid_assign_meta WHERE g_id=%s", (int(g_id),))
+        row = cur.fetchone() or {}
+        try:
+            meta = json.loads(row.get('data') or "{}")
+        except Exception:
+            meta = {}
+        checklist = meta.get('checklist') if isinstance(meta, dict) else None
+        if not isinstance(checklist, list) or not checklist:
+            return stage_map, counts
+        buckets = {k: [] for k in default_stages}
+        for item in checklist:
+            if not isinstance(item, dict):
+                continue
+            stage = _normalize_stage_key(
+                item.get('dept') or item.get('stage') or item.get('department') or item.get('team') or ''
+            )
+            if not stage or stage not in buckets:
+                continue
+            st = (item.get('status') or '').strip().lower()
+            pct = item.get('progress_pct')
+            if pct is None:
+                pct = 100 if st in ('completed', 'submitted') else 50 if st in ('in_progress', 'in progress') else 0
+            try:
+                pct = max(0, min(100, int(pct)))
+            except Exception:
+                pct = 0
+            buckets[stage].append(pct)
+            counts[stage]['total'] += 1
+            if pct >= 100 or st in ('completed', 'submitted'):
+                counts[stage]['completed'] += 1
+        for k, vals in buckets.items():
+            if vals:
+                stage_map[k] = int(round(sum(vals) / len(vals)))
+    except Exception:
+        return stage_map, counts
+    return stage_map, counts
+
+
+def _compute_stage_progress_for_timeline(cur, g_id: int, default_stages: list[str]):
+    """Timeline-specific progress: merge bid_checklists + bid_assign_meta for stage %s."""
+    stage_map = {k: 0 for k in default_stages}
+    counts = {k: {'total': 0, 'completed': 0} for k in default_stages}
+    try:
+        chk_map, chk_counts = _compute_stage_progress_from_checklists(cur, g_id, default_stages)
+        meta_map, meta_counts = _compute_stage_progress_from_meta(cur, g_id, default_stages)
+        for k in default_stages:
+            stage_map[k] = max(int(chk_map.get(k, 0) or 0), int(meta_map.get(k, 0) or 0))
+            counts[k] = {
+                'total': max(
+                    int(chk_counts.get(k, {}).get('total', 0) or 0),
+                    int(meta_counts.get(k, {}).get('total', 0) or 0),
+                ),
+                'completed': max(
+                    int(chk_counts.get(k, {}).get('completed', 0) or 0),
+                    int(meta_counts.get(k, {}).get('completed', 0) or 0),
+                ),
+            }
+    except Exception:
+        pass
+    try:
+        stage_map['analyzer'] = max(int(stage_map.get('analyzer', 0) or 0), 100)
+    except Exception:
+        stage_map['analyzer'] = 100
+    return stage_map, counts
+
+
+def _bid_timeline_progress_maps(cur, g_ids: list[int], default_stages: list[str]):
+    """Compute per-team progress for bid timeline from bid_checklists + bid_assign_meta."""
+    stage_map_by_gid: dict[int, dict] = {}
+    counts_by_gid: dict[int, dict] = {}
+    if not g_ids:
+        return stage_map_by_gid, counts_by_gid
+    for gid in g_ids:
+        try:
+            stage_map, counts = _compute_stage_progress_for_timeline(cur, int(gid), default_stages)
+        except Exception:
+            stage_map, counts = ({k: 0 for k in default_stages}, {k: {'total': 0, 'completed': 0} for k in default_stages})
+        try:
+            stage_map['analyzer'] = max(int(stage_map.get('analyzer', 0) or 0), 100)
+        except Exception:
+            stage_map['analyzer'] = 100
+        stage_map_by_gid[int(gid)] = stage_map
+        counts_by_gid[int(gid)] = counts
+    return stage_map_by_gid, counts_by_gid
+
+
+@app.route('/api/bid-timeline/progress')
+@login_required
+def api_bid_timeline_progress():
+    ids_raw = (request.args.get('ids') or '').strip()
+    if not ids_raw:
+        return jsonify({'ok': True, 'items': {}})
+    try:
+        g_ids = [int(x) for x in ids_raw.split(',') if str(x).strip().isdigit()]
+    except Exception:
+        g_ids = []
+    if not g_ids:
+        return jsonify({'ok': True, 'items': {}})
+    default_stages = ['analyzer', 'business', 'design', 'operations', 'engineer', 'handover']
+    try:
+        cur = mysql.connection.cursor(DictCursor)
+        stage_map, _counts = _bid_timeline_progress_maps(cur, g_ids, default_stages)
+        cur.close()
+    except Exception:
+        stage_map = {}
+
+    return jsonify({'ok': True, 'items': stage_map})
 
 
 def _build_basic_timeline_items(cur, rows: list[dict]) -> list[dict]:
@@ -1214,38 +1415,10 @@ def _recalc_bid_team_progress(cur, g_id: int) -> None:
         def avg(lst):
             return int(round(sum(lst) / len(lst))) if lst else 0
         base_avgs = {k: avg(v) for k, v in buckets.items()}
-        # Merge in bid_assign_meta checklist data for stages missing tasks.
-        try:
-            _ensure_bid_assign_meta_table()
-            cur.execute("SELECT data FROM bid_assign_meta WHERE g_id=%s", (int(g_id),))
-            row = cur.fetchone() or {}
-            meta = {}
-            try:
-                meta = json.loads(row.get('data') or "{}")
-            except Exception:
-                meta = {}
-            checklist = meta.get('checklist') if isinstance(meta, dict) else None
-            if isinstance(checklist, list) and checklist:
-                meta_buckets = {k: [] for k in buckets}
-                for item in checklist:
-                    if not isinstance(item, dict):
-                        continue
-                    stage = _normalize_stage_key(item.get('dept') or item.get('stage') or '')
-                    if not stage or stage not in meta_buckets:
-                        continue
-                    st = (item.get('status') or '').strip().lower()
-                    pct = 100 if st in ('completed', 'submitted') else 50 if st in ('in_progress', 'in progress') else 0
-                    meta_buckets[stage].append(pct)
-                for stage, vals in meta_buckets.items():
-                    if vals and (counts[stage]['total'] == 0 or base_avgs.get(stage, 0) == 0):
-                        buckets[stage] = vals
-                        counts[stage]['total'] = len(vals)
-                        counts[stage]['completed'] = len([v for v in vals if v >= 100])
-        except Exception:
-            pass
+        stage_map, counts = _merge_meta({k: avg(v) for k, v in buckets.items()}, counts)
+        buckets = {k: [stage_map.get(k, 0)] for k in buckets}
         for stage_key in buckets.keys():
-            lst = buckets[stage_key]
-            progress_pct = avg(lst)
+            progress_pct = stage_map.get(stage_key, 0)
             total = int(counts[stage_key]['total'] or 0)
             completed = int(counts[stage_key]['completed'] or 0)
             cur.execute(
@@ -5294,6 +5467,11 @@ def top_admin_overview():
             max_total=None,
             include_closed=True,
         )
+        try:
+            timeline_gids = [int(rr.get('g_id')) for rr in (go_rows or []) if rr.get('g_id')]
+        except Exception:
+            timeline_gids = []
+        stage_map_by_gid, stage_counts_by_gid = _bid_timeline_progress_maps(cur, timeline_gids, default_stages)
         # Ensure stored team progress exists for these bids.
         try:
             for rr in (go_rows or []):
@@ -5311,6 +5489,100 @@ def top_admin_overview():
             cur2 = None
             try:
                 cur2 = mysql.connection.cursor(DictCursor)
+                def _merge_checklists(stage_map_local, counts_local):
+                    try:
+                        try:
+                            cur2.execute(
+                                """
+                                SELECT bc.progress_pct, bc.status, COALESCE(bc.stage, bc.department, u.role) AS stage_source
+                                FROM bid_checklists bc
+                                LEFT JOIN users u ON bc.created_by = u.id
+                                WHERE bc.g_id = %s
+                                """,
+                                (g_id,),
+                            )
+                        except Exception as e:
+                            if "Unknown column 'department'" in str(e):
+                                cur2.execute(
+                                    """
+                                    SELECT bc.progress_pct, bc.status, COALESCE(bc.stage, u.role) AS stage_source
+                                    FROM bid_checklists bc
+                                    LEFT JOIN users u ON bc.created_by = u.id
+                                    WHERE bc.g_id = %s
+                                    """,
+                                    (g_id,),
+                                )
+                            else:
+                                raise
+                        rows_local = cur2.fetchall() or []
+                        buckets_local = {k: [] for k in default_stages}
+                        counts_local = {k: dict(counts_local.get(k, {'total': 0, 'completed': 0})) for k in default_stages}
+                        for r in rows_local:
+                            stage = _normalize_stage_key(r.get('stage_source'))
+                            if not stage or stage not in buckets_local:
+                                continue
+                            pct = r.get('progress_pct')
+                            if pct is None:
+                                st = (r.get('status') or '').strip().lower()
+                                pct = 100 if st in ('completed', 'submitted') else 50 if st in ('in_progress', 'in progress') else 0
+                            try:
+                                pct = max(0, min(100, int(pct)))
+                            except Exception:
+                                pct = 0
+                            buckets_local[stage].append(pct)
+                            counts_local[stage]['total'] += 1
+                            st = (r.get('status') or '').strip().lower()
+                            if pct >= 100 or st in ('completed', 'submitted'):
+                                counts_local[stage]['completed'] += 1
+                        def _avg(lst):
+                            return int(round(sum(lst) / len(lst))) if lst else 0
+                        for k in default_stages:
+                            if buckets_local[k]:
+                                stage_map_local[k] = max(int(stage_map_local.get(k, 0) or 0), _avg(buckets_local[k]))
+                        return stage_map_local, counts_local
+                    except Exception:
+                        return stage_map_local, counts_local
+
+                def _merge_meta(stage_map_local, counts_local):
+                    try:
+                        _ensure_bid_assign_meta_table()
+                        cur2.execute("SELECT data FROM bid_assign_meta WHERE g_id=%s", (int(g_id),))
+                        row = cur2.fetchone() or {}
+                        meta = {}
+                        try:
+                            meta = json.loads(row.get('data') or "{}")
+                        except Exception:
+                            meta = {}
+                        checklist = meta.get('checklist') if isinstance(meta, dict) else None
+                        if isinstance(checklist, list) and checklist:
+                            meta_buckets = {k: [] for k in default_stages}
+                            for item in checklist:
+                                if not isinstance(item, dict):
+                                    continue
+                                stage = _normalize_stage_key(
+                                    item.get('dept') or item.get('stage') or item.get('department') or item.get('team') or ''
+                                )
+                                if not stage or stage not in meta_buckets:
+                                    continue
+                                st = (item.get('status') or '').strip().lower()
+                                pct = item.get('progress_pct')
+                                if pct is None:
+                                    pct = 100 if st in ('completed', 'submitted') else 50 if st in ('in_progress', 'in progress') else 0
+                                try:
+                                    pct = max(0, min(100, int(pct)))
+                                except Exception:
+                                    pct = 0
+                                meta_buckets[stage].append(pct)
+                            def _avg(lst):
+                                return int(round(sum(lst) / len(lst))) if lst else 0
+                            for stage_key, vals in meta_buckets.items():
+                                if vals and (counts_local.get(stage_key, {}).get('total', 0) == 0 or _avg(vals) > stage_map_local.get(stage_key, 0)):
+                                    stage_map_local[stage_key] = _avg(vals)
+                                    counts_local[stage_key]['total'] = len(vals)
+                                    counts_local[stage_key]['completed'] = len([v for v in vals if v >= 100])
+                    except Exception:
+                        pass
+                    return stage_map_local, counts_local
                 try:
                     _ensure_bid_team_progress_table(cur2)
                     cur2.execute(
@@ -5333,6 +5605,8 @@ def top_admin_overview():
                         for k in default_stages:
                             stage_map.setdefault(k, 0)
                             counts.setdefault(k, {'total': 0, 'completed': 0})
+                        stage_map, counts = _merge_checklists(stage_map, counts)
+                        stage_map, counts = _merge_meta(stage_map, counts)
                         has_signal = any((counts.get(k, {}).get('total', 0) or 0) > 0 for k in default_stages) or any(
                             int(stage_map.get(k, 0) or 0) > 0 for k in default_stages
                         )
@@ -5410,42 +5684,11 @@ def top_admin_overview():
                     st = (r.get('status') or '').strip().lower()
                     if pct >= 100 or st in ('completed', 'submitted'):
                         counts[stage]['completed'] += 1
-                try:
-                    _ensure_bid_assign_meta_table()
-                    cur2.execute("SELECT data FROM bid_assign_meta WHERE g_id=%s", (int(g_id),))
-                    row = cur2.fetchone() or {}
-                    meta = {}
-                    try:
-                        meta = json.loads(row.get('data') or "{}")
-                    except Exception:
-                        meta = {}
-                    checklist = meta.get('checklist') if isinstance(meta, dict) else None
-                    if isinstance(checklist, list) and checklist:
-                        meta_buckets = {k: [] for k in default_stages}
-                        for item in checklist:
-                            if not isinstance(item, dict):
-                                continue
-                            stage = _normalize_stage_key(item.get('dept') or item.get('stage') or '')
-                            if not stage or stage not in meta_buckets:
-                                continue
-                            st = (item.get('status') or '').strip().lower()
-                            pct = 100 if st in ('completed', 'submitted') else 50 if st in ('in_progress', 'in progress') else 0
-                            meta_buckets[stage].append(pct)
-                        def _avg(lst):
-                            return int(round(sum(lst) / len(lst))) if lst else 0
-                        base_avgs = {k: _avg(v) for k, v in buckets.items()}
-                        for stage_key, vals in meta_buckets.items():
-                            if vals and (counts[stage_key]['total'] == 0 or base_avgs.get(stage_key, 0) == 0):
-                                buckets[stage_key] = vals
-                                counts[stage_key]['total'] = len(vals)
-                                counts[stage_key]['completed'] = len([v for v in vals if v >= 100])
-                except Exception:
-                    pass
-
                 def avg(lst):
                     return int(round(sum(lst) / len(lst))) if lst else 0
-
                 stage_map = {k: avg(v) for k, v in buckets.items()}
+                stage_map, counts = _merge_checklists(stage_map, counts)
+                stage_map, counts = _merge_meta(stage_map, counts)
                 try:
                     _recalc_bid_team_progress(cur2, int(g_id))
                 except Exception:
@@ -5467,7 +5710,17 @@ def top_admin_overview():
                 current_index = default_stages.index(stage_key)
             else:
                 current_index = 0
-            stage_progress_map, stage_counts = _compute_stage_stats_for_bid(int(r.get('g_id') or 0))
+            try:
+                gid = int(r.get('g_id') or 0)
+            except Exception:
+                gid = 0
+            if gid and gid in stage_map_by_gid:
+                stage_progress_map = stage_map_by_gid.get(gid, {k: 0 for k in default_stages})
+                stage_counts = stage_counts_by_gid.get(gid, {k: {'total': 0, 'completed': 0} for k in default_stages})
+            elif gid:
+                stage_progress_map, stage_counts = _compute_stage_progress_for_timeline(cur, gid, default_stages)
+            else:
+                stage_progress_map, stage_counts = ({k: 0 for k in default_stages}, {k: {'total': 0, 'completed': 0} for k in default_stages})
             try:
                 if not any(int(stage_progress_map.get(k, 0) or 0) > 0 for k in default_stages):
                     gid = int(r.get('g_id') or 0)
@@ -11506,6 +11759,11 @@ def manager_dashboard():
                 max_total=None,
                 include_closed=True,
             )
+            try:
+                timeline_gids = [int(rr.get('g_id')) for rr in (go_rows or []) if rr.get('g_id')]
+            except Exception:
+                timeline_gids = []
+            stage_map_by_gid, stage_counts_by_gid = _bid_timeline_progress_maps(cur, timeline_gids, default_stages)
             # Ensure stored team progress exists for these bids.
             try:
                 for rr in (go_rows or []):
@@ -11523,6 +11781,99 @@ def manager_dashboard():
                 cur2 = None
                 try:
                     cur2 = mysql.connection.cursor(DictCursor)
+                    def _merge_meta(stage_map_local, counts_local):
+                        try:
+                            _ensure_bid_assign_meta_table()
+                            cur2.execute("SELECT data FROM bid_assign_meta WHERE g_id=%s", (int(g_id),))
+                            row = cur2.fetchone() or {}
+                            meta = {}
+                            try:
+                                meta = json.loads(row.get('data') or "{}")
+                            except Exception:
+                                meta = {}
+                            checklist = meta.get('checklist') if isinstance(meta, dict) else None
+                            if isinstance(checklist, list) and checklist:
+                                meta_buckets = {k: [] for k in default_stages}
+                                for item in checklist:
+                                    if not isinstance(item, dict):
+                                        continue
+                                    stage = _normalize_stage_key(
+                                        item.get('dept') or item.get('stage') or item.get('department') or item.get('team') or ''
+                                    )
+                                    if not stage or stage not in meta_buckets:
+                                        continue
+                                    st = (item.get('status') or '').strip().lower()
+                                    pct = item.get('progress_pct')
+                                    if pct is None:
+                                        pct = 100 if st in ('completed', 'submitted') else 50 if st in ('in_progress', 'in progress') else 0
+                                    try:
+                                        pct = max(0, min(100, int(pct)))
+                                    except Exception:
+                                        pct = 0
+                                    meta_buckets[stage].append(pct)
+                                def _avg(lst):
+                                    return int(round(sum(lst) / len(lst))) if lst else 0
+                                for stage_key, vals in meta_buckets.items():
+                                    if vals and (counts_local.get(stage_key, {}).get('total', 0) == 0 or _avg(vals) > stage_map_local.get(stage_key, 0)):
+                                        stage_map_local[stage_key] = _avg(vals)
+                                        counts_local[stage_key]['total'] = len(vals)
+                                        counts_local[stage_key]['completed'] = len([v for v in vals if v >= 100])
+                        except Exception:
+                            pass
+                        return stage_map_local, counts_local
+                    def _merge_checklists(stage_map_local, counts_local):
+                        try:
+                            try:
+                                cur2.execute(
+                                    """
+                                    SELECT bc.progress_pct, bc.status, COALESCE(bc.stage, bc.department, u.role) AS stage_source
+                                    FROM bid_checklists bc
+                                    LEFT JOIN users u ON bc.created_by = u.id
+                                    WHERE bc.g_id = %s
+                                    """,
+                                    (g_id,),
+                                )
+                            except Exception as e:
+                                if "Unknown column 'department'" in str(e):
+                                    cur2.execute(
+                                        """
+                                        SELECT bc.progress_pct, bc.status, COALESCE(bc.stage, u.role) AS stage_source
+                                        FROM bid_checklists bc
+                                        LEFT JOIN users u ON bc.created_by = u.id
+                                        WHERE bc.g_id = %s
+                                        """,
+                                        (g_id,),
+                                    )
+                                else:
+                                    raise
+                            rows_local = cur2.fetchall() or []
+                            buckets_local = {k: [] for k in default_stages}
+                            counts_local = {k: dict(counts_local.get(k, {'total': 0, 'completed': 0})) for k in default_stages}
+                            for r in rows_local:
+                                stage = _normalize_stage_key(r.get('stage_source'))
+                                if not stage or stage not in buckets_local:
+                                    continue
+                                pct = r.get('progress_pct')
+                                if pct is None:
+                                    st = (r.get('status') or '').strip().lower()
+                                    pct = 100 if st in ('completed', 'submitted') else 50 if st in ('in_progress', 'in progress') else 0
+                                try:
+                                    pct = max(0, min(100, int(pct)))
+                                except Exception:
+                                    pct = 0
+                                buckets_local[stage].append(pct)
+                                counts_local[stage]['total'] += 1
+                                st = (r.get('status') or '').strip().lower()
+                                if pct >= 100 or st in ('completed', 'submitted'):
+                                    counts_local[stage]['completed'] += 1
+                            def _avg(lst):
+                                return int(round(sum(lst) / len(lst))) if lst else 0
+                            for k in default_stages:
+                                if buckets_local[k]:
+                                    stage_map_local[k] = max(int(stage_map_local.get(k, 0) or 0), _avg(buckets_local[k]))
+                            return stage_map_local, counts_local
+                        except Exception:
+                            return stage_map_local, counts_local
                     try:
                         _ensure_bid_team_progress_table(cur2)
                         cur2.execute(
@@ -11546,6 +11897,8 @@ def manager_dashboard():
                             for k in default_stages:
                                 stage_map.setdefault(k, 0)
                                 counts.setdefault(k, {'total': 0, 'completed': 0})
+                            stage_map, counts = _merge_checklists(stage_map, counts)
+                            stage_map, counts = _merge_meta(stage_map, counts)
                             has_signal = any((counts.get(k, {}).get('total', 0) or 0) > 0 for k in default_stages) or any(
                                 int(stage_map.get(k, 0) or 0) > 0 for k in default_stages
                             )
@@ -11553,15 +11906,29 @@ def manager_dashboard():
                                 return stage_map, counts
                     except Exception:
                         pass
-                    cur2.execute(
-                        """
-                        SELECT bc.progress_pct, bc.status, COALESCE(bc.stage, bc.department, u.role) AS stage_source
-                        FROM bid_checklists bc
-                        LEFT JOIN users u ON bc.created_by = u.id
-                        WHERE bc.g_id = %s
-                        """,
-                        (g_id,),
-                    )
+                    try:
+                        cur2.execute(
+                            """
+                            SELECT bc.progress_pct, bc.status, COALESCE(bc.stage, bc.department, u.role) AS stage_source
+                            FROM bid_checklists bc
+                            LEFT JOIN users u ON bc.created_by = u.id
+                            WHERE bc.g_id = %s
+                            """,
+                            (g_id,),
+                        )
+                    except Exception as e:
+                        if "Unknown column 'department'" in str(e):
+                            cur2.execute(
+                                """
+                                SELECT bc.progress_pct, bc.status, COALESCE(bc.stage, u.role) AS stage_source
+                                FROM bid_checklists bc
+                                LEFT JOIN users u ON bc.created_by = u.id
+                                WHERE bc.g_id = %s
+                                """,
+                                (g_id,),
+                            )
+                        else:
+                            raise
                     rows = cur2.fetchall() or []
                     role_to_stage = {
                         'business dev': 'business',
@@ -11623,43 +11990,11 @@ def manager_dashboard():
                         st = (r.get('status') or '').strip().lower()
                         if pct >= 100 or st in ('completed', 'submitted'):
                             counts[stage]['completed'] += 1
-                    # Merge bid_assign_meta checklist when tasks are missing or 0%.
-                    try:
-                        _ensure_bid_assign_meta_table()
-                        cur2.execute("SELECT data FROM bid_assign_meta WHERE g_id=%s", (int(g_id),))
-                        row = cur2.fetchone() or {}
-                        meta = {}
-                        try:
-                            meta = json.loads(row.get('data') or "{}")
-                        except Exception:
-                            meta = {}
-                        checklist = meta.get('checklist') if isinstance(meta, dict) else None
-                        if isinstance(checklist, list) and checklist:
-                            meta_buckets = {k: [] for k in default_stages}
-                            for item in checklist:
-                                if not isinstance(item, dict):
-                                    continue
-                                stage = _normalize_stage_key(item.get('dept') or item.get('stage') or '')
-                                if not stage or stage not in meta_buckets:
-                                    continue
-                                st = (item.get('status') or '').strip().lower()
-                                pct = 100 if st in ('completed', 'submitted') else 50 if st in ('in_progress', 'in progress') else 0
-                                meta_buckets[stage].append(pct)
-                            def _avg(lst):
-                                return int(round(sum(lst) / len(lst))) if lst else 0
-                            base_avgs = {k: _avg(v) for k, v in buckets.items()}
-                            for stage_key, vals in meta_buckets.items():
-                                if vals and (counts[stage_key]['total'] == 0 or base_avgs.get(stage_key, 0) == 0):
-                                    buckets[stage_key] = vals
-                                    counts[stage_key]['total'] = len(vals)
-                                    counts[stage_key]['completed'] = len([v for v in vals if v >= 100])
-                    except Exception:
-                        pass
-
                     def avg(lst):
                         return int(round(sum(lst) / len(lst))) if lst else 0
-
                     stage_map = {k: avg(v) for k, v in buckets.items()}
+                    stage_map, counts = _merge_checklists(stage_map, counts)
+                    stage_map, counts = _merge_meta(stage_map, counts)
                     try:
                         _recalc_bid_team_progress(cur2, int(g_id))
                     except Exception:
@@ -11681,7 +12016,17 @@ def manager_dashboard():
                     current_index = default_stages.index(stage_key)
                 else:
                     current_index = 0
-                stage_progress_map, stage_counts = _compute_stage_stats_for_bid(int(r.get('g_id') or 0))
+                try:
+                    gid = int(r.get('g_id') or 0)
+                except Exception:
+                    gid = 0
+                if gid and gid in stage_map_by_gid:
+                    stage_progress_map = stage_map_by_gid.get(gid, {k: 0 for k in default_stages})
+                    stage_counts = stage_counts_by_gid.get(gid, {k: {'total': 0, 'completed': 0} for k in default_stages})
+                elif gid:
+                    stage_progress_map, stage_counts = _compute_stage_progress_for_timeline(cur, gid, default_stages)
+                else:
+                    stage_progress_map, stage_counts = ({k: 0 for k in default_stages}, {k: {'total': 0, 'completed': 0} for k in default_stages})
                 # Hard fallback: compute directly from bid_checklists / bid_assign_meta if still all zero.
                 try:
                     if not any(int(stage_progress_map.get(k, 0) or 0) > 0 for k in default_stages):
