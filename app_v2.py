@@ -25459,7 +25459,8 @@ def site_manager_assigned_tasks():
 @login_required
 def team_lead_assigned_tasks(team):
     team_key = (team or '').strip().lower()
-    if team_key not in ['business', 'design', 'operations', 'engineer']:
+    allowed_team_keys = ['business', 'design', 'operations', 'engineer', 'engineering_team', 'procurement_team', 'accounts_finance']
+    if team_key not in allowed_team_keys:
         return render_template('access_denied.html', message="Invalid team."), 400
     role_norm = (get_user_role() or '').strip().lower().replace('_', ' ')
     if role_norm in ['manager', 'topleveladmin', 'itadmin'] or getattr(current_user, 'is_admin', False):
@@ -25487,8 +25488,11 @@ def team_lead_assigned_tasks(team):
                     cur.close()
                 except Exception:
                     pass
-        if _team_key_from_access(dept_key) == team_key:
+        mapped_key = _team_key_from_access(dept_key)
+        if mapped_key == team_key:
             return _render_team_lead_assigned_tasks(team_key, 'assigned_tasks.html', 'Team Lead - Assigned Tasks')
+        if mapped_key and mapped_key in allowed_team_keys:
+            return redirect(url_for('team_lead_assigned_tasks', team=mapped_key))
     try:
         access_rows = _fetch_user_access_rows(int(current_user.id))
     except Exception:
@@ -25501,6 +25505,8 @@ def team_lead_assigned_tasks(team):
         if mapped == team_key:
             allowed = True
             break
+        if mapped and mapped in allowed_team_keys:
+            return redirect(url_for('team_lead_assigned_tasks', team=mapped))
     if not allowed:
         return render_template('access_denied.html', message="You don't have access to Team Lead Assigned Tasks."), 403
     return _render_team_lead_assigned_tasks(team_key, 'assigned_tasks.html', 'Team Lead - Assigned Tasks')
