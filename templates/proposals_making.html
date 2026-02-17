@@ -248,6 +248,54 @@
             color: #111827;
         }
 
+        /* Light button styling across the proposals making page */
+        body.proposals-making button {
+            background-color: #f8fafc;
+            color: #0f172a;
+            border: 1px solid #e2e8f0;
+        }
+
+        body.proposals-making button:hover {
+            background-color: #eef2f7;
+        }
+
+        body.proposals-making .btn-primary,
+        body.proposals-making .btn-secondary {
+            background: #e6f7ee;
+            color: #0f172a;
+            border: 1px solid #bfe3d1;
+            box-shadow: none;
+        }
+
+        body.proposals-making .btn-secondary {
+            background: #f2ecff;
+            border-color: #ddd3ff;
+        }
+
+        body.proposals-making button[class*='emerald'] {
+            background-color: #ecfdf5 !important;
+            color: #065f46 !important;
+            border-color: #a7f3d0 !important;
+        }
+
+        body.proposals-making button[class*='purple'] {
+            background-color: #f5f3ff !important;
+            color: #5b21b6 !important;
+            border-color: #ddd6fe !important;
+        }
+
+        body.proposals-making button[class*='blue'] {
+            background-color: #eff6ff !important;
+            color: #1e40af !important;
+            border-color: #bfdbfe !important;
+        }
+
+        body.proposals-making button[class*='red'] {
+            background-color: #fef2f2 !important;
+            color: #b91c1c !important;
+            border-color: #fecaca !important;
+        }
+
         #finalProposalFrame {
             background: #f3f4f6;
         }
@@ -308,7 +356,7 @@
     <link rel="stylesheet" href="{{ url_for('static', filename='light_theme_overrides.css') }}">
 </head>
 
-<body class="bg-gradient-to-br from-gray-50 via-gray-100 to-gray-50 text-gray-800 h-screen overflow-hidden">
+<body class="proposals-making bg-gradient-to-br from-gray-50 via-gray-100 to-gray-50 text-gray-800 h-screen overflow-hidden">
     <div class="flex h-full overflow-hidden">
         <!-- Section navigator - Fixed Left Sidebar -->
         <aside class="hidden lg:flex lg:w-80.2 bg-white border-r border-gray-200 flex-col shadow-sm h-full">

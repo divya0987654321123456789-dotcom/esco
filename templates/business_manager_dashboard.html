@@ -260,10 +260,13 @@
                     </div>
                     <div class="space-y-5">
                         {% for item in won_projects %}
-                        <div class="rounded-xl border border-[var(--border-color)] bg-[var(--bg-tertiary)] p-5" data-project-id="{{ item.project_id }}" data-stages='{{ item.stages|tojson|safe }}' data-current-stage-id="{{ item.current_stage_id }}">
+                        <div class="rounded-xl border border-[var(--border-color)] bg-[var(--bg-tertiary)] p-5" data-project-id="{{ item.project_id }}" data-g-id="{{ item.g_id }}" data-project-manager-id="{{ item.pm_user_id or '' }}" data-stages='{{ item.stages|tojson|safe }}' data-current-stage-id="{{ item.current_stage_id }}">
                             <div class="flex flex-wrap items-center justify-between gap-3">
                                 <h4 class="text-base font-semibold">{{ item.b_name }}</h4>
                                 <div class="flex items-center gap-3">
+                                    <span class="px-3 py-1 text-xs font-semibold rounded-full border border-[var(--border-color)]" style="background: color-mix(in srgb, var(--accent-cyan) 10%, transparent); color: var(--accent-cyan);">
+                                        PM: {{ item.pm_name or item.pm_email or 'Unassigned' }}
+                                    </span>
                                     <span class="px-3 py-1 text-xs font-semibold rounded-full border border-[var(--border-color)]" style="background: color-mix(in srgb, var(--company-primary) 12%, transparent); color: var(--company-primary);">
                                         {{ item.company or 'Company' }}
                                     </span>
@@ -316,6 +319,10 @@
                 <button type="button" class="text-sm font-semibold text-[var(--text-secondary)]" data-modal-close>Close</button>
             </div>
             <div class="p-5 space-y-5 text-sm">
+                <div class="rounded-lg border border-[var(--border-color)] bg-[var(--bg-secondary)] p-4">
+                    <h5 class="text-sm font-semibold mb-1">Project Manager</h5>
+                    <p class="text-xs text-[var(--text-secondary)]">Auto-assigned. Only the assigned project manager can edit the project timeline.</p>
+                </div>
                 <div class="rounded-lg border border-[var(--border-color)] bg-[var(--bg-secondary)] p-4">
                     <h5 class="text-sm font-semibold mb-3">Current Stage</h5>
                     <div class="flex flex-col sm:flex-row gap-3 items-start sm:items-center">
@@ -587,6 +594,7 @@
             const addBtn = document.getElementById('projectAddStageBtn');
             const listEl = document.getElementById('projectStagesList');
             let activeProjectId = null;
+            let activeProjectGid = null;
 
             function postProjectTimeline(url, payload) {
                 return fetch(url, {
@@ -719,6 +727,8 @@
                     const card = btn.closest('[data-project-id]');
                     if (!card) return;
                     activeProjectId = card.getAttribute('data-project-id');
+                    activeProjectGid = card.getAttribute('data-g-id');
+            const pmId = card.getAttribute('data-project-manager-id') || '';
                     const stagesRaw = card.getAttribute('data-stages') || '[]';
                     const currentStageId = card.getAttribute('data-current-stage-id');
                     let stages = [];
@@ -735,6 +745,7 @@
                     openModal();
                 });
             });
+
 
             currentBtn.addEventListener('click', async () => {
                 const stageId = currentSelect.value;

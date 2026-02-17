@@ -134,7 +134,11 @@
                         {% endif %}
                         {% set _is_manager = _role_norm in ['manager','project manager','business manager','design manager','operation manager','operations manager','site manager'] %}
                         {% set _is_teamlead = _role_norm in ['teamlead','team lead','business dev','design','operations','site engineer','engineering'] %}
-                        {% set _assigned_ep = 'manager_assigned_tasks' if _is_manager else ('team_lead_assigned_tasks' if _is_teamlead else 'employee_dashboard_member') %}
+                        {% if _role_norm == 'project manager' %}
+                            {% set _assigned_ep = 'project_manager_dashboard' %}
+                        {% else %}
+                            {% set _assigned_ep = 'manager_assigned_tasks' if _is_manager else ('team_lead_assigned_tasks' if _is_teamlead else 'employee_dashboard_member') %}
+                        {% endif %}
                         {% set _approvals_ep = 'manager_approvals' if _is_manager else ('team_lead_approvals' if _is_teamlead else '') %}
                         {% if _role_norm == 'business manager' %}{% set _approvals_ep = 'business_manager_approvals' %}{% endif %}
 
@@ -146,7 +150,15 @@
                         </li>
                         {% endif %}
 
-                        {% if user_permissions.get('assigned_tasks', False) or is_admin %}
+                        {% if (_role_norm == 'project manager') and (user_permissions.get('project_manager_dashboard', False) or is_admin) %}
+                        <li>
+                            <a href="{{ url_for('project_manager_dashboard') }}" class="nav-link flex items-center p-3 rounded-lg hover:bg-gray-100 text-[15px]">
+                                <i class="fas fa-clipboard-list mr-3"></i>Project Manager
+                            </a>
+                        </li>
+                        {% endif %}
+
+                        {% if (user_permissions.get('assigned_tasks', False) or is_admin) and _role_norm != 'project manager' %}
                         <li>
                             {% if employee_dashboard_url is defined and employee_dashboard_url %}
                             <a href="{{ employee_dashboard_url }}" class="nav-link flex items-center p-3 rounded-lg hover:bg-gray-100 text-[15px]">

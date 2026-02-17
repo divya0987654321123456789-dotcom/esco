@@ -84,6 +84,61 @@
       border: 1px solid #e2e8f0;
       background: #f8fafc;
     }
+    .bid-timeline-compact .bid-timeline-line {
+      position: relative;
+      padding-top: 10px;
+    }
+    .bid-timeline-compact .bid-timeline-line::before {
+      content: "";
+      position: absolute;
+      top: 18px;
+      left: 0;
+      right: 0;
+      height: 6px;
+      background: #f1f5f9;
+      border: 1px solid #e2e8f0;
+      border-radius: 9999px;
+    }
+    .bid-timeline-compact .bid-timeline-fill {
+      position: absolute;
+      top: 18px;
+      left: 0;
+      height: 6px;
+      background: #10b981;
+      border-radius: 9999px;
+      transition: width 0.35s ease;
+      z-index: 0;
+    }
+    .bid-timeline-compact .bid-timeline-dot {
+      width: 26px;
+      height: 26px;
+      border-radius: 9999px;
+      border: 1px solid #e2e8f0;
+      background: #fff;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      margin: 0 auto;
+      position: relative;
+      z-index: 1;
+    }
+    .bid-timeline-compact .bid-timeline-dot span {
+      width: 9px;
+      height: 9px;
+      border-radius: 9999px;
+      background: #cbd5e1;
+      display: block;
+    }
+    .bid-timeline-compact .bid-timeline-dot.is-active {
+      background: #ecfdf5;
+      border-color: #a7f3d0;
+    }
+    .bid-timeline-compact .bid-timeline-dot.is-active span {
+      background: #10b981;
+    }
+    .bid-timeline-compact .bid-timeline-stage {
+      min-width: 72px;
+    }
   </style>
 
     
@@ -220,32 +275,44 @@
     </div>
     <div class="p-5 space-y-5" id="bidTimelineList">
       {% for item in bid_timeline_items %}
-      <div class="rounded-xl border border-gray-200 bg-white p-5 {{ 'hidden' if loop.index > 3 else '' }}" data-bid-timeline-item data-bid-id="{{ item.g_id }}">
-        <div class="flex flex-wrap items-center justify-between gap-3">
+      <div class="rounded-xl border border-gray-200 bg-white p-5 shadow-sm hover:shadow-md transition group border-l-4 border-l-emerald-300 {{ 'hidden' if loop.index > 3 else '' }}" data-bid-timeline-item data-bid-id="{{ item.g_id }}">
+        {% set ns = namespace(total=0, count=0) %}
+        {% for st in item.stages %}
+          {% if st.key not in ['analyzer','handover'] %}
+            {% set ns.total = ns.total + (st.progress or 0) %}
+            {% set ns.count = ns.count + 1 %}
+          {% endif %}
+        {% endfor %}
+        {% set overall = (ns.total / ns.count) if ns.count > 0 else 0 %}
+        <div class="flex flex-wrap items-start justify-between gap-3">
           <div>
             <h4 class="text-base font-semibold">{{ item.b_name }}</h4>
             <div class="text-xs text-gray-500 mt-1">{{ item.company or 'Company' }}</div>
           </div>
           <div class="flex items-center gap-2">
+            <span class="status-chip" data-overall-pct>Overall {{ overall|round(0) }}%</span>
             <span class="px-3 py-1 text-xs font-semibold rounded-full border border-gray-200 bg-gray-50 text-gray-700">
               Due: {{ item.due_date or 'TBD' }}
             </span>
           </div>
         </div>
-        <div class="mt-4 flex flex-wrap items-end gap-4">
-          {% for st in item.stages %}
-          {% if st.key not in ['analyzer','handover'] %}
-          <div class="flex-1 min-w-[170px] group" data-stage-key="{{ st.key }}">
-            <div class="flex items-center justify-between text-[11px] font-semibold text-gray-600 mb-1">
-              <span>{{ st.name }}</span>
-              <span data-stage-pct>{{ st.progress }}%</span>
-            </div>
-            <div class="h-2 rounded-full bg-gray-100 border border-gray-200 overflow-hidden group-hover:ring-2 group-hover:ring-emerald-100 transition">
-              <div class="h-full bg-emerald-500" style="width: {{ st.progress }}%;" data-stage-bar></div>
+        <div class="bid-timeline-compact mt-4">
+          <div class="bid-timeline-line">
+            <div class="bid-timeline-fill" style="width: {{ overall|round(0) }}%;"></div>
+            <div class="relative flex justify-between gap-2">
+              {% for st in item.stages %}
+              {% if st.key not in ['analyzer','handover'] %}
+              <div class="text-center bid-timeline-stage" data-stage-key="{{ st.key }}">
+                <div class="bid-timeline-dot {% if st.progress|default(0) > 0 %}is-active{% endif %}">
+                  <span></span>
+                </div>
+                <p class="mt-2 text-[10px] font-semibold text-gray-600 truncate">{{ st.name }}</p>
+                <p class="text-[10px] text-gray-500" data-stage-pct>{{ st.progress }}%</p>
+              </div>
+              {% endif %}
+              {% endfor %}
             </div>
           </div>
-          {% endif %}
-          {% endfor %}
         </div>
       </div>
       {% else %}
@@ -268,24 +335,30 @@
       <div class="font-semibold">Project Timeline</div>
       <div class="text-xs text-gray-500 mt-0.5">Won bids moved into delivery tracking</div>
     </div>
+    {% set _project_stage_label_map = {
+      'project kickoff': 'Engineering Team',
+      'planning': 'Procurement Team',
+      'execution': 'Commissioning Manager',
+      'commissioning': 'Accounting Manager'
+    } %}
     <div class="p-5 space-y-5" id="projectTimelineList">
       {% for item in project_timeline_items %}
       <div class="rounded-xl border border-gray-200 bg-white p-5 {{ 'hidden' if loop.index > 3 else '' }}" data-project-timeline-item
            data-project-id="{{ item.project_id }}"
+           data-g-id="{{ item.g_id }}"
+           data-project-manager-id="{{ item.pm_user_id or '' }}"
            data-stages='{{ item.stages|tojson|safe }}'
            data-current-stage-id="{{ item.stages[item.current_stage_index].id if item.stages and item.current_stage_index is not none else '' }}">
         <div class="flex flex-wrap items-center justify-between gap-3">
           <h4 class="text-base font-semibold">{{ item.b_name }}</h4>
           <div class="flex items-center gap-3">
             <span class="px-3 py-1 text-xs font-semibold rounded-full border border-gray-200 bg-gray-50 text-gray-700">
+              PM: {{ item.pm_name or item.pm_email or 'Unassigned' }}
+            </span>
+            <span class="px-3 py-1 text-xs font-semibold rounded-full border border-gray-200 bg-gray-50 text-gray-700">
               {{ item.company or 'Company' }}
             </span>
-            {% if can_edit_project_timeline %}
-            <button type="button"
-                    class="project-actions-toggle text-xs font-semibold text-emerald-700 hover:text-emerald-800">
-              Manage
-            </button>
-            {% endif %}
+            {# Manage button removed per request #}
           </div>
         </div>
         <div class="relative mt-6">
@@ -298,7 +371,7 @@
               <div class="relative w-8 h-8 rounded-full mx-auto border border-gray-200 {% if is_active %}bg-gray-900/10{% else %}bg-white{% endif %}">
                 <div class="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-3 h-3 {% if is_active %}bg-gray-900{% else %}bg-gray-300{% endif %} rounded-full"></div>
               </div>
-              <p class="mt-2 text-[11px] font-semibold text-gray-600">{{ st.name }}</p>
+              <p class="mt-2 text-[11px] font-semibold text-gray-600">{{ _project_stage_label_map.get((st.name or '')|lower, st.name) }}</p>
               <p class="text-[10px] text-gray-500">{{ st.progress }}%</p>
             </div>
             {% endfor %}
@@ -331,6 +404,10 @@
         <button type="button" class="text-sm font-semibold text-gray-600 hover:text-gray-800" data-modal-close>Close</button>
       </div>
       <div class="p-5 space-y-5 text-sm">
+        <div class="rounded-lg border border-blue-100 bg-blue-50/40 p-4 transition hover:shadow-sm">
+          <h5 class="text-sm font-semibold mb-1">Project Manager</h5>
+          <p class="text-xs text-gray-600">Auto-assigned. Only the assigned project manager can edit the project timeline.</p>
+        </div>
         <div class="rounded-lg border border-emerald-100 bg-emerald-50/40 p-4 transition hover:shadow-sm">
           <h5 class="text-sm font-semibold mb-3">Current Stage</h5>
           <div class="flex flex-col sm:flex-row gap-3 items-start sm:items-center">
@@ -710,6 +787,8 @@
               const gid = card.getAttribute('data-bid-id');
               const map = items[gid] || items[String(gid)] || {};
               if (!map || !Object.keys(map).length) return;
+              let total = 0;
+              let count = 0;
               card.querySelectorAll('[data-stage-key]').forEach(row => {
                 const key = row.getAttribute('data-stage-key');
                 if (!key) return;
@@ -718,7 +797,14 @@
                 const txt = row.querySelector('[data-stage-pct]');
                 if (bar) bar.style.width = `${pct}%`;
                 if (txt) txt.textContent = `${pct}%`;
+                total += pct;
+                count += 1;
               });
+              const overall = count ? Math.round(total / count) : 0;
+              const overallEl = card.querySelector('[data-overall-pct]');
+              if (overallEl) overallEl.textContent = `Overall ${overall}%`;
+              const fill = card.querySelector('.bid-timeline-fill');
+              if (fill) fill.style.width = `${overall}%`;
             });
           })
           .catch(() => {})
@@ -749,6 +835,7 @@
       const addBtn = document.getElementById('projectAddStageBtn');
       const listEl = document.getElementById('projectStagesList');
       let activeProjectId = null;
+      let activeProjectGid = null;
 
       function postProjectTimeline(url, payload) {
         return fetch(url, {
@@ -778,10 +865,22 @@
           .replaceAll("'", '&#039;');
       }
 
+      const PROJECT_STAGE_LABELS = {
+        'project kickoff': 'Engineering Team',
+        'planning': 'Procurement Team',
+        'execution': 'Commissioning Manager',
+        'commissioning': 'Accounting Manager'
+      };
+
+      function formatProjectStageName(name) {
+        const key = String(name || '').trim().toLowerCase();
+        return PROJECT_STAGE_LABELS[key] || name || '';
+      }
+
       function renderStages(stages, currentStageId) {
         currentSelect.innerHTML = stages.map((st) => {
           const selected = String(st.id) === String(currentStageId) ? 'selected' : '';
-          return `<option value="${escapeHtml(st.id)}" ${selected}>${escapeHtml(st.name)}</option>`;
+          return `<option value="${escapeHtml(st.id)}" ${selected}>${escapeHtml(formatProjectStageName(st.name))}</option>`;
         }).join('');
 
         listEl.innerHTML = stages.map((st) => {
@@ -789,7 +888,7 @@
             <div class="grid grid-cols-[1fr_100px_110px_160px] gap-2 items-center border border-gray-200 rounded-md p-2 bg-white transition hover:shadow-sm" data-stage-id="${escapeHtml(st.id)}">
               <div class="flex items-center gap-2">
                 <span class="project-stage-handle cursor-move text-xs px-2 py-1 rounded bg-slate-50 border border-slate-200 text-slate-600" draggable="true">Drag</span>
-                <input type="text" class="project-stage-name w-full rounded-md border px-2 py-1 bg-white border-gray-200" value="${escapeHtml(st.name)}">
+                <input type="text" class="project-stage-name w-full rounded-md border px-2 py-1 bg-white border-gray-200" value="${escapeHtml(formatProjectStageName(st.name))}">
               </div>
               <input type="number" class="project-stage-order w-full rounded-md border px-2 py-1 bg-white border-gray-200" value="${escapeHtml(st.order)}" min="0">
               <input type="number" class="project-stage-progress w-full rounded-md border px-2 py-1 bg-white border-gray-200" value="${escapeHtml(st.progress)}" min="0" max="100">
@@ -879,6 +978,8 @@
           const card = btn.closest('[data-project-id]');
           if (!card) return;
           activeProjectId = card.getAttribute('data-project-id');
+          activeProjectGid = card.getAttribute('data-g-id');
+          const pmId = card.getAttribute('data-project-manager-id') || '';
           const stagesRaw = card.getAttribute('data-stages') || '[]';
           const currentStageId = card.getAttribute('data-current-stage-id');
           let stages = [];
@@ -891,6 +992,7 @@
           openModal();
         });
       });
+
 
       currentBtn.addEventListener('click', async () => {
         const stageId = currentSelect.value;

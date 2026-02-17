@@ -861,11 +861,112 @@ def _is_closed_bid_status(*values) -> bool:
     return False
 
 
+def _is_won_bid_status(*values) -> bool:
+    try:
+        joined = " ".join([str(v or '') for v in values]).lower()
+    except Exception:
+        joined = ""
+    return any(k in joined for k in ['won', 'award', 'awarded', 'win'])
+
+
+def _ensure_project_manager_assignments_table(cur) -> None:
+    try:
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS project_manager_assignments (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                project_id INT NOT NULL,
+                g_id INT NULL,
+                manager_user_id INT NOT NULL,
+                assigned_by_user_id INT NULL,
+                assigned_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE KEY uniq_project_manager (project_id),
+                INDEX idx_manager_user (manager_user_id),
+                INDEX idx_project_gid (g_id),
+                FOREIGN KEY (manager_user_id) REFERENCES users(id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            """
+        )
+    except Exception:
+        pass
+
+
+def _fetch_project_manager_users(cur, active_company_name: str | None = None) -> list[dict]:
+    try:
+        where = ["is_active=1", "LOWER(COALESCE(role,'')) LIKE '%%manager%%'"]
+        params = []
+        if active_company_name:
+            where.append("LOWER(COALESCE(company,'')) = LOWER(%s)")
+            params.append(active_company_name)
+        where_sql = " AND ".join(where)
+        cur.execute(
+            f"""
+            SELECT id, email, full_name, role, company
+            FROM users
+            WHERE {where_sql}
+            ORDER BY full_name ASC, email ASC
+            """,
+            tuple(params),
+        )
+        return cur.fetchall() or []
+    except Exception:
+        return []
+
+
+def _get_project_manager_map(cur, project_ids: list[int]) -> dict[int, dict]:
+    _ensure_project_manager_assignments_table(cur)
+    if not project_ids:
+        return {}
+    try:
+        placeholders = ",".join(["%s"] * len(project_ids))
+        cur.execute(
+            f"""
+            SELECT pma.project_id, pma.manager_user_id, u.full_name, u.email
+            FROM project_manager_assignments pma
+            LEFT JOIN users u ON u.id = pma.manager_user_id
+            WHERE pma.project_id IN ({placeholders})
+            """,
+            tuple(project_ids),
+        )
+        rows = cur.fetchall() or []
+        out = {}
+        for r in rows:
+            pid = r.get('project_id')
+            if pid is None:
+                continue
+            out[int(pid)] = {
+                'user_id': r.get('manager_user_id'),
+                'name': r.get('full_name') or '',
+                'email': r.get('email') or '',
+            }
+        return out
+    except Exception:
+        return {}
+
+
+def _is_project_manager_for_project(user_id: int, project_id: int) -> bool:
+    try:
+        cur = mysql.connection.cursor(DictCursor)
+        _ensure_project_manager_assignments_table(cur)
+        cur.execute(
+            "SELECT 1 FROM project_manager_assignments WHERE project_id=%s AND manager_user_id=%s LIMIT 1",
+            (int(project_id), int(user_id)),
+        )
+        return cur.fetchone() is not None
+    except Exception:
+        return False
+    finally:
+        try:
+            cur.close()
+        except Exception:
+            pass
+
+
 def _basic_bid_timeline_rows(cur, company_sql_clause: str, company_params: tuple, limit: int = 200) -> list[dict]:
     try:
         cur.execute(
             f"""
-            SELECT gb.g_id, gb.b_name, gb.company, gb.state, gb.due_date
+            SELECT gb.g_id, gb.b_name, gb.company, gb.state, gb.due_date, gb.submission_status, gb.submission_reason
             FROM go_bids gb
             WHERE 1=1
             {company_sql_clause}
@@ -3176,6 +3277,7 @@ DEFAULT_MODULES = [
     # NOTE: key kept as bid_analyzer for backward-compatible permissions
     {'key': 'bid_analyzer', 'name': 'Bid Dashboard', 'icon': 'chart-line', 'color': 'purple'},
     {'key': 'manager_dashboard', 'name': 'Manager Dashboards', 'icon': 'briefcase', 'color': 'teal'},
+    {'key': 'project_manager_dashboard', 'name': 'Project Manager Dashboard', 'icon': 'clipboard-list', 'color': 'teal'},
     {'key': 'team_lead_dashboard', 'name': 'Team Lead Dashboard', 'icon': 'users', 'color': 'teal'},
     {'key': 'employee_dashboard', 'name': 'Employee Dashboard', 'icon': 'user', 'color': 'teal'},
     {'key': 'assigned_tasks', 'name': 'Assigned Tasks', 'icon': 'list-check', 'color': 'teal'},
@@ -3304,6 +3406,20 @@ DEFAULT_ROLE_PERMISSIONS = {
         'can_manage_users': False,
         'can_manage_permissions': False
     },
+    'project_manager': {
+        'level': 3,
+        'modules': ['company_dashboards', 'project_manager_dashboard', 'assigned_tasks', 'approvals', 'bid_timeline'],
+        'actions': ['manage_timeline', 'approve_item', 'reject_item', 'revert_item', 'escalate_item'],
+        'can_manage_users': False,
+        'can_manage_permissions': False
+    },
+    'project manager': {
+        'level': 3,
+        'modules': ['company_dashboards', 'project_manager_dashboard', 'assigned_tasks', 'approvals', 'bid_timeline'],
+        'actions': ['manage_timeline', 'approve_item', 'reject_item', 'revert_item', 'escalate_item'],
+        'can_manage_users': False,
+        'can_manage_permissions': False
+    },
 
     # Level 3: Department Managers (scoped dashboards; same baseline access as Manager)
     'business_manager': {
@@ -3356,8 +3472,6 @@ DEFAULT_ROLE_PERMISSIONS = {
     # Level 5: Team Members
     'member': {'level': 5, 'modules': ['company_dashboards', 'employee_dashboard', 'assigned_tasks'], 'actions': []},
     
-    # Legacy role support
-    'supervisor': {'level': 3, 'modules': ['company_dashboards', 'bid_analyzer', 'manager_dashboard', 'team_lead_dashboard', 'employee_dashboard', 'assigned_tasks', 'team_management', 'logs'], 'actions': ['advance_stage', 'assign_bids', 'manage_timeline']},
 }
 
 def ensure_permissions_table():
@@ -4824,6 +4938,8 @@ def _normalize_role_key(role_raw: str) -> str:
     r = (role_raw or "").strip().lower()
     r = r.replace("_", " ")
     r = " ".join(r.split())
+    if r in ("projectmanager", "project manager", "project_manager"):
+        return "project manager"
     if r in ("top level admin", "topleveladmin", "top leveladmin", "top_level_admin"):
         return "topleveladmin"
     if r in ("it admin", "it administrator", "admin", "itadmin"):
@@ -5442,6 +5558,8 @@ def top_admin_overview():
                 gb.company,
                 gb.state,
                 gb.due_date,
+                gb.submission_status,
+                gb.submission_reason,
                 bi.bid_status,
                 bi.results
             FROM go_bids gb
@@ -5467,6 +5585,16 @@ def top_admin_overview():
             max_total=None,
             include_closed=True,
         )
+        go_rows = [
+            rr for rr in (go_rows or [])
+            if not _is_won_bid_status(
+                rr.get('submission_reason'),
+                rr.get('submission_status'),
+                rr.get('bid_status'),
+                rr.get('results'),
+                rr.get('state'),
+            )
+        ]
         try:
             timeline_gids = [int(rr.get('g_id')) for rr in (go_rows or []) if rr.get('g_id')]
         except Exception:
@@ -5851,9 +5979,25 @@ def top_admin_overview():
         # Hard fallback: show basic GO bids even if detailed timeline calc failed.
         try:
             fallback_rows = _basic_bid_timeline_rows(cur, company_sql_clause, company_params, limit=200)
+            fallback_rows = [
+                rr for rr in (fallback_rows or [])
+                if not _is_won_bid_status(
+                    rr.get('submission_reason'),
+                    rr.get('submission_status'),
+                    rr.get('state'),
+                )
+            ]
             bid_timeline_items = _build_basic_timeline_items(cur, fallback_rows)
             if not bid_timeline_items:
                 fallback_rows = _basic_bid_timeline_rows(cur, "", tuple(), limit=200)
+                fallback_rows = [
+                    rr for rr in (fallback_rows or [])
+                    if not _is_won_bid_status(
+                        rr.get('submission_reason'),
+                        rr.get('submission_status'),
+                        rr.get('state'),
+                    )
+                ]
                 bid_timeline_items = _build_basic_timeline_items(cur, fallback_rows)
         except Exception:
             pass
@@ -5982,6 +6126,22 @@ def top_admin_overview():
     except Exception:
         pass
 
+    project_manager_map = {}
+    project_manager_users = []
+    default_pm = None
+    try:
+        project_ids = [int(r.get('w_id')) for r in (won_rows or []) if r.get('w_id')]
+        project_manager_map = _get_project_manager_map(cur, project_ids)
+    except Exception:
+        project_manager_map = {}
+    try:
+        project_manager_users = _fetch_project_manager_users(cur, active_company_name)
+        if project_manager_users:
+            default_pm = project_manager_users[0]
+    except Exception:
+        project_manager_users = []
+        default_pm = None
+
     default_project_stages = [
         'Project Kickoff',
         'Planning',
@@ -6068,6 +6228,31 @@ def top_admin_overview():
         if len(stages) > 1:
             stage_progress = int(round((current_index / (len(stages) - 1)) * 100))
 
+        pm_info = project_manager_map.get(int(project_id)) if project_id is not None else None
+        if not pm_info and default_pm:
+            try:
+                _ensure_project_manager_assignments_table(cur)
+                cur.execute("SELECT 1 FROM project_manager_assignments WHERE project_id=%s LIMIT 1", (int(project_id),))
+                if not cur.fetchone():
+                    cur.execute(
+                        """
+                        INSERT INTO project_manager_assignments (project_id, g_id, manager_user_id, assigned_by_user_id)
+                        VALUES (%s, %s, %s, %s)
+                        """,
+                        (int(project_id), int(r.get('g_id') or 0), int(default_pm.get('id')), int(getattr(current_user, 'id', 0))),
+                    )
+                    mysql.connection.commit()
+                pm_info = {
+                    'user_id': default_pm.get('id'),
+                    'name': default_pm.get('full_name') or default_pm.get('email'),
+                    'email': default_pm.get('email'),
+                }
+            except Exception:
+                try:
+                    mysql.connection.rollback()
+                except Exception:
+                    pass
+
         project_timeline_items.append({
             'project_id': project_id,
             'g_id': r.get('g_id'),
@@ -6076,9 +6261,24 @@ def top_admin_overview():
             'current_stage_index': current_index,
             'stage_progress': stage_progress,
             'stages': stages,
+            'pm_user_id': (pm_info or {}).get('user_id'),
+            'pm_name': (pm_info or {}).get('name'),
+            'pm_email': (pm_info or {}).get('email'),
         })
 
     cur.close()
+
+    if not project_manager_users:
+        try:
+            cur = mysql.connection.cursor(DictCursor)
+            project_manager_users = _fetch_project_manager_users(cur, active_company_name)
+        except Exception:
+            project_manager_users = []
+        finally:
+            try:
+                cur.close()
+            except Exception:
+                pass
 
     return render_template(
         'top_admin_overview.html',
@@ -6104,6 +6304,7 @@ def top_admin_overview():
         company_breakdown=company_breakdown,
         bid_timeline_items=bid_timeline_items,
         project_timeline_items=project_timeline_items,
+        project_manager_users=project_manager_users,
     )
 
 
@@ -6175,6 +6376,12 @@ def top_admin_role_hierarchy():
             'desc': 'Owns team oversight, approvals, and delivery milestones.',
         },
         {
+            'level': 3,
+            'key': 'project manager',
+            'label': 'Project Manager',
+            'desc': 'Owns won-project delivery timelines and handoff tracking.',
+        },
+        {
             'level': 4,
             'key': 'teamlead',
             'label': 'Team Leads',
@@ -6197,16 +6404,19 @@ def top_admin_role_hierarchy():
 def _build_role_access_context() -> dict:
     access_roles = [
         {'key': 'manager', 'label': 'Manager', 'level': 3},
+        {'key': 'project manager', 'label': 'Project Manager', 'level': 3},
         {'key': 'teamlead', 'label': 'Team Lead', 'level': 4},
         {'key': 'member', 'label': 'Employee', 'level': 5},
     ]
     module_order = [
         'bid_analyzer',
+        'project_manager_dashboard',
         'assigned_tasks',
         'approvals',
     ]
     role_allowed_modules = {
         'manager': ['bid_analyzer', 'assigned_tasks', 'approvals'],
+        'project manager': ['project_manager_dashboard', 'assigned_tasks', 'approvals'],
         'teamlead': ['assigned_tasks', 'approvals'],
         'member': ['assigned_tasks'],
     }
@@ -6237,7 +6447,7 @@ def _build_role_access_context() -> dict:
                     u.role,
                     u.is_active,
                     u.full_name,
-                    GROUP_CONCAT(DISTINCT uca.department_key ORDER BY uca.department_key SEPARATOR ', ') AS departments
+                    GROUP_CONCAT(DISTINCT COALESCE(uca.department_key, 'all') ORDER BY COALESCE(uca.department_key, 'all') SEPARATOR ', ') AS departments
                 FROM users u
                 LEFT JOIN user_company_access uca
                   ON uca.user_id = u.id AND COALESCE(uca.is_active, TRUE)=TRUE
@@ -6253,7 +6463,7 @@ def _build_role_access_context() -> dict:
                     u.email,
                     u.role,
                     u.is_active,
-                    GROUP_CONCAT(DISTINCT uca.department_key ORDER BY uca.department_key SEPARATOR ', ') AS departments
+                    GROUP_CONCAT(DISTINCT COALESCE(uca.department_key, 'all') ORDER BY COALESCE(uca.department_key, 'all') SEPARATOR ', ') AS departments
                 FROM users u
                 LEFT JOIN user_company_access uca
                   ON uca.user_id = u.id AND COALESCE(uca.is_active, TRUE)=TRUE
@@ -6277,7 +6487,7 @@ def _build_role_access_context() -> dict:
                 FROM users
                 WHERE LOWER(COALESCE(role,'')) IN (
                     'topleveladmin','top_level_admin','top level admin',
-                    'manager','business_manager','design_manager','operation_manager','operations_manager','site_manager',
+                    'manager','project manager','project_manager','business_manager','design_manager','operation_manager','operations_manager','site_manager',
                     'teamlead','team_lead','business dev','business development','design','operations','site_engineer','site engineer','engineering','engineer'
                 )
                 ORDER BY email
@@ -6319,12 +6529,15 @@ def _build_role_access_context() -> dict:
         perms = get_user_module_permissions(role_key, is_admin=is_admin_user, user_id=int(user.get('id') or 0))
         access_flags = {
             'bid_analyzer': bool(perms.get('bid_analyzer')),
+            'project_manager_dashboard': bool(perms.get('project_manager_dashboard')),
             'assigned_tasks': bool(perms.get('assigned_tasks')),
             'approvals': bool(perms.get('approvals')),
         }
         pages = []
         if access_flags.get('bid_analyzer'):
             pages.append('Bid Dashboard')
+        if access_flags.get('project_manager_dashboard'):
+            pages.append('Project Manager Dashboard')
         if access_flags.get('assigned_tasks'):
             pages.append('Assigned Tasks')
         if access_flags.get('approvals'):
@@ -6350,12 +6563,15 @@ def _build_role_access_context() -> dict:
         perms = get_user_module_permissions(role_key, is_admin=False)
         access_flags = {
             'bid_analyzer': bool(overrides.get('bid_analyzer')) if 'bid_analyzer' in overrides else bool(perms.get('bid_analyzer')),
+            'project_manager_dashboard': bool(overrides.get('project_manager_dashboard')) if 'project_manager_dashboard' in overrides else bool(perms.get('project_manager_dashboard')),
             'assigned_tasks': bool(overrides.get('assigned_tasks')) if 'assigned_tasks' in overrides else bool(perms.get('assigned_tasks')),
             'approvals': bool(overrides.get('approvals')) if 'approvals' in overrides else bool(perms.get('approvals')),
         }
         pages = []
         if access_flags.get('bid_analyzer'):
             pages.append('Bid Dashboard')
+        if access_flags.get('project_manager_dashboard'):
+            pages.append('Project Manager Dashboard')
         if access_flags.get('assigned_tasks'):
             pages.append('Assigned Tasks')
         if access_flags.get('approvals'):
@@ -10392,6 +10608,10 @@ def dashboard():
         return redirect(url_for('top_admin_overview'))
     elif current_user.is_supervisor:
         return redirect(url_for('manager_dashboard'))
+    role_raw = (get_user_role() or '').strip() or (getattr(current_user, 'role', '') or '')
+    role_key = _normalize_role_key(role_raw)
+    if role_key == 'project manager':
+        return redirect(url_for('project_manager_dashboard'))
     elif _is_business_manager_user():
         return redirect(url_for('business_manager_team_allocation'))
     return redirect(url_for('manager_dashboard'))
@@ -11517,13 +11737,15 @@ def team_lead_overview(team):
 @login_required  
 def manager_dashboard():  
     """Manager dashboard: access all teams, team leads, and employee dashboards."""  
-    if not current_user.is_admin and not check_module_access_db('manager_dashboard'):
-        return render_template('access_denied.html', message="You don't have access to the Manager Dashboard."), 403
     role_raw = (get_user_role() or '').strip()
     # In some flows get_user_role() defaults to "member" even when current_user.role is set.
     if not role_raw or role_raw.lower() == 'member':
         role_raw = (getattr(current_user, 'role', None) or role_raw or 'member')
     role_norm = role_raw.strip().lower().replace('_', ' ')
+    if _normalize_role_key(role_raw) == 'project manager':
+        return redirect(url_for('project_manager_dashboard'))
+    if not current_user.is_admin and not check_module_access_db('manager_dashboard'):
+        return render_template('access_denied.html', message="You don't have access to the Manager Dashboard."), 403
     # For users with a manager role, send them directly to the BDM overview
     # only when they actually have BDM access; otherwise keep them on the manager dashboard.
     try:
@@ -11734,6 +11956,8 @@ def manager_dashboard():
                     gb.state,
                     gb.due_date,
                     gb.summary,
+                    gb.submission_status,
+                    gb.submission_reason,
                     bi.bid_status,
                     bi.results
                 FROM go_bids gb
@@ -11759,6 +11983,16 @@ def manager_dashboard():
                 max_total=None,
                 include_closed=True,
             )
+            go_rows = [
+                rr for rr in (go_rows or [])
+                if not _is_won_bid_status(
+                    rr.get('submission_reason'),
+                    rr.get('submission_status'),
+                    rr.get('bid_status'),
+                    rr.get('results'),
+                    rr.get('state'),
+                )
+            ]
             try:
                 timeline_gids = [int(rr.get('g_id')) for rr in (go_rows or []) if rr.get('g_id')]
             except Exception:
@@ -12160,10 +12394,26 @@ def manager_dashboard():
             # Hard fallback: show basic GO bids even if detailed timeline calc failed.
             try:
                 fallback_rows = _basic_bid_timeline_rows(cur, company_sql_clause, company_params, limit=200)
+                fallback_rows = [
+                    rr for rr in (fallback_rows or [])
+                    if not _is_won_bid_status(
+                        rr.get('submission_reason'),
+                        rr.get('submission_status'),
+                        rr.get('state'),
+                    )
+                ]
                 bid_timeline_items = _build_basic_timeline_items(cur, fallback_rows)
                 if not bid_timeline_items:
                     # Final fallback: ignore company filter and show all GO bids.
                     fallback_rows = _basic_bid_timeline_rows(cur, "", tuple(), limit=200)
+                    fallback_rows = [
+                        rr for rr in (fallback_rows or [])
+                        if not _is_won_bid_status(
+                            rr.get('submission_reason'),
+                            rr.get('submission_status'),
+                            rr.get('state'),
+                        )
+                    ]
                     bid_timeline_items = _build_basic_timeline_items(cur, fallback_rows)
             except Exception:
                 pass
@@ -12335,6 +12585,175 @@ def manager_assigned_tasks():
 
     title = f"Assigned Tasks - {team_map.get(team_key, 'Business Development')}"
     return _render_assigned_tasks(team_key, 'assigned_tasks.html', title, sidebar_mode='manager')
+
+
+@app.route('/project-manager-dashboard')
+@login_required
+def project_manager_dashboard():
+    role_raw = (get_user_role() or '').strip() or (getattr(current_user, 'role', '') or 'member')
+    role_key = _normalize_role_key(role_raw)
+    role_norm = role_raw.strip().lower().replace('_', ' ')
+    is_allowed = bool(
+        getattr(current_user, 'is_admin', False)
+        or getattr(current_user, 'is_supervisor', False)
+        or role_key == 'project manager'
+        or 'project manager' in role_norm
+    )
+    if not is_allowed:
+        return render_template('access_denied.html', message="You don't have access to the Project Manager Dashboard."), 403
+    try:
+        sync_go_bids()
+    except Exception:
+        pass
+    items = _load_assigned_projects_for_manager(int(current_user.id))
+    # Auto-assign won projects to the current Project Manager if they are unassigned.
+    try:
+        cur = mysql.connection.cursor(DictCursor)
+        _ensure_project_manager_assignments_table(cur)
+        for it in (items or []):
+            g_id = it.get('g_id')
+            if not g_id:
+                continue
+            try:
+                cur.execute("SELECT w_id FROM win_lost_results WHERE g_id=%s LIMIT 1", (int(g_id),))
+                row = cur.fetchone() or {}
+                w_id = row.get('w_id')
+                if not w_id:
+                    continue
+                # Only assign if no manager has been assigned yet for this project_id.
+                cur.execute("SELECT 1 FROM project_manager_assignments WHERE project_id=%s LIMIT 1", (int(w_id),))
+                if cur.fetchone():
+                    continue
+                cur.execute(
+                    """
+                    INSERT INTO project_manager_assignments (project_id, g_id, manager_user_id, assigned_by_user_id)
+                    VALUES (%s, %s, %s, %s)
+                    """,
+                    (int(w_id), int(g_id), int(current_user.id), int(current_user.id)),
+                )
+            except Exception:
+                continue
+        try:
+            mysql.connection.commit()
+        except Exception:
+            mysql.connection.rollback()
+    except Exception:
+        pass
+    finally:
+        try:
+            cur.close()
+        except Exception:
+            pass
+    try:
+        today = datetime.utcnow().date()
+        total_bids = len(items or [])
+        total_tasks = 0
+        pending_tasks = 0
+        in_progress_tasks = 0
+        completed_tasks = 0
+        overdue_tasks = 0
+        today_bids = 0
+        today_due_tasks = 0
+        unassigned_tasks = 0
+        uploaded_files = 0
+
+        def _parse_date(dval):
+            if not dval:
+                return None
+            try:
+                s = str(dval).strip()
+                s = s[:10]
+                parts = s.split('-')
+                if len(parts) == 3:
+                    y, m, d = parts
+                    return date(int(y), int(m), int(d))
+            except Exception:
+                return None
+            return None
+
+        for it in (items or []):
+            checklist = it.get('checklist') or []
+            total_tasks += len(checklist)
+            uploaded_files += len(it.get('task_files') or [])
+            bid_date = _parse_date(it.get('assign_due_date') or it.get('start_date') or it.get('due_date'))
+            if bid_date == today:
+                today_bids += 1
+            for t in checklist:
+                status = (t.get('status') or t.get('state') or t.get('progress') or '').strip().lower()
+                due = _parse_date(t.get('due_date') or t.get('assign_due_date') or '')
+                if status in ('done', 'completed', 'submitted'):
+                    completed_tasks += 1
+                elif status in ('in_progress', 'in progress'):
+                    in_progress_tasks += 1
+                else:
+                    pending_tasks += 1
+                if due and due < today:
+                    overdue_tasks += 1
+                if due and due == today:
+                    today_due_tasks += 1
+                has_assignees = bool(t.get('assignees'))
+                has_direct_assignee = bool(t.get('assigned_to') or t.get('assigned_to_id') or t.get('assigned_employee_name') or t.get('employee_email'))
+                has_team_lead = bool((t.get('team_lead') or '').strip())
+                if not (has_assignees or has_direct_assignee or has_team_lead):
+                    unassigned_tasks += 1
+                if t.get('attachment') or t.get('attachment_url'):
+                    uploaded_files += 1
+        kpis = {
+            'total_bids': total_bids,
+            'total_tasks': total_tasks,
+            'pending_tasks': pending_tasks,
+            'in_progress_tasks': in_progress_tasks,
+            'completed_tasks': completed_tasks,
+            'overdue_tasks': overdue_tasks,
+            'today_bids': today_bids,
+            'today_due_tasks': today_due_tasks,
+            'unassigned_tasks': unassigned_tasks,
+            'uploaded_files': uploaded_files,
+            'approvals_pending': 0,
+        }
+    except Exception:
+        kpis = {
+            'total_bids': len(items or []),
+            'total_tasks': 0,
+            'pending_tasks': 0,
+            'in_progress_tasks': 0,
+            'completed_tasks': 0,
+            'overdue_tasks': 0,
+            'today_bids': 0,
+            'today_due_tasks': 0,
+            'unassigned_tasks': 0,
+            'uploaded_files': 0,
+            'approvals_pending': 0,
+        }
+    project_timeline_items = _load_project_timeline_items_for_manager(int(current_user.id))
+    project_timeline_map = {}
+    for pt in (project_timeline_items or []):
+        gid = pt.get('g_id')
+        if gid is None:
+            continue
+        project_timeline_map[str(gid)] = pt
+
+    return render_template(
+        'project_manager_dashboard.html',
+        title='Project Manager Dashboard',
+        dept_key='business',
+        items=items,
+        user={'email': current_user.email, 'name': getattr(current_user, 'full_name', '')},
+        user_role='project_manager',
+        is_team_lead_view=False,
+        is_employee_view=False,
+        sidebar_mode='manager',
+        team='business',
+        dept_metrics={'business': 0, 'design': 0, 'operations': 0, 'engineer': 0},
+        total_assigned=len(items or []),
+        kpis=kpis,
+        assigned_tasks_base_url=None,
+        allowed_dept_keys=['business', 'design', 'operations', 'engineer'],
+        show_dept_tabs=False,
+        project_timeline_items=project_timeline_items,
+        project_timeline_map=project_timeline_map,
+        can_edit_project_timeline=True,
+    )
 
 
 @app.route('/top-admin/assigned-tasks')
@@ -13151,6 +13570,22 @@ def business_manager_dashboard():
         except Exception:
             won_rows = []
 
+        project_manager_map = {}
+        project_manager_users = []
+        default_pm = None
+        try:
+            project_ids = [int(r.get('w_id')) for r in (won_rows or []) if r.get('w_id')]
+            project_manager_map = _get_project_manager_map(cur, project_ids)
+        except Exception:
+            project_manager_map = {}
+        try:
+            project_manager_users = _fetch_project_manager_users(cur, active_company_name)
+            if project_manager_users:
+                default_pm = project_manager_users[0]
+        except Exception:
+            project_manager_users = []
+            default_pm = None
+
         default_project_stages = [
             'Project Kickoff',
             'Planning',
@@ -13236,6 +13671,31 @@ def business_manager_dashboard():
             if len(stages) > 1:
                 stage_progress = int(round((current_index / (len(stages) - 1)) * 100))
 
+            pm_info = project_manager_map.get(int(project_id)) if project_id is not None else None
+            if not pm_info and default_pm:
+                try:
+                    _ensure_project_manager_assignments_table(cur)
+                    cur.execute("SELECT 1 FROM project_manager_assignments WHERE project_id=%s LIMIT 1", (int(project_id),))
+                    if not cur.fetchone():
+                        cur.execute(
+                            """
+                            INSERT INTO project_manager_assignments (project_id, g_id, manager_user_id, assigned_by_user_id)
+                            VALUES (%s, %s, %s, %s)
+                            """,
+                            (int(project_id), int(r.get('g_id') or 0), int(default_pm.get('id')), int(getattr(current_user, 'id', 0))),
+                        )
+                        mysql.connection.commit()
+                    pm_info = {
+                        'user_id': default_pm.get('id'),
+                        'name': default_pm.get('full_name') or default_pm.get('email'),
+                        'email': default_pm.get('email'),
+                    }
+                except Exception:
+                    try:
+                        mysql.connection.rollback()
+                    except Exception:
+                        pass
+
             won_projects.append({
                 'project_id': project_id,
                 'g_id': r.get('g_id'),
@@ -13245,6 +13705,9 @@ def business_manager_dashboard():
                 'current_stage_index': current_index,
                 'stage_progress': stage_progress,
                 'stages': stages,
+                'pm_user_id': (pm_info or {}).get('user_id'),
+                'pm_name': (pm_info or {}).get('name'),
+                'pm_email': (pm_info or {}).get('email'),
             })
 
         # Stage display name mapping
@@ -13290,6 +13753,7 @@ def business_manager_dashboard():
             won_projects=won_projects,
             get_stage_display_name=get_stage_display_name,
             can_edit_project_timeline=_is_business_manager_user(),
+            project_manager_users=_fetch_project_manager_users(cur, active_company_name),
         )
     finally:
         try:
@@ -13298,22 +13762,27 @@ def business_manager_dashboard():
             pass
 
 
-def _require_project_timeline_edit_access():
+def _require_project_timeline_edit_access(project_id: int | None = None):
     role_key = (get_user_role() or 'member').strip().lower()
     is_it_admin = bool(getattr(current_user, 'is_admin', False)) or role_key == 'itadmin'
     is_top_admin = role_key == 'topleveladmin'
-    if not (is_it_admin or is_top_admin or _is_business_manager_user()):
-        return jsonify({'ok': False, 'error': 'access_denied'}), 403
-    return None
+    if is_it_admin or is_top_admin or _is_business_manager_user():
+        return None
+    try:
+        if project_id and _is_project_manager_for_project(int(current_user.id), int(project_id)):
+            return None
+    except Exception:
+        pass
+    return jsonify({'ok': False, 'error': 'access_denied'}), 403
 
 
 @app.route('/business-manager/project-timeline/stage/add', methods=['POST'])
 @login_required
 def business_manager_project_timeline_add_stage():
-    denied = _require_project_timeline_edit_access()
+    project_id = request.form.get('project_id')
+    denied = _require_project_timeline_edit_access(project_id=int(project_id) if project_id else None)
     if denied:
         return denied
-    project_id = request.form.get('project_id')
     stage_name = (request.form.get('stage_name') or '').strip()
     stage_order = request.form.get('stage_order')
     if not project_id or not stage_name:
@@ -13406,10 +13875,10 @@ def admin_recalc_bid_team_progress():
 @app.route('/business-manager/project-timeline/stage/update', methods=['POST'])
 @login_required
 def business_manager_project_timeline_update_stage():
-    denied = _require_project_timeline_edit_access()
+    project_id = request.form.get('project_id')
+    denied = _require_project_timeline_edit_access(project_id=int(project_id) if project_id else None)
     if denied:
         return denied
-    project_id = request.form.get('project_id')
     stage_id = request.form.get('stage_id')
     stage_name = (request.form.get('stage_name') or '').strip()
     stage_order = request.form.get('stage_order')
@@ -13471,10 +13940,10 @@ def business_manager_project_timeline_update_stage():
 @app.route('/business-manager/project-timeline/stage/delete', methods=['POST'])
 @login_required
 def business_manager_project_timeline_delete_stage():
-    denied = _require_project_timeline_edit_access()
+    project_id = request.form.get('project_id')
+    denied = _require_project_timeline_edit_access(project_id=int(project_id) if project_id else None)
     if denied:
         return denied
-    project_id = request.form.get('project_id')
     stage_id = request.form.get('stage_id')
     if not project_id or not stage_id:
         return jsonify({'ok': False, 'error': 'Missing parameters'}), 400
@@ -13533,10 +14002,10 @@ def business_manager_project_timeline_delete_stage():
 @app.route('/business-manager/project-timeline/stage/current', methods=['POST'])
 @login_required
 def business_manager_project_timeline_set_current():
-    denied = _require_project_timeline_edit_access()
+    project_id = request.form.get('project_id')
+    denied = _require_project_timeline_edit_access(project_id=int(project_id) if project_id else None)
     if denied:
         return denied
-    project_id = request.form.get('project_id')
     stage_id = request.form.get('stage_id')
     if not project_id or not stage_id:
         return jsonify({'ok': False, 'error': 'Missing parameters'}), 400
@@ -13563,6 +14032,67 @@ def business_manager_project_timeline_set_current():
         return jsonify({'ok': False, 'error': str(e)}), 500
     finally:
         cur.close()
+
+
+@app.route('/api/project-manager/assign', methods=['POST'])
+@login_required
+def api_assign_project_manager():
+    project_id = request.form.get('project_id') or request.args.get('project_id')
+    manager_user_id = request.form.get('manager_user_id') or request.args.get('manager_user_id')
+    g_id = request.form.get('g_id') or request.args.get('g_id')
+    denied = _require_project_timeline_edit_access(project_id=int(project_id) if project_id else None)
+    if denied:
+        return denied
+    if not project_id:
+        return jsonify({'ok': False, 'error': 'missing_project_id'}), 400
+    try:
+        project_id = int(project_id)
+    except Exception:
+        return jsonify({'ok': False, 'error': 'invalid_project_id'}), 400
+    manager_id_val = None
+    if manager_user_id not in (None, '', 'null'):
+        try:
+            manager_id_val = int(manager_user_id)
+        except Exception:
+            manager_id_val = None
+    try:
+        g_id_val = int(g_id) if g_id not in (None, '', 'null') else None
+    except Exception:
+        g_id_val = None
+    cur = mysql.connection.cursor(DictCursor)
+    try:
+        _ensure_project_manager_assignments_table(cur)
+        if manager_id_val:
+            cur.execute("SELECT id FROM users WHERE id=%s", (manager_id_val,))
+            if not cur.fetchone():
+                return jsonify({'ok': False, 'error': 'invalid_manager'}), 400
+            cur.execute(
+                """
+                INSERT INTO project_manager_assignments (project_id, g_id, manager_user_id, assigned_by_user_id)
+                VALUES (%s,%s,%s,%s)
+                ON DUPLICATE KEY UPDATE
+                  g_id=VALUES(g_id),
+                  manager_user_id=VALUES(manager_user_id),
+                  assigned_by_user_id=VALUES(assigned_by_user_id),
+                  assigned_at=CURRENT_TIMESTAMP
+                """,
+                (project_id, g_id_val, manager_id_val, int(current_user.id)),
+            )
+        else:
+            cur.execute("DELETE FROM project_manager_assignments WHERE project_id=%s", (project_id,))
+        mysql.connection.commit()
+        return jsonify({'ok': True})
+    except Exception as e:
+        try:
+            mysql.connection.rollback()
+        except Exception:
+            pass
+        return jsonify({'ok': False, 'error': 'db', 'message': str(e)}), 500
+    finally:
+        try:
+            cur.close()
+        except Exception:
+            pass
 
 
 @app.route('/api/business-manager/overview/details')
@@ -16496,6 +17026,64 @@ def bid_analyzer_update_result():
     try:
         cur.execute("UPDATE bid_incoming SET results=%s WHERE id=%s", (bid_result, bid_id))
         mysql.connection.commit()
+        # Auto-assign won bids to a project manager (if unassigned).
+        try:
+            if _is_won_bid_status(bid_result):
+                # Ensure GO + won syncs are up to date (creates win_lost_results + timeline).
+                try:
+                    sync_go_bids()
+                except Exception:
+                    pass
+
+                g_id = None
+                try:
+                    g_id, _ = _ensure_go_bid_from_incoming(int(bid_id))
+                except Exception:
+                    g_id = None
+                if g_id:
+                    cur2 = mysql.connection.cursor(DictCursor)
+                    try:
+                        _ensure_project_manager_assignments_table(cur2)
+                        cur2.execute("SELECT w_id FROM win_lost_results WHERE g_id=%s LIMIT 1", (int(g_id),))
+                        row = cur2.fetchone() or {}
+                        w_id = row.get('w_id')
+                        if w_id:
+                            cur2.execute("SELECT 1 FROM project_manager_assignments WHERE project_id=%s LIMIT 1", (int(w_id),))
+                            if not cur2.fetchone():
+                                # Prefer explicit Project Manager role; fallback to any manager-like user.
+                                cur2.execute(
+                                    """
+                                    SELECT id, full_name, email
+                                    FROM users
+                                    WHERE is_active=1
+                                      AND (
+                                        LOWER(REPLACE(REPLACE(role,'_',''),' ','')) = 'projectmanager'
+                                        OR LOWER(role) LIKE '%project manager%'
+                                      )
+                                    ORDER BY full_name ASC, email ASC
+                                    LIMIT 1
+                                    """
+                                )
+                                pm = cur2.fetchone()
+                                if not pm:
+                                    pm_list = _fetch_project_manager_users(cur2, None) or []
+                                    pm = pm_list[0] if pm_list else None
+                                if pm:
+                                    cur2.execute(
+                                        """
+                                        INSERT INTO project_manager_assignments (project_id, g_id, manager_user_id, assigned_by_user_id)
+                                        VALUES (%s, %s, %s, %s)
+                                        """,
+                                        (int(w_id), int(g_id), int(pm.get('id')), int(getattr(current_user, 'id', 0))),
+                                    )
+                                    mysql.connection.commit()
+                    finally:
+                        try:
+                            cur2.close()
+                        except Exception:
+                            pass
+        except Exception:
+            pass
         return jsonify({'success': True, 'results': bid_result or ''})
     except Exception as e:
         mysql.connection.rollback()
@@ -18705,6 +19293,145 @@ def create_checklist_item(team, g_id):
     
     return redirect(url_for('bid_checklist', team=team, g_id=g_id))
 
+
+@app.route('/api/project/<int:g_id>/tasks/create', methods=['POST'])
+@login_required
+def create_project_stage_task(g_id):
+    """Create a new task for a project stage (Project Manager flow)."""
+    try:
+        task_name = request.form.get('task_name', '').strip()
+        description = request.form.get('description', '').strip()
+        priority = request.form.get('priority', 'normal')
+        due_date = request.form.get('due_date')
+        stage_name = request.form.get('stage', '').strip().lower() or 'business'
+        if stage_name not in ('business', 'design', 'operations', 'engineer'):
+            stage_name = 'business'
+        file_obj = request.files.get('attachment')
+        saved_path = None
+
+        if not task_name:
+            return jsonify({'error': 'Task name is required'}), 400
+
+        cur = mysql.connection.cursor(DictCursor)
+
+        # Verify project assignment for non-admin users.
+        cur.execute("SELECT w_id FROM win_lost_results WHERE g_id=%s LIMIT 1", (int(g_id),))
+        row = cur.fetchone() or {}
+        project_id = row.get('w_id')
+        if project_id and not getattr(current_user, 'is_admin', False):
+            if not _is_project_manager_for_project(int(current_user.id), int(project_id)):
+                cur.close()
+                return jsonify({'error': 'Not authorized'}), 403
+
+        # Assign to all bid members if any, otherwise leave unassigned.
+        assignee_ids = []
+        try:
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS bid_assignment_members (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    g_id INT NOT NULL,
+                    employee_id INT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE KEY uniq_g_emp (g_id, employee_id)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+                """
+            )
+            cur.execute("SELECT employee_id FROM bid_assignment_members WHERE g_id=%s", (int(g_id),))
+            assignee_ids = [int(r[0]) for r in (cur.fetchall() or []) if r and r[0] is not None]
+        except Exception:
+            assignee_ids = []
+
+        if not assignee_ids:
+            assignee_ids = [None]
+
+        # Optional attachment
+        if file_obj and getattr(file_obj, 'filename', None):
+            try:
+                os.makedirs(os.path.join(os.getcwd(), 'uploads', 'checklists', str(g_id)), exist_ok=True)
+                safe_name = secure_filename(file_obj.filename)
+                saved_path = os.path.join('uploads', 'checklists', str(g_id), safe_name)
+                file_obj.save(os.path.join(os.getcwd(), saved_path))
+            except Exception:
+                saved_path = None
+
+        prefix, next_num = _next_task_code_number(cur, stage_name)
+        for aid in assignee_ids:
+            task_code = f"{prefix}-{next_num:03d}" if prefix and next_num else None
+            cur.execute(
+                """
+                INSERT INTO bid_checklists (
+                    g_id, task_code, task_name, description, assigned_to,
+                    priority, due_date, progress_pct, stage, created_by, attachment_path
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    int(g_id),
+                    task_code,
+                    task_name,
+                    description,
+                    aid,
+                    priority,
+                    due_date if due_date else None,
+                    0,
+                    stage_name,
+                    int(current_user.id),
+                    saved_path,
+                ),
+            )
+            if prefix and next_num:
+                next_num += 1
+
+        mysql.connection.commit()
+        cur.close()
+        log_write('create_project_stage_task', f"Created stage task '{task_name}' for project {g_id}")
+        return jsonify({'ok': True})
+    except Exception as e:
+        try:
+            mysql.connection.rollback()
+        except Exception:
+            pass
+        try:
+            cur.close()
+        except Exception:
+            pass
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/project/<int:g_id>/tasks', methods=['GET'])
+@login_required
+def api_project_tasks(g_id):
+    """Return all tasks for a project (grouped by stage on the client)."""
+    cur = mysql.connection.cursor(DictCursor)
+    try:
+        cur.execute(
+            """
+            SELECT bc.id, bc.g_id, bc.task_code, bc.task_name, bc.description, bc.stage, bc.status, bc.priority,
+                   bc.due_date, bc.progress_pct, bc.assigned_to, bc.created_at,
+                   e.name AS assigned_employee_name, e.email AS employee_email, e.department
+            FROM bid_checklists bc
+            LEFT JOIN employees e ON bc.assigned_to = e.id
+            WHERE g_id=%s AND team_archive IS NULL
+            ORDER BY created_at DESC, id DESC
+            """,
+            (int(g_id),),
+        )
+        tasks = cur.fetchall() or []
+        try:
+            _assign_missing_task_codes(cur, tasks, fallback_stage='business')
+            mysql.connection.commit()
+        except Exception:
+            mysql.connection.rollback()
+        return jsonify({'tasks': tasks})
+    except Exception as e:
+        return jsonify({'error': str(e), 'tasks': []}), 500
+    finally:
+        try:
+            cur.close()
+        except Exception:
+            pass
+
 @app.route('/task/<int:task_id>/attach', methods=['POST'])
 @login_required
 def attach_file_to_task(task_id):
@@ -18877,6 +19604,7 @@ def _ensure_uploaded_rfp_table_exists(cur):
     _ensure_column('uploaded_by', "uploaded_by INT DEFAULT NULL")
     _ensure_column('file_path', "file_path VARCHAR(1000) DEFAULT NULL")
     _ensure_column('section_id', "section_id VARCHAR(100) DEFAULT NULL")
+    _ensure_column('description', "description TEXT DEFAULT NULL")
 
 
 def _get_latest_rfp_file_for_bid(g_id):
@@ -19270,6 +19998,129 @@ def api_upload_rfp_file(g_id):
         return jsonify({'error': 'upload_failed', 'message': str(err)}), 500
     finally:
         cur.close()
+
+
+@app.route('/api/bid-analyzer/final-docs/upload', methods=['POST'])
+@login_required
+def api_upload_final_submission_docs():
+    """Upload final submission documents for a bid and store in uploaded_rfp_files."""
+    from werkzeug.utils import secure_filename
+    import uuid
+    import hashlib
+
+    g_id = (request.form.get('g_id') or '').strip()
+    bid_id = (request.form.get('bid_id') or '').strip()
+    bid_name = (request.form.get('bid_name') or '').strip()
+    description = (request.form.get('description') or '').strip()
+
+    if g_id and not g_id.isdigit():
+        g_id = ''
+
+    if not g_id and bid_id:
+        try:
+            cur_lookup = mysql.connection.cursor(DictCursor)
+            cur_lookup.execute("SELECT g_id FROM go_bids WHERE id=%s", (int(bid_id),))
+            row = cur_lookup.fetchone() or {}
+            g_id = str(row.get('g_id') or '').strip()
+        finally:
+            try:
+                cur_lookup.close()
+            except Exception:
+                pass
+
+    if not g_id:
+        return jsonify({'success': False, 'error': 'missing_g_id', 'message': 'Project code is required.'}), 400
+
+    upload_files = request.files.getlist('files')
+    if not upload_files:
+        upload_files = request.files.getlist('file')
+    upload_files = [f for f in (upload_files or []) if f and f.filename]
+    if not upload_files:
+        return jsonify({'success': False, 'error': 'missing_file', 'message': 'Please attach one or more files.'}), 400
+
+    uploads_dir = os.path.join(os.getcwd(), 'uploads', 'final_submissions', str(g_id))
+    os.makedirs(uploads_dir, exist_ok=True)
+
+    saved_ids = []
+    cur = mysql.connection.cursor(DictCursor)
+    try:
+        _ensure_uploaded_rfp_table_exists(cur)
+        cur.execute("SHOW COLUMNS FROM uploaded_rfp_files")
+        column_rows = cur.fetchall() or []
+        available_columns = {row['Field'] for row in column_rows if 'Field' in row}
+
+        for f in upload_files:
+            safe_original = secure_filename(f.filename) or f"final_{uuid.uuid4().hex}"
+            prefix = secure_filename(bid_name) or f"bid_{g_id}"
+            display_name = f"{prefix}_{safe_original}" if prefix else safe_original
+            unique_token = uuid.uuid4().hex
+            saved_filename = f"{unique_token}_{display_name}"
+            absolute_path = os.path.join(uploads_dir, saved_filename)
+
+            try:
+                f.save(absolute_path)
+            except Exception as err:
+                return jsonify({'success': False, 'error': 'save_failed', 'message': f'Could not save file: {err}'}), 500
+
+            file_size = 0
+            file_hash = ''
+            try:
+                file_size = os.path.getsize(absolute_path)
+                with open(absolute_path, 'rb') as handler:
+                    file_hash = hashlib.sha256(handler.read()).hexdigest()
+            except Exception:
+                pass
+
+            filename_lower = (safe_original or '').lower()
+            if filename_lower.endswith('.pdf'):
+                file_type = 'pdf'
+            elif filename_lower.endswith(('.png', '.jpg', '.jpeg', '.webp')):
+                file_type = 'image'
+            else:
+                file_type = 'file'
+
+            columns = []
+            values = []
+
+            def add_column(col_name, value):
+                if col_name in available_columns:
+                    columns.append(col_name)
+                    values.append(value)
+
+            add_column('bid_id', int(bid_id) if bid_id.isdigit() else None)
+            add_column('g_id', int(g_id) if g_id.isdigit() else None)
+            add_column('filename', display_name)
+            add_column('original_filename', f.filename)
+            add_column('saved_filename', saved_filename)
+            add_column('file_path', absolute_path)
+            add_column('file_type', file_type)
+            add_column('file_size', file_size)
+            add_column('file_hash', file_hash)
+            add_column('uploaded_by', getattr(current_user, 'id', None))
+            add_column('section_id', 'final_submission')
+            add_column('description', description or None)
+
+            if not columns:
+                return jsonify({'success': False, 'error': 'schema_error', 'message': 'Unable to persist the uploaded file.'}), 500
+
+            placeholders = ','.join(['%s'] * len(columns))
+            column_sql = ','.join(columns)
+            cur.execute(
+                f"INSERT INTO uploaded_rfp_files ({column_sql}) VALUES ({placeholders})",
+                tuple(values),
+            )
+            saved_ids.append(cur.lastrowid)
+
+        mysql.connection.commit()
+        return jsonify({'success': True, 'file_ids': saved_ids})
+    except Exception as err:
+        mysql.connection.rollback()
+        return jsonify({'success': False, 'error': 'upload_failed', 'message': str(err)}), 500
+    finally:
+        try:
+            cur.close()
+        except Exception:
+            pass
 
 
 @app.route('/api/section-attachment/<int:g_id>/upload', methods=['POST'])
@@ -22633,6 +23484,535 @@ def _load_assigned_tasks_for_department(dept_key: str, limit: int = 200):
     return items
 
 
+def _load_assigned_projects_for_manager(user_id: int, limit: int = 200):
+    _ensure_bid_assign_meta_table()
+    cur = mysql.connection.cursor(DictCursor)
+    g_ids = []
+    try:
+        _ensure_project_manager_assignments_table(cur)
+        cur.execute(
+            """
+            SELECT DISTINCT pma.g_id
+            FROM project_manager_assignments pma
+            LEFT JOIN win_lost_results wlr ON wlr.g_id = pma.g_id
+            LEFT JOIN won_bids_result wbr ON wbr.w_id = wlr.w_id
+            WHERE pma.manager_user_id=%s AND pma.g_id IS NOT NULL
+              AND (
+                LOWER(COALESCE(wlr.status,'')) LIKE '%%won%%'
+                OR LOWER(COALESCE(wlr.result,'')) LIKE '%%won%%'
+                OR LOWER(COALESCE(wlr.result,'')) LIKE '%%award%%'
+                OR wbr.w_id IS NOT NULL
+              )
+            ORDER BY assigned_at DESC
+            LIMIT %s
+            """,
+            (int(user_id), int(limit)),
+        )
+        g_ids = [r.get('g_id') for r in (cur.fetchall() or []) if r.get('g_id')]
+    except Exception:
+        g_ids = []
+    finally:
+        try:
+            cur.close()
+        except Exception:
+            pass
+
+    # Fallback: if no explicit PM assignments exist, show won bids from win/lost tables
+    # so the Project Manager dashboard still has data sourced from bid_incoming/win_lost_results/won_bids_result.
+    if not g_ids:
+        cur = mysql.connection.cursor(DictCursor)
+        try:
+            company_sql_clause, company_params = _company_filter_for_go_bids(cur)
+            cur.execute(
+                """
+                SELECT DISTINCT wlr.g_id
+                FROM win_lost_results wlr
+                LEFT JOIN won_bids_result wbr ON wbr.w_id = wlr.w_id
+                LEFT JOIN go_bids gb ON gb.g_id = wlr.g_id
+                WHERE wlr.g_id IS NOT NULL
+                  AND (
+                    LOWER(COALESCE(wlr.status,'')) LIKE '%%won%%'
+                    OR LOWER(COALESCE(wlr.result,'')) LIKE '%%won%%'
+                    OR LOWER(COALESCE(wlr.result,'')) LIKE '%%award%%'
+                    OR wbr.w_id IS NOT NULL
+                  )
+                """ + (company_sql_clause if company_sql_clause else "") + """
+                ORDER BY wlr.w_id DESC
+                LIMIT %s
+                """,
+                tuple(company_params) + (int(limit),),
+            )
+            g_ids = [r.get('g_id') for r in (cur.fetchall() or []) if r.get('g_id')]
+        except Exception:
+            g_ids = []
+        finally:
+            try:
+                cur.close()
+            except Exception:
+                pass
+
+    if not g_ids:
+        return []
+
+    cur = mysql.connection.cursor(DictCursor)
+    try:
+        placeholders = ",".join(["%s"] * len(g_ids))
+        cur.execute(
+            f"""
+            SELECT
+                gb.*,
+                bi.id AS bid_id,
+                bi.state AS bid_state,
+                bi.summary AS bid_summary,
+                bam.data AS meta_json,
+                wlr.result AS win_result,
+                wlr.status AS win_status,
+                wbr.closure_status,
+                wbr.work_progress_status
+            FROM go_bids gb
+            LEFT JOIN bid_assign_meta bam ON bam.g_id = gb.g_id
+            LEFT JOIN bid_incoming bi ON bi.id = gb.id
+            LEFT JOIN win_lost_results wlr ON wlr.g_id = gb.g_id
+            LEFT JOIN won_bids_result wbr ON wbr.w_id = wlr.w_id
+            WHERE gb.g_id IN ({placeholders})
+            ORDER BY COALESCE(bam.updated_at, gb.due_date, gb.created_at) DESC, gb.g_id DESC
+            """,
+            tuple(g_ids),
+        )
+        rows = cur.fetchall() or []
+    finally:
+        try:
+            cur.close()
+        except Exception:
+            pass
+
+    rfp_files_map = {}
+    try:
+        if g_ids:
+            rfp_cur = mysql.connection.cursor(DictCursor)
+            try:
+                _ensure_uploaded_rfp_table_exists(rfp_cur)
+                placeholders = ",".join(["%s"] * len(g_ids))
+                rfp_cur.execute(
+                    f"""
+                    SELECT id, g_id, bid_id, original_filename, filename, uploaded_at
+                    FROM uploaded_rfp_files
+                    WHERE g_id IN ({placeholders})
+                    ORDER BY uploaded_at DESC, id DESC
+                    """,
+                    tuple(g_ids),
+                )
+                for row in rfp_cur.fetchall() or []:
+                    g_id = row.get('g_id')
+                    if not g_id:
+                        continue
+                    rfp_files_map.setdefault(g_id, []).append({
+                        'id': row.get('id'),
+                        'filename': row.get('original_filename') or row.get('filename') or 'Document',
+                        'uploaded_at': row.get('uploaded_at'),
+                    })
+            finally:
+                try:
+                    rfp_cur.close()
+                except Exception:
+                    pass
+    except Exception:
+        rfp_files_map = {}
+
+    # Fallback: attach RFP files by bid_id if g_id is missing in uploaded_rfp_files
+    try:
+        bid_id_to_gid = {}
+        for rr in (rows or []):
+            bid_id = rr.get('bid_id') or rr.get('id')
+            gid = rr.get('g_id')
+            if bid_id and gid:
+                bid_id_to_gid[int(bid_id)] = int(gid)
+        bid_ids = list(bid_id_to_gid.keys())
+        if bid_ids:
+            rfp_cur = mysql.connection.cursor(DictCursor)
+            try:
+                _ensure_uploaded_rfp_table_exists(rfp_cur)
+                placeholders = ",".join(["%s"] * len(bid_ids))
+                rfp_cur.execute(
+                    f"""
+                    SELECT id, bid_id, original_filename, filename, uploaded_at
+                    FROM uploaded_rfp_files
+                    WHERE bid_id IN ({placeholders})
+                    ORDER BY uploaded_at DESC, id DESC
+                    """,
+                    tuple(bid_ids),
+                )
+                for row in rfp_cur.fetchall() or []:
+                    bid_id = row.get('bid_id')
+                    gid = bid_id_to_gid.get(int(bid_id)) if bid_id else None
+                    if not gid:
+                        continue
+                    rfp_files_map.setdefault(gid, []).append({
+                        'id': row.get('id'),
+                        'filename': row.get('original_filename') or row.get('filename') or 'Document',
+                        'uploaded_at': row.get('uploaded_at'),
+                    })
+            finally:
+                try:
+                    rfp_cur.close()
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    task_files_map = {}
+    try:
+        if g_ids:
+            task_cur = mysql.connection.cursor(DictCursor)
+            try:
+                placeholders = ",".join(["%s"] * len(g_ids))
+                task_cur.execute(
+                    f"""
+                    SELECT id, g_id
+                    FROM bid_checklists
+                    WHERE g_id IN ({placeholders})
+                      AND team_archive IS NULL
+                    """,
+                    tuple(g_ids),
+                )
+                task_rows = task_cur.fetchall() or []
+                task_ids = []
+                task_id_to_gid = {}
+                for row in task_rows:
+                    tid = row.get('id')
+                    gid = row.get('g_id')
+                    if not tid or not gid:
+                        continue
+                    task_ids.append(tid)
+                    task_id_to_gid[tid] = gid
+                if task_ids:
+                    _ensure_task_work_files_table(task_cur)
+                    _ensure_task_manager_attachments_table(task_cur)
+                    task_placeholders = ",".join(["%s"] * len(task_ids))
+                    task_cur.execute(
+                        f"""
+                        SELECT id, task_id, original_filename, filename, uploaded_at
+                        FROM task_work_files
+                        WHERE task_id IN ({task_placeholders})
+                        ORDER BY uploaded_at DESC, id DESC
+                        """,
+                        tuple(task_ids),
+                    )
+                    for row in task_cur.fetchall() or []:
+                        tid = row.get('task_id')
+                        gid = task_id_to_gid.get(tid)
+                        if not gid:
+                            continue
+                        task_files_map.setdefault(gid, []).append({
+                            'id': row.get('id'),
+                            'filename': row.get('original_filename') or row.get('filename') or 'Upload',
+                            'uploaded_at': row.get('uploaded_at'),
+                            'download_url': f"/task/file/{row.get('id')}/download",
+                            'source': 'task',
+                        })
+                    task_cur.execute(
+                        f"""
+                        SELECT id, task_id, original_filename, filename, uploaded_at
+                        FROM task_manager_attachments
+                        WHERE task_id IN ({task_placeholders})
+                        ORDER BY uploaded_at DESC, id DESC
+                        """,
+                        tuple(task_ids),
+                    )
+                    for row in task_cur.fetchall() or []:
+                        tid = row.get('task_id')
+                        gid = task_id_to_gid.get(tid)
+                        if not gid:
+                            continue
+                        task_files_map.setdefault(gid, []).append({
+                            'id': row.get('id'),
+                            'filename': row.get('original_filename') or row.get('filename') or 'File',
+                            'uploaded_at': row.get('uploaded_at'),
+                            'download_url': f"/task/manager-file/{row.get('id')}/download",
+                            'source': 'manager',
+                        })
+            finally:
+                try:
+                    task_cur.close()
+                except Exception:
+                    pass
+    except Exception:
+        task_files_map = {}
+
+    def _table_exists(cur, name: str) -> bool:
+        try:
+            cur.execute(
+                "SELECT 1 FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = %s",
+                (name,),
+            )
+            return cur.fetchone() is not None
+        except Exception:
+            return False
+
+    def _table_columns(cur, name: str) -> list[str]:
+        try:
+            cur.execute(f"SHOW COLUMNS FROM `{name}`")
+            rows = cur.fetchall() or []
+            return [r.get('Field') or r.get('field') or r[0] for r in rows]
+        except Exception:
+            return []
+
+    def _pick_col(cols: set[str], candidates: list[str]) -> str | None:
+        for c in candidates:
+            if c in cols:
+                return c
+        return None
+
+    def _load_extra_docs(table_name: str, source_label: str):
+        try:
+            extra_cur = mysql.connection.cursor(DictCursor)
+            if not _table_exists(extra_cur, table_name):
+                extra_cur.close()
+                return
+            cols = set([c.lower() for c in _table_columns(extra_cur, table_name)])
+            if not cols:
+                extra_cur.close()
+                return
+            g_col = _pick_col(cols, ['g_id', 'gid'])
+            bid_col = _pick_col(cols, ['bid_id', 'bidid', 'bid'])
+            name_col = _pick_col(cols, ['original_filename', 'filename', 'file_name', 'name', 'doc_name', 'title'])
+            url_col = _pick_col(cols, ['download_url', 'file_url', 'web_url', 'url', 'link', 'share_url'])
+            path_col = _pick_col(cols, ['file_path', 'path', 'local_path'])
+            uploaded_col = _pick_col(cols, ['uploaded_at', 'created_at', 'updated_at', 'modified_at'])
+            id_col = _pick_col(cols, ['id'])
+            if not url_col:
+                for c in cols:
+                    if 'url' in c:
+                        url_col = c
+                        break
+            if not name_col:
+                for c in cols:
+                    if 'name' in c:
+                        name_col = c
+                        break
+            if not g_col and not bid_col:
+                extra_cur.close()
+                return
+
+            def _select_cols():
+                parts = []
+                if id_col:
+                    parts.append(f"{id_col} AS id")
+                if g_col:
+                    parts.append(f"{g_col} AS g_id")
+                if bid_col:
+                    parts.append(f"{bid_col} AS bid_id")
+                if name_col:
+                    parts.append(f"{name_col} AS filename")
+                if url_col:
+                    parts.append(f"{url_col} AS url")
+                if path_col:
+                    parts.append(f"{path_col} AS file_path")
+                if uploaded_col:
+                    parts.append(f"{uploaded_col} AS uploaded_at")
+                if not parts:
+                    parts.append("*")
+                return ", ".join(parts)
+
+            select_cols = _select_cols()
+            if g_col and g_ids:
+                placeholders = ",".join(["%s"] * len(g_ids))
+                extra_cur.execute(
+                    f"SELECT {select_cols} FROM `{table_name}` WHERE {g_col} IN ({placeholders})",
+                    tuple(g_ids),
+                )
+            elif bid_col:
+                bid_id_to_gid = {}
+                for rr in (rows or []):
+                    bid_id = rr.get('bid_id') or rr.get('id')
+                    gid = rr.get('g_id')
+                    if bid_id and gid:
+                        bid_id_to_gid[int(bid_id)] = int(gid)
+                bid_ids = list(bid_id_to_gid.keys())
+                if not bid_ids:
+                    extra_cur.close()
+                    return
+                placeholders = ",".join(["%s"] * len(bid_ids))
+                extra_cur.execute(
+                    f"SELECT {select_cols} FROM `{table_name}` WHERE {bid_col} IN ({placeholders})",
+                    tuple(bid_ids),
+                )
+            else:
+                extra_cur.close()
+                return
+
+            for row in extra_cur.fetchall() or []:
+                gid_val = row.get('g_id') or (row.get('bid_id') and bid_id_to_gid.get(int(row.get('bid_id'))))
+                if not gid_val:
+                    continue
+                url = row.get('url') or ''
+                if not url and row.get('file_path'):
+                    url = row.get('file_path')
+                    if url and not str(url).startswith(('http://', 'https://', '/')):
+                        url = '/' + str(url)
+                if not url:
+                    continue
+                rfp_files_map.setdefault(gid_val, []).append({
+                    'id': row.get('id'),
+                    'filename': row.get('filename') or 'Document',
+                    'uploaded_at': row.get('uploaded_at'),
+                    'download_url': url,
+                    'source': source_label,
+                })
+        except Exception:
+            pass
+        finally:
+            try:
+                extra_cur.close()
+            except Exception:
+                pass
+
+    # Extra document sources requested by PM view.
+    _load_extra_docs('uploaded_rfps', 'rfp')
+    # OneDrive folder state: attach folder path as a document entry.
+    try:
+        od_cur = mysql.connection.cursor(DictCursor)
+        try:
+            if _table_exists(od_cur, 'onedrive_folder_state'):
+                # Map bid_incoming_id -> g_id via bid_id_to_gid
+                bid_id_to_gid = {}
+                for rr in (rows or []):
+                    bid_id = rr.get('bid_id') or rr.get('id')
+                    gid = rr.get('g_id')
+                    if bid_id and gid:
+                        bid_id_to_gid[int(bid_id)] = int(gid)
+                bid_ids = list(bid_id_to_gid.keys())
+                if bid_ids:
+                    placeholders = ",".join(["%s"] * len(bid_ids))
+                    od_cur.execute(
+                        f"""
+                        SELECT id, folder_path, folder_label, last_scan_at, last_eval_at, created_at, bid_incoming_id
+                        FROM onedrive_folder_state
+                        WHERE bid_incoming_id IN ({placeholders})
+                        ORDER BY last_scan_at DESC, id DESC
+                        """,
+                        tuple(bid_ids),
+                    )
+                    for row in (od_cur.fetchall() or []):
+                        bid_id = row.get('bid_incoming_id')
+                        gid = bid_id_to_gid.get(int(bid_id)) if bid_id else None
+                        if not gid:
+                            continue
+                        folder_path = (row.get('folder_path') or '').strip()
+                        if not folder_path:
+                            continue
+                        rfp_files_map.setdefault(gid, []).append({
+                            'id': row.get('id'),
+                            'filename': row.get('folder_label') or 'OneDrive Folder',
+                            'uploaded_at': row.get('last_scan_at') or row.get('created_at') or '',
+                            'download_url': folder_path,
+                            'source': 'onedrive',
+                        })
+        finally:
+            try:
+                od_cur.close()
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    items = []
+    update_cur = mysql.connection.cursor(DictCursor)
+    updated_any = False
+    for r in rows:
+        try:
+            meta = json.loads(r.get('meta_json') or "{}")
+        except Exception:
+            meta = {}
+        try:
+            if not r.get('g_id'):
+                continue
+        except Exception:
+            continue
+        scope_text = (r.get('scope') or meta.get('scope') or meta.get('scope_of_work') or meta.get('scope_of_work_text') or '').strip()
+        type_text = (r.get('type') or meta.get('type') or '').strip()
+        try:
+            ik_code = _ensure_ik_project_code(update_cur, int(r.get('g_id')), meta, scope_text, type_text)
+            if ik_code:
+                updated_any = True
+        except Exception:
+            ik_code = meta.get('ik_project_code') or ''
+
+        meta_files = []
+        try:
+            raw_files = meta.get('uploaded_files') or []
+            if isinstance(raw_files, list):
+                for f in raw_files:
+                    if not isinstance(f, dict):
+                        continue
+                    url = (f.get('url') or f.get('download_url') or '').strip()
+                    name = (f.get('name') or f.get('filename') or 'Document').strip()
+                    uploaded_at = f.get('uploaded_at') or ''
+                    if url or name:
+                        meta_files.append({
+                            'id': f.get('id'),
+                            'filename': name or 'Document',
+                            'uploaded_at': uploaded_at,
+                            'download_url': url,
+                            'source': 'bid',
+                        })
+        except Exception:
+            meta_files = []
+
+        summary_text = (
+            r.get('bid_summary')
+            or r.get('summary')
+            or meta.get('summary')
+            or meta.get('summary_text')
+            or meta.get('executive_summary')
+            or ''
+        ).strip()
+        if not summary_text:
+            summary_text = scope_text or ''
+
+        merged_rfp_files = []
+        try:
+            if meta_files:
+                merged_rfp_files.extend(meta_files)
+            extra_files = rfp_files_map.get(r.get('g_id'), [])
+            if extra_files:
+                merged_rfp_files.extend(extra_files)
+        except Exception:
+            merged_rfp_files = meta_files or rfp_files_map.get(r.get('g_id'), [])
+
+        items.append({
+            'g_id': r.get('g_id'),
+            'bid_id': r.get('bid_id') or r.get('id'),
+            'name': r.get('b_name') or meta.get('name') or 'Bid',
+            'company': r.get('company') or r.get('comp_name') or '',
+            'state': r.get('bid_state') or r.get('state') or '',
+            'due_date': r.get('due_date') or '',
+            'scope': scope_text,
+            'type': type_text,
+            'summary': summary_text,
+            'ik_project_code': ik_code or meta.get('ik_project_code') or '',
+            'departments': meta.get('departments') or [],
+            'start_date': meta.get('start_date') or '',
+            'assign_due_date': meta.get('due_date') or '',
+            'notes': meta.get('notes') or '',
+            'project_activity': meta.get('project_activity') or [],
+            'progress': meta.get('progress') or '',
+            'priority': meta.get('priority') or '',
+            'checklist': meta.get('checklist') or [],
+            'rfp_files': merged_rfp_files,
+            'task_files': task_files_map.get(r.get('g_id'), []),
+        })
+    if updated_any:
+        try:
+            mysql.connection.commit()
+        except Exception:
+            mysql.connection.rollback()
+    try:
+        update_cur.close()
+    except Exception:
+        pass
+    return items
+
 def _load_assigned_tasks_for_team_lead(dept_key: str, team_lead_email: str, limit: int = 200):
     _ensure_bid_assign_meta_table()
     cur = mysql.connection.cursor(DictCursor)
@@ -22897,6 +24277,134 @@ def _load_assigned_tasks_for_team_lead(dept_key: str, team_lead_email: str, limi
         pass
     return items
 
+
+def _load_project_timeline_items_for_manager(user_id: int, limit: int = 200):
+    cur = mysql.connection.cursor(DictCursor)
+    try:
+        _ensure_project_manager_assignments_table(cur)
+        cur.execute(
+            """
+            SELECT DISTINCT pma.project_id, pma.g_id
+            FROM project_manager_assignments pma
+            LEFT JOIN win_lost_results wlr ON wlr.w_id = pma.project_id
+            WHERE pma.manager_user_id=%s
+              AND (
+                LOWER(COALESCE(wlr.status,'')) LIKE '%%won%%'
+                OR LOWER(COALESCE(wlr.result,'')) LIKE '%%won%%'
+                OR LOWER(COALESCE(wlr.result,'')) LIKE '%%award%%'
+              )
+            ORDER BY assigned_at DESC
+            LIMIT %s
+            """,
+            (int(user_id), int(limit)),
+        )
+        rows = cur.fetchall() or []
+    except Exception:
+        rows = []
+    finally:
+        try:
+            cur.close()
+        except Exception:
+            pass
+
+    if not rows:
+        return []
+
+    project_ids = [int(r.get('project_id')) for r in rows if r.get('project_id')]
+    g_id_map = {int(r.get('project_id')): r.get('g_id') for r in rows if r.get('project_id')}
+
+    cur = mysql.connection.cursor(DictCursor)
+    try:
+        _ensure_project_timeline_tables(cur)
+        items = []
+        for project_id in project_ids:
+            try:
+                _seed_project_timeline(cur, int(project_id), ['Project Kickoff', 'Planning', 'Execution', 'Commissioning', 'Closeout'])
+            except Exception:
+                pass
+
+            cur.execute(
+                """
+                SELECT id, stage_name, stage_order
+                FROM project_timeline_stages
+                WHERE project_id=%s
+                ORDER BY stage_order ASC, id ASC
+                """,
+                (project_id,),
+            )
+            stage_rows = cur.fetchall() or []
+            stage_ids = [sr.get('id') for sr in stage_rows if sr.get('id') is not None]
+            progress_map = {}
+            if stage_ids:
+                in_clause = ','.join(['%s'] * len(stage_ids))
+                cur.execute(
+                    f"""
+                    SELECT stage_id, progress_pct
+                    FROM project_timeline_progress
+                    WHERE project_id=%s AND stage_id IN ({in_clause})
+                    """,
+                    tuple([project_id] + stage_ids),
+                )
+                for pr in (cur.fetchall() or []):
+                    progress_map[int(pr.get('stage_id'))] = int(pr.get('progress_pct') or 0)
+
+            cur.execute(
+                "SELECT stage_id FROM project_timeline_current WHERE project_id=%s",
+                (project_id,),
+            )
+            current_row = cur.fetchone() or {}
+            current_stage_id = current_row.get('stage_id')
+            if not current_stage_id and stage_rows:
+                current_stage_id = stage_rows[0].get('id')
+
+            stages = []
+            current_index = 0
+            for idx, sr in enumerate(stage_rows):
+                sid = sr.get('id')
+                if sid == current_stage_id:
+                    current_index = idx
+                stages.append({
+                    'id': sid,
+                    'name': sr.get('stage_name') or '',
+                    'order': int(sr.get('stage_order') or 0),
+                    'progress': int(progress_map.get(int(sid), 0)) if sid is not None else 0,
+                })
+
+            b_name = f"Project #{project_id}"
+            company = ''
+            g_id = g_id_map.get(int(project_id))
+            try:
+                cur.execute(
+                    "SELECT b_name, company, g_id FROM win_lost_results WHERE w_id=%s",
+                    (project_id,),
+                )
+                row = cur.fetchone() or {}
+                if row.get('b_name'):
+                    b_name = row.get('b_name')
+                if row.get('company'):
+                    company = row.get('company')
+                if row.get('g_id') and not g_id:
+                    g_id = row.get('g_id')
+            except Exception:
+                pass
+
+            items.append({
+                'project_id': project_id,
+                'g_id': g_id,
+                'b_name': b_name,
+                'company': company,
+                'current_stage_id': current_stage_id,
+                'current_stage_index': current_index,
+                'stages': stages,
+            })
+        return items
+    except Exception:
+        return []
+    finally:
+        try:
+            cur.close()
+        except Exception:
+            pass
 
 def _load_assigned_tasks_for_employee(dept_key: str, employee_id: int | None, limit: int = 200):
     if not employee_id:
@@ -31929,6 +33437,27 @@ def _ensure_tables_exist():
         """
         _ensure_innodb_table_ok("projects", create_projects_sql)
 
+        # Project manager assignments (project timeline ownership)
+        try:
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS project_manager_assignments (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    project_id INT NOT NULL,
+                    g_id INT NULL,
+                    manager_user_id INT NOT NULL,
+                    assigned_by_user_id INT NULL,
+                    assigned_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE KEY uniq_project_manager (project_id),
+                    INDEX idx_manager_user (manager_user_id),
+                    INDEX idx_project_gid (g_id),
+                    FOREIGN KEY (manager_user_id) REFERENCES users(id)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                """
+            )
+        except Exception:
+            pass
+
         # Create NO-GO snapshot table (used by overdue rule automation)
         create_nogo_bids_sql = """
             CREATE TABLE IF NOT EXISTS nogo_bids (
@@ -32391,11 +33920,20 @@ if __name__ == '__main__':
                     ('business', 'Business'),
                     ('marketing', 'Marketing'),
                     ('operations', 'Operations'),
-                    ('site_engineer', 'Site Engineer')
+                    ('site_engineer', 'Site Engineer'),
+                    ('project_manager', 'Project Manager')
                     """
                 )
                 mysql.connection.commit()
                 print("Departments created successfully")
+            else:
+                cur.execute("SELECT COUNT(*) AS cnt FROM departments WHERE dept_key=%s", ('project_manager',))
+                if int((cur.fetchone() or {}).get('cnt') or 0) == 0:
+                    cur.execute(
+                        "INSERT INTO departments (dept_key, display_name) VALUES (%s, %s)",
+                        ('project_manager', 'Project Manager'),
+                    )
+                    mysql.connection.commit()
         except Exception as e:
             # older DBs may not have departments yet if ensure failed; ignore hard crash
             print(f"Departments seed skipped: {e}")
@@ -32419,7 +33957,7 @@ if __name__ == '__main__':
             if r in {'supervisor'}:
                 return 'supervisor', None
             if r in {'manager', 'project manager', 'project_manager'}:
-                return 'manager', None
+                return ('project manager' if r in {'project manager', 'project_manager'} else 'manager'), None
             # department managers (legacy)
             if r in {'business manager', 'business_manager'}:
                 return 'manager', 'business'

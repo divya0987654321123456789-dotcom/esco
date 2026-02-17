@@ -337,8 +337,10 @@
                                 </td>
                                 {% set _bid_status = (bid.bid_status or '') | lower %}
                                 <td class="p-2">
-                                    <select class="w-full rounded-md border border-gray-300 bg-white px-2 py-1 text-xs text-gray-700 focus:outline-none focus:ring-2 focus:ring-emerald-500"
-                                            onchange="updateBidStatus('{{ _id }}', this.value)">
+                                    <select class="bid-status-select w-full rounded-md border border-gray-300 bg-white px-2 py-1 text-xs text-gray-700 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                                            data-g-id="{{ _gid }}"
+                                            data-bid-name="{{ (bid.b_name or '')|e }}"
+                                            onchange="handleBidStatusChange(this, '{{ _id }}')">
                                         <option value="">Pending</option>
                                         <option value="not started" {% if _bid_status == 'not started' %}selected{% endif %}>Not started</option>
                                         <option value="started" {% if _bid_status == 'started' %}selected{% endif %}>Started</option>
@@ -866,6 +868,41 @@
         </div>
     </div>
 
+    <!-- Final Submission Modal -->
+    <div id="finalSubmitModal" class="fixed inset-0 bg-gray-900 bg-opacity-40 hidden z-[85]">
+        <div class="flex items-center justify-center min-h-screen p-4">
+            <div class="bg-white rounded-lg shadow-xl max-w-2xl w-full overflow-hidden">
+                <div class="p-4 border-b border-gray-200 flex items-center justify-between gap-3">
+                    <div class="min-w-0">
+                        <div class="text-xs text-gray-500">Final Submission</div>
+                        <div id="finalSubmitTitle" class="font-semibold text-gray-900 truncate">Submit final documents</div>
+                    </div>
+                    <button type="button" class="px-3 py-2 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-lg text-sm font-semibold" onclick="closeFinalSubmitModal()">
+                        <i class="fas fa-times mr-1"></i>Close
+                    </button>
+                </div>
+                <div class="p-4 space-y-4">
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Description</label>
+                        <textarea id="finalSubmitDescription"
+                                  class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm"
+                                  rows="3"
+                                  placeholder="Add a short description for the final submission"></textarea>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Final documents (multiple allowed)</label>
+                        <input id="finalSubmitFiles" type="file" multiple class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm">
+                        <div id="finalSubmitFilesList" class="mt-2 text-xs text-gray-500"></div>
+                    </div>
+                </div>
+                <div class="px-4 py-3 border-t border-gray-200 flex items-center justify-end gap-2">
+                    <button type="button" class="px-4 py-2 rounded-md bg-gray-100 text-gray-700 hover:bg-gray-200" onclick="closeFinalSubmitModal(true)">Cancel</button>
+                    <button type="button" id="finalSubmitBtn" class="px-4 py-2 rounded-md bg-emerald-600 text-white hover:bg-emerald-700">Submit</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <!-- Summary Modal -->
     <div id="summaryModal" class="fixed inset-0 bg-gray-900 bg-opacity-40 hidden z-[80]">
         <div class="flex items-center justify-center min-h-screen p-4">
@@ -1086,6 +1123,140 @@
                 showNotification(`Failed to update bid status: ${err.message || err}`, 'error');
             }
         }
+
+        const finalSubmitState = {
+            bidId: null,
+            gId: null,
+            bidName: '',
+            selectEl: null,
+            prevStatus: ''
+        };
+
+        function openFinalSubmitModal(selectEl, bidId) {
+            const modal = document.getElementById('finalSubmitModal');
+            const title = document.getElementById('finalSubmitTitle');
+            const desc = document.getElementById('finalSubmitDescription');
+            const files = document.getElementById('finalSubmitFiles');
+            const list = document.getElementById('finalSubmitFilesList');
+            if (!modal) return;
+            finalSubmitState.bidId = bidId;
+            finalSubmitState.gId = (selectEl && selectEl.getAttribute('data-g-id')) || '';
+            finalSubmitState.bidName = (selectEl && selectEl.getAttribute('data-bid-name')) || '';
+            finalSubmitState.selectEl = selectEl || null;
+            finalSubmitState.prevStatus = (selectEl && selectEl.getAttribute('data-prev-status')) || '';
+            if (title) {
+                title.textContent = finalSubmitState.bidName
+                    ? `Submit final documents — ${finalSubmitState.bidName}`
+                    : 'Submit final documents';
+            }
+            if (desc) desc.value = '';
+            if (files) files.value = '';
+            if (list) list.textContent = '';
+            modal.classList.remove('hidden');
+        }
+
+        function closeFinalSubmitModal(revertSelection = false) {
+            const modal = document.getElementById('finalSubmitModal');
+            if (modal) modal.classList.add('hidden');
+            if (revertSelection && finalSubmitState.selectEl) {
+                finalSubmitState.selectEl.value = finalSubmitState.prevStatus || '';
+            }
+            finalSubmitState.bidId = null;
+            finalSubmitState.gId = null;
+            finalSubmitState.bidName = '';
+            finalSubmitState.selectEl = null;
+            finalSubmitState.prevStatus = '';
+        }
+
+        async function ensureFinalSubmitGid() {
+            if (finalSubmitState.gId) return finalSubmitState.gId;
+            const bidId = finalSubmitState.bidId;
+            if (!bidId) return '';
+            try {
+                const res = await fetch(`/api/bid-analyzer/ensure-go/${bidId}`, { credentials: 'include' });
+                const data = await res.json().catch(() => ({}));
+                if (res.ok && data && data.g_id) {
+                    finalSubmitState.gId = data.g_id;
+                    return data.g_id;
+                }
+            } catch (e) {
+                // ignore
+            }
+            return '';
+        }
+
+        async function submitFinalDocuments() {
+            const desc = document.getElementById('finalSubmitDescription');
+            const filesInput = document.getElementById('finalSubmitFiles');
+            const btn = document.getElementById('finalSubmitBtn');
+            const files = filesInput && filesInput.files ? Array.from(filesInput.files) : [];
+            if (!files.length) {
+                showNotification('Please attach one or more final documents.', 'error');
+                return;
+            }
+            const gId = await ensureFinalSubmitGid();
+            if (!gId) {
+                showNotification('Unable to resolve project code for this bid.', 'error');
+                return;
+            }
+            const fd = new FormData();
+            fd.append('g_id', gId);
+            if (finalSubmitState.bidId) fd.append('bid_id', finalSubmitState.bidId);
+            if (finalSubmitState.bidName) fd.append('bid_name', finalSubmitState.bidName);
+            if (desc && desc.value) fd.append('description', desc.value);
+            files.forEach((f) => fd.append('files', f));
+            if (btn) btn.disabled = true;
+            try {
+                const res = await fetch('/api/bid-analyzer/final-docs/upload', {
+                    method: 'POST',
+                    body: fd,
+                    credentials: 'include'
+                });
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok || data.success === false) {
+                    const detail = data.error || data.message || `HTTP ${res.status}`;
+                    throw new Error(detail || 'Upload failed');
+                }
+                await updateBidStatus(finalSubmitState.bidId, 'submitted');
+                showNotification('Final documents uploaded.', 'success');
+                closeFinalSubmitModal(false);
+            } catch (err) {
+                showNotification(`Failed to upload final documents: ${err.message || err}`, 'error');
+            } finally {
+                if (btn) btn.disabled = false;
+            }
+        }
+
+        function handleBidStatusChange(selectEl, bidId) {
+            const newStatus = (selectEl && selectEl.value) || '';
+            if (newStatus === 'submitted') {
+                openFinalSubmitModal(selectEl, bidId);
+                return;
+            }
+            updateBidStatus(bidId, newStatus);
+        }
+
+        document.addEventListener('DOMContentLoaded', () => {
+            document.querySelectorAll('.bid-status-select').forEach((sel) => {
+                sel.addEventListener('focus', () => {
+                    sel.setAttribute('data-prev-status', sel.value || '');
+                });
+            });
+            const filesInput = document.getElementById('finalSubmitFiles');
+            const filesList = document.getElementById('finalSubmitFilesList');
+            if (filesInput && filesList) {
+                filesInput.addEventListener('change', () => {
+                    const files = Array.from(filesInput.files || []);
+                    filesList.textContent = files.length
+                        ? files.map(f => f.name).join(', ')
+                        : 'No files selected.';
+                });
+            }
+            const submitBtn = document.getElementById('finalSubmitBtn');
+            if (submitBtn) {
+                submitBtn.addEventListener('click', submitFinalDocuments);
+            }
+        });
 
         async function updateBidResult(bidId, resultValue) {
             try {

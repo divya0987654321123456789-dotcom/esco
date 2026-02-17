@@ -84,7 +84,7 @@
               {% if user.source == 'user' %}
                 <select class="border border-gray-200 rounded-md text-xs px-2 py-1"
                         data-role-select data-user-id="{{ user.id }}">
-                  {% for rk, lbl in [('topleveladmin','Top Admin'),('manager','Manager'),('teamlead','Team Lead'),('member','Employee')] %}
+                  {% for rk, lbl in [('topleveladmin','Top Admin'),('manager','Manager'),('project_manager','Project Manager'),('teamlead','Team Lead'),('member','Employee')] %}
                     <option value="{{ rk }}" {% if (user.role or '')|lower|replace(' ','_') == rk %}selected{% endif %}>{{ lbl }}</option>
                   {% endfor %}
                 </select>
@@ -119,7 +119,7 @@
             <td class="p-3">
               <div class="flex flex-wrap gap-2 text-xs">
                 {% set flags = user.access_flags or {} %}
-                {% for key,label,icon in [('bid_analyzer','Bid','fa-chart-line'),('assigned_tasks','Tasks','fa-list-check'),('approvals','Approvals','fa-check-circle')] %}
+                {% for key,label,icon in [('bid_analyzer','Bid','fa-chart-line'),('project_manager_dashboard','PM Dashboard','fa-clipboard-list'),('assigned_tasks','Tasks','fa-list-check'),('approvals','Approvals','fa-check-circle')] %}
                   <label class="inline-flex items-center gap-1 px-2 py-1 rounded-full border border-gray-200 cursor-pointer {{ 'pill-green' if flags.get(key) else 'pill-gray' }}"
                          data-access-pill
                          data-module="{{ key }}">
