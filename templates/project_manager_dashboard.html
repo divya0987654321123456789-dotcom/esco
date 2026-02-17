@@ -955,10 +955,9 @@
         const deptManagersCache = {};
         let topAdminsCache = null;
         const PM_DEPARTMENTS = [
-            { key: 'business', label: 'Engineering Team' },
-            { key: 'design', label: 'Procurement Team' },
-            { key: 'operations', label: 'Commissioning Manager' },
-            { key: 'engineer', label: 'Accounting Manager' },
+            { key: 'engineering_team', label: 'Engineering Team' },
+            { key: 'procurement_team', label: 'Procurement Team' },
+            { key: 'accounts_finance', label: 'Accounts & Finance Team' },
         ];
 
         document.addEventListener('DOMContentLoaded', function () {
@@ -1001,15 +1000,29 @@
                 const row = document.getElementById('pmStageRow');
                 const pills = document.getElementById('pmStagePills');
                 if (!row) return;
-                const deptStages = PM_DEPARTMENTS;
+                let deptStages = PM_DEPARTMENTS;
+                if (Array.isArray(stages) && stages.length) {
+                    const mapped = [];
+                    const seen = new Set();
+                    stages.forEach(s => {
+                        const key = normalizeDeptKey(s.name || s.stage_name || s.key || s);
+                        if (!key || seen.has(key)) return;
+                        seen.add(key);
+                        const label = s.name || s.stage_name || (PM_DEPARTMENTS.find(d => d.key === key) || {}).label || key;
+                        mapped.push({ key, label });
+                    });
+                    if (mapped.length) deptStages = mapped;
+                }
                 if (!deptStages.length) {
                     row.innerHTML = '<span class="text-xs text-gray-400">No stages found.</span>';
                     if (pills) pills.innerHTML = '';
                     return;
                 }
-                const selected = (window.pmSelectedStages && window.pmSelectedStages.size)
-                    ? window.pmSelectedStages
-                    : new Set([deptStages[0].key]);
+                const selected = (Array.isArray(stages) && stages.length)
+                    ? new Set(deptStages.map(d => d.key))
+                    : ((window.pmSelectedStages && window.pmSelectedStages.size)
+                        ? window.pmSelectedStages
+                        : new Set([deptStages[0].key]));
                 window.pmSelectedStages = selected;
                 row.innerHTML = deptStages.map((st, idx) => {
                     const name = escapeHtml(st.label || 'Stage');
@@ -1032,7 +1045,7 @@
                     const list = Array.from(selected);
                     pills.innerHTML = list.length
                         ? list.map(s => {
-                            const label = (PM_DEPARTMENTS.find(d => d.key === s) || {}).label || s;
+                            const label = (deptStages.find(d => d.key === s) || PM_DEPARTMENTS.find(d => d.key === s) || {}).label || s;
                             return `
                                 <span class="inline-flex items-center gap-1 px-3 py-1 rounded-full bg-slate-100 text-slate-700 border border-slate-200 text-xs">
                                     ${escapeHtml(label)}
@@ -1066,7 +1079,7 @@
                             const list = Array.from(window.pmSelectedStages);
                             pills.innerHTML = list.length
                                 ? list.map(s => {
-                                    const label = (PM_DEPARTMENTS.find(d => d.key === s) || {}).label || s;
+                                    const label = (deptStages.find(d => d.key === s) || PM_DEPARTMENTS.find(d => d.key === s) || {}).label || s;
                                     return `
                                         <span class="inline-flex items-center gap-1 px-3 py-1 rounded-full bg-slate-100 text-slate-700 border border-slate-200 text-xs">
                                             ${escapeHtml(label)}
@@ -1082,7 +1095,7 @@
                                     const key = btn.getAttribute('data-pm-pill-remove') || '';
                                     if (key) window.pmSelectedStages.delete(key);
                                     renderStageChecklist(window.pmActiveGid);
-                                    renderPmStagesPills();
+                                    renderPmStagesPills(stages);
                                 });
                             });
                         }
@@ -1101,7 +1114,7 @@
                             const key = btn.getAttribute('data-pm-pill-remove') || '';
                             if (key) window.pmSelectedStages.delete(key);
                             renderStageChecklist(window.pmActiveGid);
-                            renderPmStagesPills();
+                            renderPmStagesPills(stages);
                         });
                     });
                 }
@@ -1136,26 +1149,54 @@
                     sections.innerHTML = '<div class="text-xs text-gray-500">Select a stage to see tasks.</div>';
                     return;
                 }
+                const toTitleCase = (value) => {
+                    return String(value || '')
+                        .toLowerCase()
+                        .split(' ')
+                        .filter(Boolean)
+                        .map(w => w.charAt(0).toUpperCase() + w.slice(1))
+                        .join(' ');
+                };
+                const statusBadgeClass = (statusValue) => {
+                    if (statusValue === 'completed') return 'bg-emerald-100 text-emerald-700';
+                    if (statusValue === 'in_progress') return 'bg-amber-100 text-amber-700';
+                    return 'bg-gray-100 text-gray-700';
+                };
                 const grouped = {};
                 tasks.forEach(t => {
-                    const stage = (t.stage || 'business').trim() || 'business';
+                    const stage = (t.stage || 'engineering_team').trim() || 'engineering_team';
                     if (!grouped[stage]) grouped[stage] = [];
                     grouped[stage].push(t);
                 });
                 if (!window.pmActiveStageTab || !selected.includes(window.pmActiveStageTab)) {
                     window.pmActiveStageTab = selected[0];
                 }
-                tabs.innerHTML = selected.map(stageName => {
-                    const active = stageName === window.pmActiveStageTab;
+                const cardsHtml = selected.map(stageName => {
                     const label = (PM_DEPARTMENTS.find(d => d.key === stageName) || {}).label || stageName;
+                    const list = grouped[stageName] || [];
+                    const done = list.filter(t => normalizeTaskStatus(t.status) === 'completed').length;
+                    const total = list.length;
+                    const pct = total ? Math.round((done / total) * 100) : 0;
+                    const statusLabel = total ? 'Active' : 'Setup';
+                    const active = stageName === window.pmActiveStageTab;
+                    const cardCls = active ? 'border-emerald-300 bg-emerald-50' : 'border-gray-200 bg-white';
                     return `
-                        <button type="button"
-                                class="px-3 py-1 rounded-full text-xs font-semibold border ${active ? 'border-emerald-300 bg-emerald-50 text-emerald-700' : 'border-gray-200 bg-white text-gray-700'}"
-                                data-pm-stage-tab="${escapeHtml(stageName)}">
-                            ${escapeHtml(label)}
+                        <button type="button" class="w-full text-left border rounded-lg p-3 ${cardCls}" data-pm-stage-tab="${escapeHtml(stageName)}">
+                            <div class="flex items-center justify-between">
+                                <div class="text-sm font-semibold text-gray-900">${escapeHtml(label)}</div>
+                                <div class="text-[11px] text-gray-500">${statusLabel} | Tasks: ${total}</div>
+                            </div>
+                            <div class="mt-2 h-2 rounded-full bg-gray-200 overflow-hidden">
+                                <div class="h-full bg-emerald-500" style="width:${pct}%"></div>
+                            </div>
                         </button>
                     `;
                 }).join('');
+                tabs.innerHTML = `
+                    <div class="grid grid-cols-1 md:grid-cols-3 gap-2 w-full">
+                        ${cardsHtml}
+                    </div>
+                `;
                 tabs.querySelectorAll('[data-pm-stage-tab]').forEach(btn => {
                     btn.addEventListener('click', () => {
                         window.pmActiveStageTab = btn.getAttribute('data-pm-stage-tab');
@@ -1164,6 +1205,7 @@
                         if (stageSelect) stageSelect.value = window.pmActiveStageTab;
                     });
                 });
+
                 const stageName = window.pmActiveStageTab;
                 const stageLabel = (PM_DEPARTMENTS.find(d => d.key === stageName) || {}).label || stageName;
                 const list = grouped[stageName] || [];
@@ -1171,18 +1213,39 @@
                 const total = list.length;
                 const pct = total ? Math.round((done / total) * 100) : 0;
                 const tasksHtml = list.length
-                    ? list.slice(0, 8).map(t => `<div class="text-xs text-gray-700 truncate">? ${escapeHtml(t.task_name || 'Task')}</div>`).join('')
-                    : '<div class="text-xs text-gray-500">No tasks yet.</div>';
+                    ? list.map(t => {
+                        const statusValue = normalizeTaskStatus(t.status || 'pending');
+                        const statusLabel = statusValue === 'in_progress' ? 'Started' : toTitleCase(statusValue.replace('_', ' '));
+                        const dueRaw = t.due_date || '';
+                        const dueDate = formatShortDate(dueRaw) || '-';
+                        const dueClass = isPastDue(dueRaw) ? 'text-red-600 font-semibold' : 'text-gray-600';
+                        const priorityLabel = toTitleCase(t.priority || 'normal');
+                        return `
+                            <div class="flex items-center justify-between gap-3 rounded-lg border border-gray-100 bg-white px-3 py-2">
+                                <div class="min-w-0">
+                                    <div class="text-sm font-semibold text-gray-900 truncate">${escapeHtml(t.task_name || 'Task')}</div>
+                                    <div class="text-xs text-gray-500 truncate">${escapeHtml(t.description || '')}</div>
+                                </div>
+                                <div class="flex items-center gap-2 text-xs whitespace-nowrap">
+                                    <span class="px-2 py-0.5 rounded-full ${statusBadgeClass(statusValue)}">${escapeHtml(statusLabel || 'Pending')}</span>
+                                    <span class="text-gray-500">${escapeHtml(priorityLabel)}</span>
+                                    <span class="${dueClass}">${escapeHtml(dueDate)}</span>
+                                </div>
+                            </div>
+                        `;
+                    }).join('')
+                    : '<div class="text-xs text-gray-500">No tasks for this stage yet.</div>';
+
                 sections.innerHTML = `
-                    <div class="rounded-lg border border-gray-200 bg-gray-50 p-3">
+                    <div class="rounded-lg border border-gray-200 bg-white p-3">
                         <div class="flex items-center justify-between">
-                            <div class="text-sm font-semibold text-gray-800">${escapeHtml(stageLabel)}</div>
+                            <div class="text-sm font-semibold text-gray-900">${escapeHtml(stageLabel)} checklist</div>
                             <div class="text-[11px] text-gray-500">${done}/${total} done</div>
                         </div>
                         <div class="mt-2 h-2 rounded-full bg-gray-200 overflow-hidden">
                             <div class="h-full bg-emerald-500" style="width:${pct}%"></div>
                         </div>
-                        <div class="mt-2 space-y-1">${tasksHtml}</div>
+                        <div class="mt-3 space-y-2">${tasksHtml}</div>
                     </div>
                 `;
             }
@@ -1284,20 +1347,21 @@
             function populatePmTaskStages(gid) {
                 const taskStageInline = document.getElementById('pmTaskStageInline');
                 if (!taskStageInline) return;
-                if (!PM_DEPARTMENTS.length) {
-                    taskStageInline.innerHTML = '<option value="business">Business</option>';
+                const selected = window.pmSelectedStages && window.pmSelectedStages.size
+                    ? Array.from(window.pmSelectedStages)
+                    : [];
+                const stageKeys = selected.length
+                    ? selected
+                    : PM_DEPARTMENTS.map(d => d.key);
+                if (!stageKeys.length) {
+                    taskStageInline.innerHTML = '<option value="engineering_team">Engineering Team</option>';
                     return;
                 }
-                taskStageInline.innerHTML = PM_DEPARTMENTS.map(st => {
-                    const label = escapeHtml(st.label || st.key);
-                    return `<option value="${escapeHtml(st.key)}">${label}</option>`;
+                taskStageInline.innerHTML = stageKeys.map(key => {
+                    const label = (PM_DEPARTMENTS.find(d => d.key === key) || {}).label || key;
+                    return `<option value="${escapeHtml(key)}">${escapeHtml(label)}</option>`;
                 }).join('');
-                if (window.pmSelectedStages && window.pmSelectedStages.size) {
-                    const first = Array.from(window.pmSelectedStages)[0];
-                    if (first) taskStageInline.value = first;
-                    return;
-                }
-                taskStageInline.value = PM_DEPARTMENTS[0].key;
+                taskStageInline.value = stageKeys[0];
             }
             window.populatePmTaskStages = populatePmTaskStages;
 
@@ -1915,10 +1979,13 @@
         function normalizeDeptKey(val) {
             const d = String(val || '').trim().toLowerCase().replace(/\s+/g, '_');
             if (!d) return '';
+            if (['engineering_team', 'engineering', 'engineeringteam', 'engineering_team'].includes(d)) return 'engineering_team';
+            if (['procurement_team', 'procurement', 'procurementteam'].includes(d)) return 'procurement_team';
+            if (['accounts_finance', 'accounts&finance', 'accounts_and_finance', 'accounts_finance_team', 'accounts', 'finance', 'accounting'].includes(d)) return 'accounts_finance';
             if (['business', 'business_dev', 'business_development'].includes(d)) return 'business';
             if (['design', 'marketing'].includes(d)) return 'design';
             if (['operations', 'operation', 'ops', 'operation_team', 'operations_team', 'ops_team', 'ops_team', 'operationteam', 'operationsteam'].includes(d)) return 'operations';
-            if (['site_engineer', 'site_engineering', 'engineer', 'engineering', 'engineering_team', 'engineer_team', 'site_engineering_team'].includes(d)) return 'engineer';
+            if (['site_engineer', 'site_engineering', 'engineer', 'engineering_team', 'engineer_team', 'site_engineering_team'].includes(d)) return 'engineering_team';
             return d;
         }
 
@@ -2074,6 +2141,16 @@
                 return;
             }
 
+            const getProjectStageKeys = (bidId) => {
+                try {
+                    const item = PROJECT_TIMELINE_MAP[String(bidId)];
+                    if (!item || !Array.isArray(item.stages)) return [];
+                    return item.stages.map(s => normalizeDeptKey(s.name || s.stage_name || s.key || '')).filter(Boolean);
+                } catch (e) {
+                    return [];
+                }
+            };
+
             lastTasksByBid[String(gid)] = tasks || [];
             tbody.innerHTML = (tasks || []).map(t => {
                 try {
@@ -2088,9 +2165,11 @@
                     CURRENT_USER_ROLE ||
                     ''
                 );
-                const deptEmployeesAll = deptEmployeesCache[deptKey] || [];
-                const deptManagers = deptManagersCache[deptKey] || [];
-                const deptTeamLeads = deptTeamLeadsCache[deptKey] || [];
+                const projectStageKeys = getProjectStageKeys(gid);
+                const teamScope = Array.from(new Set([...(projectStageKeys || []), ...(deptKey ? [deptKey] : [])].filter(Boolean)));
+                const deptEmployeesAll = teamScope.flatMap(k => deptEmployeesCache[k] || []);
+                const deptManagers = teamScope.flatMap(k => deptManagersCache[k] || []);
+                const deptTeamLeads = teamScope.flatMap(k => deptTeamLeadsCache[k] || []);
                 const topAdmins = Array.isArray(topAdminsCache) ? topAdminsCache : [];
                 const allManagers = Object.values(deptManagersCache).flat();
                 const allTeamLeads = Object.values(deptTeamLeadsCache).flat();
@@ -2676,6 +2755,15 @@
                     CURRENT_USER_ROLE ||
                     ''
                 )).filter(Boolean)));
+                if (IS_PROJECT_MANAGER_DASHBOARD) {
+                    const item = PROJECT_TIMELINE_MAP[String(gid)];
+                    if (item && Array.isArray(item.stages)) {
+                        const projectKeys = Array.from(new Set(item.stages.map(s => normalizeDeptKey(s.name || s.stage_name || s.key || '')).filter(Boolean)));
+                        if (projectKeys.length) {
+                            deptKeys = projectKeys;
+                        }
+                    }
+                }
                 if (!deptKeys.length && DEPT_KEY) {
                     const fallbackKey = normalizeDeptKey(DEPT_KEY);
                     if (fallbackKey) {
@@ -3419,6 +3507,7 @@
                 return;
             }
             assignBtn.disabled = true;
+            let leadError = '';
             try {
                 if (leadUserIds.length) {
                     const leadPayload = {
@@ -3433,7 +3522,7 @@
                     });
                     const dataLead = await resLead.json().catch(() => ({}));
                     if (!resLead.ok || dataLead.error) {
-                        throw new Error((dataLead && (dataLead.error || dataLead.message)) || 'failed');
+                        leadError = (dataLead && (dataLead.error || dataLead.message)) || 'Team lead assignment failed';
                     }
                 }
                 if (employeeIds.length) {
@@ -3453,7 +3542,11 @@
                 if (bidId) {
                     await loadBidTasks(bidId);
                 }
-                showToast('Assignment saved');
+                if (leadError) {
+                    showToast(`Assigned employees, but team lead failed: ${leadError}`, 'error');
+                } else {
+                    showToast('Assignment saved');
+                }
             } catch (e) {
                 showToast(`Failed to assign${e && e.message ? `: ${e.message}` : ''}`, 'error');
             } finally {
@@ -3571,6 +3664,9 @@
                                         <div class="text-sm font-semibold text-gray-900">Stage checklists</div>
                                         <div class="text-xs text-gray-500">Priority and dates live on each checklist item.</div>
                                     </div>
+                                    <button type="button" id="pmSaveStagesBtn" class="px-3 py-1.5 rounded-md bg-emerald-100 text-emerald-700 text-xs font-semibold hover:bg-emerald-200">
+                                        Save changes
+                                    </button>
                                 </div>
                                 <div id="pmStageTabs" class="flex items-center gap-2 overflow-x-auto pb-1"></div>
                             </div>
@@ -3598,14 +3694,19 @@
                                         <label class="block text-[11px] text-gray-600 mb-1">Due date</label>
                                         <input id="pmTaskDueInline" type="date" class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm">
                                     </div>
+                                    <div class="md:col-span-4">
+                                        <label class="block text-[11px] text-gray-600 mb-1">Stage</label>
+                                        <select id="pmTaskStageInline" class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm">
+                                            <option value="engineering_team">Engineering Team</option>
+                                            <option value="procurement_team">Procurement Team</option>
+                                            <option value="accounts_finance">Accounts & Finance Team</option>
+                                        </select>
+                                    </div>
                                     <div class="md:col-span-8">
                                         <label class="block text-[11px] text-gray-600 mb-1">Notes</label>
                                         <textarea id="pmTaskDescInline" class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm" rows="2" placeholder="Notes"></textarea>
                                     </div>
-                                    <div class="md:col-span-4">
-                                        <label class="block text-[11px] text-gray-600 mb-1">Stage</label>
-                                        <select id="pmTaskStageInline" class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm"></select>
-                                    </div>
+                                    
                                     <div class="md:col-span-12 flex justify-end">
                                         <button type="button" id="pmTaskSubmitInline" class="px-4 py-2 rounded-md bg-emerald-100 text-emerald-700 text-sm font-semibold hover:bg-emerald-200">
                                             Add item
@@ -3627,11 +3728,11 @@
             const titleEl = document.getElementById('projectManageTitle');
             const taskNameInline = document.getElementById('pmTaskNameInline');
             const taskDescInline = document.getElementById('pmTaskDescInline');
-            const taskStageInline = document.getElementById('pmTaskStageInline');
             const taskPriorityInline = document.getElementById('pmTaskPriorityInline');
             const taskDueInline = document.getElementById('pmTaskDueInline');
             const taskSubmitInline = document.getElementById('pmTaskSubmitInline');
             const taskAttachmentInline = document.getElementById('pmTaskAttachmentInline');
+            const taskStageInline = document.getElementById('pmTaskStageInline');
             let activeProjectId = null;
             let activeGid = null;
 
@@ -3686,10 +3787,7 @@
                 if (taskDescInline) taskDescInline.value = '';
                 if (taskPriorityInline) taskPriorityInline.value = 'normal';
                 if (taskDueInline) taskDueInline.value = '';
-                if (window.populatePmTaskStages) window.populatePmTaskStages(activeGid);
-                if (window.loadProjectStageTasks) {
-                    window.loadProjectStageTasks(activeGid).then(() => window.renderStageChecklist && window.renderStageChecklist(activeGid));
-                }
+               
                 openModal();
             }
 
@@ -3717,10 +3815,7 @@
                     if (taskDescInline) taskDescInline.value = '';
                     if (taskPriorityInline) taskPriorityInline.value = 'normal';
                     if (taskDueInline) taskDueInline.value = '';
-                    if (window.populatePmTaskStages) window.populatePmTaskStages(activeGid);
-                    if (window.loadProjectStageTasks) {
-                        window.loadProjectStageTasks(activeGid).then(() => window.renderStageChecklist && window.renderStageChecklist(activeGid));
-                    }
+                   
                     openModal();
                 });
             });
@@ -3736,7 +3831,7 @@
                         showToast('Task name is required', 'error');
                         return;
                     }
-                    const stage = (taskStageInline?.value || 'Project').trim() || 'Project';
+                    const stage = (taskStageInline?.value || 'engineering_team').trim() || 'engineering_team';
                     const payload = new FormData();
                     payload.append('task_name', name);
                     payload.append('description', taskDescInline?.value || '');
@@ -3764,6 +3859,63 @@
                         }
                     } catch (e) {
                         showToast('Failed to create task', 'error');
+                    }
+                });
+            }
+
+            const pmSaveStagesBtn = document.getElementById('pmSaveStagesBtn');
+            if (pmSaveStagesBtn) {
+                pmSaveStagesBtn.addEventListener('click', async () => {
+                    if (!activeProjectId) {
+                        showToast('Select a project first', 'error');
+                        return;
+                    }
+                    const selected = window.pmSelectedStages && window.pmSelectedStages.size
+                        ? Array.from(window.pmSelectedStages)
+                        : PM_DEPARTMENTS.map(d => d.key);
+                    if (!selected.length) {
+                        showToast('Select at least one stage', 'error');
+                        return;
+                    }
+                    pmSaveStagesBtn.disabled = true;
+                    try {
+                        let updatedItem = null;
+                        const res = await fetch('/project-manager/project-timeline/stages/save', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            credentials: 'include',
+                            body: JSON.stringify({
+                                project_id: activeProjectId,
+                                stages: selected
+                            })
+                        });
+                        const data = await res.json().catch(() => ({}));
+                        if (!res.ok || data.error) {
+                            throw new Error((data && (data.error || data.message)) || 'failed');
+                        }
+                        showToast('Project stages saved', 'success');
+                        try {
+                            const item = PROJECT_TIMELINE_MAP[String(activeGid)];
+                            if (item) {
+                                item.stages = selected.map((key, idx) => ({
+                                    id: idx + 1,
+                                    name: (PM_DEPARTMENTS.find(d => d.key === key) || {}).label || key,
+                                    order: idx,
+                                    progress: 0
+                                }));
+                                item.current_stage_id = item.stages[0]?.id || null;
+                                updatedItem = item;
+                            }
+                        } catch (e) {}
+                        renderPmStagesPills(updatedItem ? updatedItem.stages : []);
+                        populatePmTaskStages(activeGid);
+                        if (window.renderStageChecklist) {
+                            window.renderStageChecklist(activeGid);
+                        }
+                    } catch (e) {
+                        showToast(`Failed to save stages${e && e.message ? `: ${e.message}` : ''}`, 'error');
+                    } finally {
+                        pmSaveStagesBtn.disabled = false;
                     }
                 });
             }

@@ -360,6 +360,9 @@ def _task_code_prefix(stage: str) -> str | None:
         'design': 'IKMKT',
         'operations': 'IKOPS',
         'engineer': 'IKSE',
+        'engineering_team': 'IKENG',
+        'procurement_team': 'IKPRC',
+        'accounts_finance': 'IKAF',
     }
     return mapping.get(key)
 
@@ -467,6 +470,21 @@ def generate_team_checklist(cur, g_id, team):
             {'name': 'Safety Planning', 'description': 'Develop safety protocols and procedures', 'priority': 'high'},
             {'name': 'Equipment Planning', 'description': 'Plan equipment and tool requirements', 'priority': 'medium'},
             {'name': 'Implementation Plan', 'description': 'Create detailed implementation plan', 'priority': 'high'}
+        ],
+        'engineering_team': [
+            {'name': 'Engineering Scope Review', 'description': 'Review engineering scope and constraints', 'priority': 'high'},
+            {'name': 'Technical Review', 'description': 'Validate technical requirements and specs', 'priority': 'high'},
+            {'name': 'Engineering Schedule', 'description': 'Draft engineering milestones', 'priority': 'medium'},
+        ],
+        'procurement_team': [
+            {'name': 'Vendor Shortlist', 'description': 'Identify and shortlist vendors', 'priority': 'high'},
+            {'name': 'RFQ Package', 'description': 'Prepare RFQ package and send', 'priority': 'high'},
+            {'name': 'Quote Comparison', 'description': 'Collect and compare quotes', 'priority': 'medium'},
+        ],
+        'accounts_finance': [
+            {'name': 'Budget Validation', 'description': 'Validate budget and cash flow', 'priority': 'high'},
+            {'name': 'Cost Breakdown', 'description': 'Prepare cost breakdown and summary', 'priority': 'medium'},
+            {'name': 'Financial Review', 'description': 'Finalize financial review for submission', 'priority': 'high'},
         ]
     }
     
@@ -2670,11 +2688,9 @@ def _sync_won_bids_from_incoming(cur) -> None:
         rows = []
 
     default_project_stages = [
-        'Project Kickoff',
-        'Planning',
-        'Execution',
-        'Commissioning',
-        'Closeout',
+        'Engineering Team',
+        'Procurement Team',
+        'Accounts & Finance Team',
     ]
 
     for r in rows:
@@ -4798,11 +4814,9 @@ def top_level_admin_dashboard():
         pass
 
     default_project_stages = [
-        'Project Kickoff',
-        'Planning',
-        'Execution',
-        'Commissioning',
-        'Closeout',
+        'Engineering Team',
+        'Procurement Team',
+        'Accounts & Finance Team',
     ]
     try:
         _ensure_project_timeline_tables(cur)
@@ -4839,6 +4853,30 @@ def top_level_admin_dashboard():
             (project_id,),
         )
         stage_rows = cur.fetchall() or []
+
+        # Normalize legacy stage names to new department stages for display
+        legacy_stage_map = {
+            'project kickoff': 'Engineering Team',
+            'planning': 'Procurement Team',
+            'execution': 'Accounts & Finance Team',
+            'commissioning': 'Accounts & Finance Team',
+            'closeout': None,
+        }
+        normalized_stage_rows = []
+        seen_stage_names = set()
+        for sr in stage_rows:
+            raw_name = (sr.get('stage_name') or '').strip()
+            mapped = legacy_stage_map.get(raw_name.lower(), raw_name)
+            if mapped is None:
+                continue
+            name_key = mapped.lower()
+            if name_key in seen_stage_names:
+                continue
+            seen_stage_names.add(name_key)
+            sr = dict(sr)
+            sr['stage_name'] = mapped
+            normalized_stage_rows.append(sr)
+        stage_rows = normalized_stage_rows
         stage_ids = [sr.get('id') for sr in stage_rows if sr.get('id') is not None]
         progress_map = {}
         if stage_ids:
@@ -4853,6 +4891,34 @@ def top_level_admin_dashboard():
             )
             for pr in (cur.fetchall() or []):
                 progress_map[int(pr.get('stage_id'))] = int(pr.get('progress_pct') or 0)
+
+        # Compute stage progress from checklist tasks (team-wise) if available
+        checklist_progress = {}
+        try:
+            cur.execute(
+                """
+                SELECT stage, status
+                FROM bid_checklists
+                WHERE g_id=%s AND team_archive IS NULL
+                """,
+                (int(r.get('g_id') or 0),),
+            )
+            task_rows = cur.fetchall() or []
+            counts = {}
+            for tr in task_rows:
+                stage_key = _normalize_department_key(tr.get('stage') or '') or ''
+                if not stage_key:
+                    continue
+                counts.setdefault(stage_key, {'total': 0, 'done': 0})
+                counts[stage_key]['total'] += 1
+                if normalize_task_status(tr.get('status') or '') == 'completed':
+                    counts[stage_key]['done'] += 1
+            for k, v in counts.items():
+                total = int(v.get('total') or 0)
+                done = int(v.get('done') or 0)
+                checklist_progress[k] = int(round((done / total) * 100)) if total else 0
+        except Exception:
+            checklist_progress = {}
 
         cur.execute(
             "SELECT stage_id FROM project_timeline_current WHERE project_id=%s",
@@ -4869,11 +4935,14 @@ def top_level_admin_dashboard():
             sid = sr.get('id')
             if sid == current_stage_id:
                 current_index = idx
+            stage_name = sr.get('stage_name') or ''
+            stage_key = _normalize_department_key(stage_name) or stage_name.lower().replace(' ', '_')
+            computed_pct = checklist_progress.get(stage_key)
             stages.append({
                 'id': sid,
-                'name': sr.get('stage_name') or '',
+                'name': stage_name,
                 'order': int(sr.get('stage_order') or 0),
-                'progress': int(progress_map.get(int(sid), 0)) if sid is not None else 0,
+                'progress': int(computed_pct if computed_pct is not None else progress_map.get(int(sid), 0)) if sid is not None else 0,
             })
 
         stage_progress = 0
@@ -6143,11 +6212,9 @@ def top_admin_overview():
         default_pm = None
 
     default_project_stages = [
-        'Project Kickoff',
-        'Planning',
-        'Execution',
-        'Commissioning',
-        'Closeout',
+        'Engineering Team',
+        'Procurement Team',
+        'Accounts & Finance Team',
     ]
 
     try:
@@ -7503,6 +7570,12 @@ def _normalize_department_key(raw: str | None) -> str | None:
     val = (raw or "").strip().lower().replace("_", " ")
     val = " ".join(val.split())
     compact = val.replace(" ", "")
+    if val in ("engineering team", "engineering") or compact in ("engineeringteam", "engineering"):
+        return "engineering_team"
+    if val in ("procurement team", "procurement") or compact in ("procurementteam", "procurement"):
+        return "procurement_team"
+    if val in ("accounts finance", "accounts & finance", "accounts and finance", "accounting", "finance", "accounts") or compact in ("accountsfinance", "accountsandfinance", "accounting", "finance", "accounts"):
+        return "accounts_finance"
     if val in ("business", "business dev", "business development", "business manager", "business team", "business development team") or compact in ("bd", "bdm", "businessdev", "businessdevelopment"):
         return "business"
     if val in ("design", "marketing", "design manager", "design team", "marketing team") or compact in ("design", "marketing"):
@@ -7519,8 +7592,8 @@ def _normalize_department_key(raw: str | None) -> str | None:
         "ops executive",
     ) or compact in ("operations", "operation", "ops", "opsmanager", "operationmanager", "operationsexecutive", "opsexecutive"):
         return "operations"
-    if val in ("engineer", "engineering", "site engineer", "site manager", "site_engineer", "engineering team", "site engineering", "site engineer team") or compact in ("engineer", "engineering", "siteengineer", "sitemanager", "site"):
-        return "engineer"
+    if val in ("engineer", "site engineer", "site manager", "site_engineer", "site engineering", "site engineer team") or compact in ("engineer", "siteengineer", "sitemanager", "site"):
+        return "engineering_team"
     if val in ("team lead", "teamlead"):
         return None
     return val or None
@@ -13587,11 +13660,9 @@ def business_manager_dashboard():
             default_pm = None
 
         default_project_stages = [
-            'Project Kickoff',
-            'Planning',
-            'Execution',
-            'Commissioning',
-            'Closeout',
+            'Engineering Team',
+            'Procurement Team',
+            'Accounts & Finance Team',
         ]
 
         try:
@@ -14032,6 +14103,89 @@ def business_manager_project_timeline_set_current():
         return jsonify({'ok': False, 'error': str(e)}), 500
     finally:
         cur.close()
+
+
+@app.route('/project-manager/project-timeline/stages/save', methods=['POST'])
+@login_required
+def project_manager_project_timeline_save_stages():
+    project_id = request.form.get('project_id') or request.args.get('project_id')
+    if not project_id:
+        data = request.get_json(silent=True) or {}
+        project_id = data.get('project_id')
+    denied = _require_project_timeline_edit_access(project_id=int(project_id) if project_id else None)
+    if denied:
+        return denied
+    try:
+        project_id = int(project_id)
+    except Exception:
+        return jsonify({'ok': False, 'error': 'Invalid project id'}), 400
+
+    data = request.get_json(silent=True) or {}
+    stages = data.get('stages')
+    if stages is None:
+        stages_raw = request.form.get('stages') or ''
+        stages = [s.strip() for s in stages_raw.split(',') if s.strip()]
+    if not isinstance(stages, list):
+        return jsonify({'ok': False, 'error': 'Invalid stages payload'}), 400
+
+    # Normalize and map to display names
+    stage_name_map = {
+        'engineering_team': 'Engineering Team',
+        'procurement_team': 'Procurement Team',
+        'accounts_finance': 'Accounts & Finance Team',
+    }
+    normalized = []
+    seen = set()
+    for st in stages:
+        key = _normalize_department_key(str(st)) or str(st).strip().lower().replace(' ', '_')
+        if not key:
+            continue
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized.append(key)
+    if not normalized:
+        return jsonify({'ok': False, 'error': 'No stages selected'}), 400
+
+    cur = mysql.connection.cursor(DictCursor)
+    try:
+        _ensure_project_timeline_tables(cur)
+        # Clear existing stages + progress/current
+        cur.execute("DELETE FROM project_timeline_progress WHERE project_id=%s", (project_id,))
+        cur.execute("DELETE FROM project_timeline_current WHERE project_id=%s", (project_id,))
+        cur.execute("DELETE FROM project_timeline_stages WHERE project_id=%s", (project_id,))
+        # Insert new stages
+        for idx, key in enumerate(normalized):
+            stage_name = stage_name_map.get(key, key.replace('_', ' ').title())
+            cur.execute(
+                "INSERT INTO project_timeline_stages (project_id, stage_name, stage_order) VALUES (%s,%s,%s)",
+                (project_id, stage_name, idx),
+            )
+        # Set current stage to the first
+        cur.execute(
+            "SELECT id FROM project_timeline_stages WHERE project_id=%s ORDER BY stage_order ASC, id ASC LIMIT 1",
+            (project_id,),
+        )
+        row = cur.fetchone() or {}
+        if row.get('id'):
+            cur.execute(
+                """
+                INSERT INTO project_timeline_current (project_id, stage_id)
+                VALUES (%s,%s)
+                ON DUPLICATE KEY UPDATE stage_id=VALUES(stage_id)
+                """,
+                (project_id, int(row.get('id'))),
+            )
+        mysql.connection.commit()
+        return jsonify({'ok': True, 'stages': normalized})
+    except Exception as e:
+        mysql.connection.rollback()
+        return jsonify({'ok': False, 'error': str(e)}), 500
+    finally:
+        try:
+            cur.close()
+        except Exception:
+            pass
 
 
 @app.route('/api/project-manager/assign', methods=['POST'])
@@ -14496,7 +14650,7 @@ def business_manager_update_company():
         # Ensure this bid is ready for parallel work across departments by seeding
         # default checklists for all department stages (if missing).
         try:
-            team_stages = ['business', 'design', 'operations', 'engineer']
+            team_stages = ['engineering_team', 'procurement_team', 'accounts_finance']
             for st in team_stages:
                 cur.execute(
                     """
@@ -15466,7 +15620,7 @@ def supervisor_assign_stage():
 
         # Ensure tasks exist for all departments so they can work in parallel on this bid.
         try:
-            team_stages = ['business', 'design', 'operations', 'engineer']
+            team_stages = ['engineering_team', 'procurement_team', 'accounts_finance']
             for st in team_stages:
                 cur.execute(
                     """
@@ -15553,7 +15707,7 @@ def supervisor_update_company():
 
         # Best-effort: seed default checklist tasks for all departments so they can work in parallel.
         try:
-            team_stages = ['business', 'design', 'operations', 'engineer']
+            team_stages = ['engineering_team', 'procurement_team', 'accounts_finance']
             for st in team_stages:
                 cur.execute(
                     """
@@ -18106,7 +18260,9 @@ def update_task(task_id):
             role_norm = ((get_user_role() or '') or '').strip().lower().replace('_', ' ')
             manager_roles = {
                 'itadmin', 'supervisor', 'top level admin', 'topleveladmin',
-                'manager', 'business manager', 'design manager', 'operation manager', 'operations manager', 'site manager',
+                'manager', 'project manager', 'project_manager',
+                'business manager', 'design manager', 'operation manager', 'operations manager', 'site manager',
+                'engineering manager', 'procurement manager', 'accounts manager', 'finance manager',
                 'team lead', 'teamlead', 'team leader'
             }
             if not is_flask_user or (role_norm not in manager_roles and not getattr(current_user, 'is_admin', False)):
@@ -18132,7 +18288,7 @@ def update_task(task_id):
                 return jsonify({'error': 'Assignee not found or inactive'}), 400
             task_stage = _normalize_department_key(task.get('stage') or '')
             emp_dept = _normalize_department_key(emp.get('department') or '')
-            if task_stage in ('business', 'design', 'operations', 'engineer') and emp_dept and emp_dept != task_stage:
+            if task_stage in ('business', 'design', 'operations', 'engineer', 'engineering_team', 'procurement_team', 'accounts_finance') and emp_dept and emp_dept != task_stage:
                 cur.close()
                 return jsonify({'error': 'Assignee must be in the same department as the task'}), 400
 
@@ -18177,7 +18333,9 @@ def assign_task_team_lead_api(task_id):
         role_norm = ((get_user_role() or '') or '').strip().lower().replace('_', ' ')
         manager_roles = {
             'itadmin', 'supervisor', 'top level admin', 'topleveladmin',
-            'manager', 'business manager', 'design manager', 'operation manager', 'operations manager', 'site manager',
+            'manager', 'project manager', 'project_manager',
+            'business manager', 'design manager', 'operation manager', 'operations manager', 'site manager',
+            'engineering manager', 'procurement manager', 'accounts manager', 'finance manager',
         }
         if role_norm not in manager_roles and not getattr(current_user, 'is_admin', False):
             return jsonify({'success': False, 'error': 'Forbidden'}), 403
@@ -18235,7 +18393,7 @@ def assign_task_team_lead_api(task_id):
                 FROM user_company_access
                 WHERE user_id=%s AND COALESCE(is_active, TRUE)=TRUE
                 """ + (" AND company_id=%s" if active_cid else "") + """
-                ORDER BY updated_at DESC
+                ORDER BY id DESC
                 LIMIT 1
                 """,
                 tuple([lead_id] + ([int(active_cid)] if active_cid else [])),
@@ -18243,15 +18401,44 @@ def assign_task_team_lead_api(task_id):
             uca = cur.fetchone() or {}
             if uca:
                 lead_dept = _normalize_department_key(uca.get('department_key') or '')
-                if not lead_role:
-                    lead_role = (uca.get('role') or lead_role)
+                # Prefer scoped role from user_company_access when available
+                uca_role = (uca.get('role') or '').strip()
+                if uca_role:
+                    lead_role = uca_role
+                elif lead_dept:
+                    # If scoped dept exists but role is missing, assume team lead.
+                    lead_role = 'teamlead'
         except Exception:
             lead_dept = None
 
-        acceptable_roles = {'teamlead', 'team lead', 'team_lead', 'business', 'design', 'operations', 'site engineer', 'site_engineer', 'engineering', 'engineer'}
-        if lead_role not in acceptable_roles and _normalize_role_key(lead_role) != 'teamlead':
+        # Fallback: check team_leads roster for role/department
+        if not lead_dept or _normalize_role_key(lead_role) != 'teamlead':
+            try:
+                cur.execute(
+                    "SELECT department, role FROM team_leads WHERE (user_id=%s OR LOWER(email)=LOWER(%s)) LIMIT 1",
+                    (int(lead_id), (user_row.get('email') or '').strip()),
+                )
+                tl = cur.fetchone() or {}
+                if tl:
+                    lead_dept = _normalize_department_key(tl.get('department') or '') or lead_dept
+                    tl_role = (tl.get('role') or '').strip()
+                    if tl_role:
+                        lead_role = tl_role
+            except Exception:
+                pass
+
+        acceptable_roles = {
+            'teamlead', 'team lead', 'team_lead',
+            'business', 'design', 'operations', 'site engineer', 'site_engineer', 'engineering', 'engineer',
+            'engineering team', 'procurement team', 'accounts finance', 'accounts', 'finance'
+        }
+        lead_role_norm = _normalize_role_key(lead_role)
+        if lead_role_norm != 'teamlead' and lead_role not in acceptable_roles:
             cur.close()
             return jsonify({'success': False, 'error': 'Selected user is not a team lead'}), 400
+
+        if not lead_dept and dept_key:
+            lead_dept = dept_key
 
         if task_stage and lead_dept and lead_dept != task_stage:
             cur.close()
@@ -19303,9 +19490,10 @@ def create_project_stage_task(g_id):
         description = request.form.get('description', '').strip()
         priority = request.form.get('priority', 'normal')
         due_date = request.form.get('due_date')
-        stage_name = request.form.get('stage', '').strip().lower() or 'business'
-        if stage_name not in ('business', 'design', 'operations', 'engineer'):
-            stage_name = 'business'
+        stage_name = request.form.get('stage', '').strip()
+        stage_name = _normalize_department_key(stage_name) or 'engineering_team'
+        if stage_name not in ('engineering_team', 'procurement_team', 'accounts_finance'):
+            stage_name = 'engineering_team'
         file_obj = request.files.get('attachment')
         saved_path = None
 
@@ -19419,7 +19607,7 @@ def api_project_tasks(g_id):
         )
         tasks = cur.fetchall() or []
         try:
-            _assign_missing_task_codes(cur, tasks, fallback_stage='business')
+            _assign_missing_task_codes(cur, tasks, fallback_stage='engineering_team')
             mysql.connection.commit()
         except Exception:
             mysql.connection.rollback()
@@ -21338,12 +21526,18 @@ def api_team_team_leads(team):
         'design': ('design', 'marketing'),
         'operations': ('operations',),
         'engineer': ('site_engineer', 'engineer', 'engineering'),
+        'engineering_team': ('engineering_team',),
+        'procurement_team': ('procurement_team',),
+        'accounts_finance': ('accounts_finance',),
     }
     role_map = {
         'business': ('teamlead', 'team_lead', 'team lead', 'business', 'business dev', 'business development'),
         'design': ('teamlead', 'team_lead', 'team lead', 'design', 'marketing'),
         'operations': ('teamlead', 'team_lead', 'team lead', 'operations'),
         'engineer': ('teamlead', 'team_lead', 'team lead', 'site_engineer', 'site engineer', 'engineering', 'engineer'),
+        'engineering_team': ('teamlead', 'team_lead', 'team lead', 'engineering team', 'engineering', 'engineering_team'),
+        'procurement_team': ('teamlead', 'team_lead', 'team lead', 'procurement team', 'procurement', 'procurement_team'),
+        'accounts_finance': ('teamlead', 'team_lead', 'team lead', 'accounts finance', 'accounts & finance', 'accounting', 'finance', 'accounts_finance'),
     }
     acceptable_depts = dept_keys_by_team.get(team, ())
     acceptable_roles = role_map.get(team, ('teamlead', 'team_lead', 'team lead'))
@@ -21437,7 +21631,8 @@ def api_team_managers(team):
             'teamlead', 'team_lead', 'team lead',
             'business', 'business dev', 'business development',
             'design', 'operations',
-            'site engineer', 'site_engineer', 'engineering', 'engineer'
+            'site engineer', 'site_engineer', 'engineering', 'engineer',
+            'engineering team', 'procurement team', 'accounts finance', 'accounts & finance'
         )
     )
 
@@ -21446,12 +21641,18 @@ def api_team_managers(team):
         'design': ('design', 'marketing'),
         'operations': ('operations',),
         'engineer': ('site_engineer', 'engineer', 'engineering'),
+        'engineering_team': ('engineering_team',),
+        'procurement_team': ('procurement_team',),
+        'accounts_finance': ('accounts_finance',),
     }
     employee_depts_by_team = {
         'business': ('business', 'business dev', 'business development', 'business manager', 'business_manager'),
         'design': ('design', 'marketing', 'design manager', 'design_manager'),
         'operations': ('operations', 'operation', 'operations manager', 'operation manager', 'operations_manager', 'operation_manager'),
         'engineer': ('site_engineer', 'site engineer', 'engineer', 'engineering', 'site manager', 'site_manager'),
+        'engineering_team': ('engineering_team', 'engineering team'),
+        'procurement_team': ('procurement_team', 'procurement team'),
+        'accounts_finance': ('accounts_finance', 'accounts & finance', 'accounts finance', 'accounting', 'finance'),
     }
     acceptable_depts = dept_keys_by_team.get(team, ())
     acceptable_emp_depts = employee_depts_by_team.get(team, ())
@@ -21464,6 +21665,9 @@ def api_team_managers(team):
         'design': ('design manager', 'design_manager', 'designmanager', 'manager'),
         'operations': ('operation manager', 'operations manager', 'operation_manager', 'operations_manager', 'operationsmanager', 'manager'),
         'engineer': ('site manager', 'site_manager', 'sitemanager', 'manager'),
+        'engineering_team': ('engineering manager', 'engineering_team', 'engineering team', 'manager'),
+        'procurement_team': ('procurement manager', 'procurement_team', 'procurement team', 'manager'),
+        'accounts_finance': ('accounts manager', 'finance manager', 'accounts_finance', 'accounts & finance', 'manager'),
     }
     acceptable_roles = role_map.get(team, ('manager',))
     if allow_all or not role_map.get(team):
@@ -24319,7 +24523,7 @@ def _load_project_timeline_items_for_manager(user_id: int, limit: int = 200):
         items = []
         for project_id in project_ids:
             try:
-                _seed_project_timeline(cur, int(project_id), ['Project Kickoff', 'Planning', 'Execution', 'Commissioning', 'Closeout'])
+                _seed_project_timeline(cur, int(project_id), ['Engineering Team', 'Procurement Team', 'Accounts & Finance Team'])
             except Exception:
                 pass
 
@@ -24409,11 +24613,16 @@ def _load_project_timeline_items_for_manager(user_id: int, limit: int = 200):
 def _load_assigned_tasks_for_employee(dept_key: str, employee_id: int | None, limit: int = 200):
     if not employee_id:
         return []
-    items = _load_assigned_tasks_for_department(dept_key, limit)
+    dept_key_norm = _normalize_department_key(dept_key or '') or (dept_key or '').strip().lower()
+    items = _load_assigned_tasks_for_department(dept_key_norm or dept_key, limit)
     cur = mysql.connection.cursor(DictCursor)
     try:
         cur.execute(
-            "SELECT DISTINCT g_id FROM bid_checklists WHERE assigned_to = %s",
+            """
+            SELECT DISTINCT g_id
+            FROM bid_checklists
+            WHERE assigned_to = %s
+            """,
             (int(employee_id),),
         )
         g_ids = {int(r.get('g_id')) for r in (cur.fetchall() or []) if r.get('g_id')}
@@ -24426,7 +24635,84 @@ def _load_assigned_tasks_for_employee(dept_key: str, employee_id: int | None, li
             pass
     if not g_ids:
         return []
-    return [it for it in (items or []) if it.get('g_id') in g_ids]
+    filtered = [it for it in (items or []) if it.get('g_id') in g_ids]
+    if filtered:
+        return filtered
+
+    # Fallback: build minimal items directly from go_bids/bid_incoming when bid_assign_meta is empty.
+    try:
+        cur = mysql.connection.cursor(DictCursor)
+        placeholders = ",".join(["%s"] * len(g_ids))
+        cur.execute(
+            f"""
+            SELECT gb.g_id,
+                   gb.b_name,
+                   gb.company,
+                   gb.state,
+                   gb.due_date,
+                   gb.summary,
+                   gb.type,
+                   gb.id AS incoming_id,
+                   bi.id AS bid_id,
+                   bi.b_name AS bi_name,
+                   bi.comp_name,
+                   bi.state AS bi_state,
+                   bi.summary AS bi_summary,
+                   bi.type AS bi_type,
+                   bi.scope AS bi_scope
+            FROM go_bids gb
+            LEFT JOIN bid_incoming bi ON bi.id = gb.id
+            WHERE gb.g_id IN ({placeholders})
+            """,
+            tuple(g_ids),
+        )
+        rows = cur.fetchall() or []
+    except Exception:
+        rows = []
+    finally:
+        try:
+            cur.close()
+        except Exception:
+            pass
+
+    items = []
+    update_cur = mysql.connection.cursor(DictCursor)
+    updated_any = False
+    for r in rows:
+        scope_text = r.get('bi_scope') or ''
+        type_text = r.get('type') or r.get('bi_type') or ''
+        try:
+            meta = {}
+            ik_code = _ensure_ik_project_code(update_cur, int(r.get('g_id') or 0), meta, scope_text, type_text)
+            if ik_code:
+                updated_any = True
+        except Exception:
+            ik_code = ''
+        items.append({
+            'g_id': r.get('g_id'),
+            'bid_id': r.get('bid_id') or r.get('incoming_id'),
+            'name': r.get('b_name') or r.get('bi_name') or 'Bid',
+            'company': r.get('company') or r.get('comp_name') or '',
+            'state': r.get('state') or r.get('bi_state') or '',
+            'summary': r.get('summary') or r.get('bi_summary') or '',
+            'scope': r.get('bi_scope') or '',
+            'type': r.get('type') or r.get('bi_type') or '',
+            'priority': 'normal',
+            'ik_project_code': ik_code or '',
+            'project_activity': [],
+            'rfp_files': [],
+            'task_files': [],
+        })
+    if updated_any:
+        try:
+            mysql.connection.commit()
+        except Exception:
+            mysql.connection.rollback()
+    try:
+        update_cur.close()
+    except Exception:
+        pass
+    return items
 
 
 def _render_employee_assigned_tasks(dept_key: str, employee_id: int | None, title: str):
@@ -24453,7 +24739,7 @@ def _render_employee_assigned_tasks(dept_key: str, employee_id: int | None, titl
         employee_email = ''
         employee_name = ''
     try:
-        dept_keys = ['business', 'design', 'operations', 'engineer']
+        dept_keys = ['engineering_team', 'procurement_team', 'accounts_finance', 'business', 'design', 'operations', 'engineer']
         dept_metrics = {}
         for k in dept_keys:
             try:
@@ -24561,6 +24847,12 @@ def _team_key_from_access(dept_key: str | None) -> str | None:
         return 'operations'
     if d in ['site_engineer', 'site_engineering', 'engineer', 'engineering']:
         return 'engineer'
+    if d in ['engineering_team', 'engineering team']:
+        return 'engineering_team'
+    if d in ['procurement_team', 'procurement team']:
+        return 'procurement_team'
+    if d in ['accounts_finance', 'accounts & finance team', 'accounts finance', 'accounts team', 'finance team']:
+        return 'accounts_finance'
     return None
 
 
@@ -24583,7 +24875,7 @@ def _render_assigned_tasks(
     )
     allowed_dept_keys = []
     if admin_like:
-        allowed_dept_keys = ['business', 'design', 'operations', 'engineer']
+        allowed_dept_keys = ['engineering_team', 'procurement_team', 'accounts_finance', 'business', 'design', 'operations', 'engineer']
     else:
         dept_role_map = {
             'business manager': 'business',
@@ -24592,6 +24884,10 @@ def _render_assigned_tasks(
             'operations manager': 'operations',
             'site manager': 'engineer',
             'engineer': 'engineer',
+            'engineering manager': 'engineering_team',
+            'procurement manager': 'procurement_team',
+            'accounts manager': 'accounts_finance',
+            'finance manager': 'accounts_finance',
         }
         if role_raw in dept_role_map:
             allowed_dept_keys = [dept_role_map[role_raw]]
@@ -32608,7 +32904,7 @@ def update_stage(bid_id):
 
         # Ensure tasks exist for all departments so they can work in parallel on this bid.
         try:
-            team_stages = ['business', 'design', 'operations', 'engineer']
+            team_stages = ['engineering_team', 'procurement_team', 'accounts_finance']
             for st in team_stages:
                 cur.execute(
                     """
@@ -33921,19 +34217,28 @@ if __name__ == '__main__':
                     ('marketing', 'Marketing'),
                     ('operations', 'Operations'),
                     ('site_engineer', 'Site Engineer'),
-                    ('project_manager', 'Project Manager')
+                    ('engineering_team', 'Engineering Team'),
+                    ('procurement_team', 'Procurement Team'),
+                    ('accounts_finance', 'Accounts & Finance Team')
                     """
                 )
                 mysql.connection.commit()
                 print("Departments created successfully")
             else:
-                cur.execute("SELECT COUNT(*) AS cnt FROM departments WHERE dept_key=%s", ('project_manager',))
-                if int((cur.fetchone() or {}).get('cnt') or 0) == 0:
-                    cur.execute(
-                        "INSERT INTO departments (dept_key, display_name) VALUES (%s, %s)",
-                        ('project_manager', 'Project Manager'),
-                    )
-                    mysql.connection.commit()
+                # Ensure required departments exist even on older installs.
+                ensure_rows = [
+                    ('engineering_team', 'Engineering Team'),
+                    ('procurement_team', 'Procurement Team'),
+                    ('accounts_finance', 'Accounts & Finance Team'),
+                ]
+                for dept_key, display_name in ensure_rows:
+                    cur.execute("SELECT COUNT(*) AS cnt FROM departments WHERE dept_key=%s", (dept_key,))
+                    if int((cur.fetchone() or {}).get('cnt') or 0) == 0:
+                        cur.execute(
+                            "INSERT INTO departments (dept_key, display_name) VALUES (%s, %s)",
+                            (dept_key, display_name),
+                        )
+                mysql.connection.commit()
         except Exception as e:
             # older DBs may not have departments yet if ensure failed; ignore hard crash
             print(f"Departments seed skipped: {e}")
@@ -34105,6 +34410,220 @@ if __name__ == '__main__':
             except Exception:
                 pass
             print(f"Role normalization skipped: {e}")
+
+        # --------------------------------------------------------------------
+        # Migrate legacy Business/Design/Operations checklist stages to new teams
+        # and re-prefix task codes.
+        # --------------------------------------------------------------------
+        try:
+            stage_map = {
+                'business': 'engineering_team',
+                'design': 'procurement_team',
+                'operations': 'accounts_finance',
+                'operation': 'accounts_finance',
+                'ops': 'accounts_finance',
+                'site_engineer': 'engineering_team',
+                'engineer': 'engineering_team',
+                'site engineer': 'engineering_team',
+            }
+
+            def _norm_stage(value: str) -> str:
+                return (value or '').strip().lower().replace('-', ' ').replace('_', ' ')
+
+            # Update bid_checklists.stage values
+            try:
+                cur.execute("SELECT id, stage FROM bid_checklists WHERE COALESCE(stage,'') <> ''")
+                rows = cur.fetchall() or []
+                for row in rows:
+                    stage_raw = row.get('stage') if isinstance(row, dict) else None
+                    stage_key = _norm_stage(stage_raw)
+                    if not stage_key:
+                        continue
+                    mapped = stage_map.get(stage_key)
+                    if mapped and mapped != stage_raw:
+                        cur.execute("UPDATE bid_checklists SET stage=%s WHERE id=%s", (mapped, row.get('id')))
+            except Exception:
+                pass
+
+            # Update bid_team_progress.stage_key values if table exists
+            try:
+                cur.execute("SELECT id, stage_key FROM bid_team_progress")
+                rows = cur.fetchall() or []
+                for row in rows:
+                    stage_raw = row.get('stage_key') if isinstance(row, dict) else None
+                    stage_key = _norm_stage(stage_raw)
+                    if not stage_key:
+                        continue
+                    mapped = stage_map.get(stage_key)
+                    if mapped and mapped != stage_raw:
+                        cur.execute("UPDATE bid_team_progress SET stage_key=%s WHERE id=%s", (mapped, row.get('id')))
+            except Exception:
+                pass
+
+            # Re-prefix task codes for the new departments
+            try:
+                cur.execute("SELECT DISTINCT g_id FROM bid_checklists WHERE COALESCE(g_id,0) > 0")
+                g_ids = [r.get('g_id') for r in (cur.fetchall() or []) if r.get('g_id')]
+                new_stages = ['engineering_team', 'procurement_team', 'accounts_finance']
+                for g_id in g_ids:
+                    for stage_key in new_stages:
+                        prefix, _ = _task_code_prefix(stage_key)
+                        if not prefix:
+                            continue
+                        cur.execute(
+                            """
+                            SELECT id
+                            FROM bid_checklists
+                            WHERE g_id=%s AND LOWER(COALESCE(stage,''))=%s
+                            ORDER BY created_at ASC, id ASC
+                            """,
+                            (int(g_id), stage_key),
+                        )
+                        task_rows = cur.fetchall() or []
+                        next_num = 1
+                        for tr in task_rows:
+                            task_id = tr.get('id') if isinstance(tr, dict) else None
+                            if not task_id:
+                                continue
+                            new_code = f"{prefix}-{next_num:03d}"
+                            cur.execute(
+                                "UPDATE bid_checklists SET task_code=%s WHERE id=%s",
+                                (new_code, int(task_id)),
+                            )
+                            next_num += 1
+            except Exception:
+                pass
+
+            mysql.connection.commit()
+        except Exception as e:
+            try:
+                mysql.connection.rollback()
+            except Exception:
+                pass
+            print(f"Legacy stage migration skipped: {e}")
+
+        # --------------------------------------------------------------------
+        # Seed department-scoped dummy users for new departments (if missing)
+        # --------------------------------------------------------------------
+        try:
+            cur.execute("SELECT id, name FROM companies ORDER BY id")
+            company_rows = cur.fetchall() or []
+            preferred_company_id = None
+            for row in company_rows:
+                name_l = (row.get('name') or '').lower()
+                if 'ikio' in name_l:
+                    preferred_company_id = int(row['id'])
+                    break
+            if preferred_company_id is None and company_rows:
+                preferred_company_id = int(company_rows[0]['id'])
+
+            def _ensure_user(email: str, full_name: str, role: str = 'member') -> int | None:
+                cur.execute("SELECT id FROM users WHERE LOWER(email)=LOWER(%s) LIMIT 1", (email,))
+                row = cur.fetchone()
+                if row and row.get('id'):
+                    return int(row['id'])
+                cur.execute(
+                    "INSERT INTO users (email, full_name, password, is_admin, role) VALUES (%s, %s, %s, 0, %s)",
+                    (email, full_name, 'user', role),
+                )
+                return int(cur.lastrowid)
+
+            def _ensure_user_company_access(user_id: int, department_key: str, role: str) -> None:
+                if not preferred_company_id:
+                    return
+                cur.execute(
+                    """
+                    INSERT IGNORE INTO user_company_access (user_id, company_id, department_key, role, is_active)
+                    VALUES (%s, %s, %s, %s, TRUE)
+                    """,
+                    (int(user_id), int(preferred_company_id), department_key, role),
+                )
+
+            def _ensure_team_lead(name: str, email: str, department: str, user_id: int) -> None:
+                cur.execute("SELECT id FROM team_leads WHERE LOWER(email)=LOWER(%s) LIMIT 1", (email,))
+                row = cur.fetchone()
+                if row and row.get('id'):
+                    return
+                cur.execute(
+                    """
+                    INSERT INTO team_leads (name, email, password, department, role, user_id, is_active)
+                    VALUES (%s, %s, %s, %s, 'Team Lead', %s, TRUE)
+                    """,
+                    (name, email, 'user', department, int(user_id)),
+                )
+
+            def _ensure_employee(name: str, email: str, department: str, team_lead_user_id: int | None) -> None:
+                cur.execute("SELECT id FROM employees WHERE LOWER(email)=LOWER(%s) LIMIT 1", (email,))
+                row = cur.fetchone()
+                if row and row.get('id'):
+                    return
+                cur.execute(
+                    """
+                    INSERT INTO employees (name, email, password, department, team_lead_id, is_active)
+                    VALUES (%s, %s, %s, %s, %s, TRUE)
+                    """,
+                    (name, email, 'user', department, team_lead_user_id),
+                )
+
+            dept_seed = [
+                {
+                    'dept_key': 'engineering_team',
+                    'dept_label': 'Engineering Team',
+                    'manager_email': 'eng.manager@ikio.com',
+                    'manager_name': 'Engineering Manager',
+                    'lead_email': 'eng.lead@ikio.com',
+                    'lead_name': 'Engineering Team Lead',
+                    'employees': [
+                        ('eng.exec@ikio.com', 'Engineering Executive'),
+                        ('eng.associate@ikio.com', 'Engineering Associate'),
+                    ],
+                },
+                {
+                    'dept_key': 'procurement_team',
+                    'dept_label': 'Procurement Team',
+                    'manager_email': 'proc.manager@ikio.com',
+                    'manager_name': 'Procurement Manager',
+                    'lead_email': 'proc.lead@ikio.com',
+                    'lead_name': 'Procurement Team Lead',
+                    'employees': [
+                        ('proc.exec@ikio.com', 'Procurement Executive'),
+                        ('proc.associate@ikio.com', 'Procurement Associate'),
+                    ],
+                },
+                {
+                    'dept_key': 'accounts_finance',
+                    'dept_label': 'Accounts & Finance Team',
+                    'manager_email': 'accounts.manager@ikio.com',
+                    'manager_name': 'Accounts & Finance Manager',
+                    'lead_email': 'accounts.lead@ikio.com',
+                    'lead_name': 'Accounts & Finance Team Lead',
+                    'employees': [
+                        ('accounts.exec@ikio.com', 'Accounts Executive'),
+                        ('finance.exec@ikio.com', 'Finance Executive'),
+                    ],
+                },
+            ]
+
+            for spec in dept_seed:
+                manager_id = _ensure_user(spec['manager_email'], spec['manager_name'], role='member')
+                if manager_id:
+                    _ensure_user_company_access(manager_id, spec['dept_key'], 'manager')
+
+                lead_id = _ensure_user(spec['lead_email'], spec['lead_name'], role='member')
+                if lead_id:
+                    _ensure_user_company_access(lead_id, spec['dept_key'], 'teamlead')
+                    _ensure_team_lead(spec['lead_name'], spec['lead_email'], spec['dept_key'], lead_id)
+
+                for emp_email, emp_name in spec['employees']:
+                    _ensure_employee(emp_name, emp_email, spec['dept_key'], lead_id)
+
+            mysql.connection.commit()
+        except Exception as e:
+            try:
+                mysql.connection.rollback()
+            except Exception:
+                pass
+            print(f"Department dummy users seed skipped: {e}")
         
         # Check if users exist
         cur.execute("SELECT COUNT(*) as count FROM users")

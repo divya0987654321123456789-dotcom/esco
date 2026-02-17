@@ -25,7 +25,7 @@
       position: relative;
       margin-top: 28px;
       display: grid;
-      grid-template-columns: repeat(4, minmax(200px, 1fr));
+      grid-template-columns: repeat(5, minmax(200px, 1fr));
       gap: 18px;
     }
     .hierarchy-branches::before {
@@ -72,6 +72,7 @@
     .dept-pill.operations { background: #dcfce7; color: #047857; }
     .dept-pill.marketing { background: #fef3c7; color: #b45309; }
     .dept-pill.engineer { background: #ede9fe; color: #6d28d9; }
+    .dept-pill.accounting { background: #fee2e2; color: #b91c1c; }
     .role-stack {
       margin-top: 14px;
       position: relative;
@@ -114,7 +115,7 @@
       color: #64748b;
       font-weight: 500;
     }
-    @media (max-width: 1100px) {
+    @media (max-width: 1200px) {
       .hierarchy-branches {
         grid-template-columns: repeat(2, minmax(220px, 1fr));
       }
@@ -150,7 +151,7 @@
 
       <div class="hierarchy-branches">
         <div class="dept-card">
-          <span class="dept-pill business"><i class="fas fa-briefcase"></i>Business</span>
+          <span class="dept-pill business"><i class="fas fa-briefcase"></i>Business Development Team</span>
           <div class="role-stack">
             <div class="role-item">Manager<small>Leads the Business department</small></div>
             <div class="role-item">Team Lead<small>Owns team execution</small></div>
@@ -159,7 +160,7 @@
         </div>
 
         <div class="dept-card">
-          <span class="dept-pill operations"><i class="fas fa-gears"></i>Operations</span>
+          <span class="dept-pill operations"><i class="fas fa-gears"></i>Operations Team</span>
           <div class="role-stack">
             <div class="role-item">Manager<small>Leads the Operations department</small></div>
             <div class="role-item">Team Lead<small>Owns team execution</small></div>
@@ -168,7 +169,7 @@
         </div>
 
         <div class="dept-card">
-          <span class="dept-pill marketing"><i class="fas fa-bullhorn"></i>Marketing</span>
+          <span class="dept-pill marketing"><i class="fas fa-bullhorn"></i>Marketing & Design Team</span>
           <div class="role-stack">
             <div class="role-item">Manager<small>Leads the Marketing department</small></div>
             <div class="role-item">Team Lead<small>Owns team execution</small></div>
@@ -177,13 +178,24 @@
         </div>
 
         <div class="dept-card">
-          <span class="dept-pill engineer"><i class="fas fa-helmet-safety"></i>Site Engineer</span>
+          <span class="dept-pill engineer"><i class="fas fa-helmet-safety"></i>Engineering Team</span>
           <div class="role-stack">
             <div class="role-item">Manager<small>Leads the Site Engineer department</small></div>
             <div class="role-item">Team Lead<small>Owns team execution</small></div>
             <div class="role-item">Employees<small>Multiple team members</small></div>
           </div>
         </div>
+
+        <div class="dept-card">
+          <span class="dept-pill accounting"><i class="fas fa-file-invoice-dollar"></i>Accounting Team</span>
+          <div class="role-stack">
+            <div class="role-item">Manager<small>Leads the Accounting department</small></div>
+            <div class="role-item">Team Lead<small>Owns team execution</small></div>
+            <div class="role-item">Employees<small>Multiple team members</small></div>
+          </div>
+        </div>
+
+        
       </div>
     </div>
   </div>
