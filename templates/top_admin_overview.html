@@ -148,20 +148,70 @@
       margin: 0 auto;
       position: relative;
     }
+    .project-timeline-card {
+      border-color: #cfe9dc;
+      background: linear-gradient(180deg, #ffffff 0%, #f5fbf7 100%);
+      transition: box-shadow 0.2s ease, transform 0.2s ease, border-color 0.2s ease;
+    }
+    .project-timeline-card:hover {
+      border-color: #9ad5b8;
+      box-shadow: 0 10px 24px rgba(16, 185, 129, 0.12);
+      transform: translateY(-1px);
+    }
     .project-timeline-track .timeline-line {
       position: absolute;
       top: 18px;
       left: 0;
       width: 100%;
       height: 6px;
-      background: #f3f4f6;
-      border: 1px solid #e5e7eb;
+      background: #ecf7f0;
+      border: 1px solid #cae8d7;
       border-radius: 999px;
+    }
+    .project-timeline-track .timeline-line-fill {
+      position: absolute;
+      top: 18px;
+      left: 0;
+      height: 6px;
+      background: linear-gradient(90deg, #047857 0%, #10b981 65%, #34d399 100%);
+      border-radius: 999px;
+      transition: width 0.35s ease;
+      z-index: 0;
     }
     .project-timeline-dot {
       width: 32px;
       height: 32px;
       border-radius: 9999px;
+    }
+    .project-stage-node {
+      cursor: pointer;
+      border-radius: 10px;
+      padding: 4px 6px 0;
+      transition: background-color 0.2s ease;
+    }
+    .project-stage-node:hover {
+      background: rgba(16, 185, 129, 0.08);
+    }
+    .project-timeline-dot.is-complete {
+      background: #dcfce7;
+      border-color: #86efac;
+    }
+    .project-timeline-dot.is-complete .project-timeline-dot__inner {
+      background: #15803d;
+    }
+    .project-timeline-dot.is-active {
+      background: #ecfdf5;
+      border-color: #6ee7b7;
+    }
+    .project-timeline-dot.is-active .project-timeline-dot__inner {
+      background: #047857;
+    }
+    .project-timeline-dot.is-pending {
+      background: #ffffff;
+      border-color: #d1d5db;
+    }
+    .project-timeline-dot.is-pending .project-timeline-dot__inner {
+      background: #9ca3af;
     }
     .project-timeline-dot__inner {
       width: 12px;
@@ -176,6 +226,17 @@
     .project-timeline-progress {
       font-size: 11px;
       color: #6b7280;
+    }
+    .project-overall-pill {
+      border: 1px solid #86efac;
+      background: #ecfdf5;
+      color: #065f46;
+    }
+    .project-legend-dot {
+      width: 9px;
+      height: 9px;
+      border-radius: 9999px;
+      display: inline-block;
     }
   </style>
 
@@ -372,6 +433,11 @@
     <div class="p-5 border-b border-gray-200">
       <div class="font-semibold">Project Timeline</div>
       <div class="text-xs text-gray-500 mt-0.5">Won bids moved into delivery tracking</div>
+      <div class="mt-2 flex flex-wrap items-center gap-4 text-[11px] text-gray-600">
+        <span><span class="project-legend-dot" style="background:#15803d;"></span> Completed</span>
+        <span><span class="project-legend-dot" style="background:#047857;"></span> In Progress</span>
+        <span><span class="project-legend-dot" style="background:#9ca3af;"></span> Not Started</span>
+      </div>
     </div>
     {% set _project_stage_label_map = {
       'engineering team': 'Engineering Team',
@@ -382,15 +448,31 @@
     } %}
     <div class="p-5 space-y-5" id="projectTimelineList">
       {% for item in project_timeline_items %}
-      <div class="rounded-xl border border-gray-200 bg-white p-5 {{ 'hidden' if loop.index > 3 else '' }}" data-project-timeline-item
+      <div class="project-timeline-card rounded-xl border bg-white p-5 {{ 'hidden' if loop.index > 3 else '' }}" data-project-timeline-item
            data-project-id="{{ item.project_id }}"
            data-g-id="{{ item.g_id }}"
            data-project-manager-id="{{ item.pm_user_id or '' }}"
            data-stages='{{ item.stages|tojson|safe }}'
            data-current-stage-id="{{ item.stages[item.current_stage_index].id if item.stages and item.current_stage_index is not none else '' }}">
+        {% set p = namespace(total=0, count=0) %}
+        {% set done = namespace(count=0) %}
+        {% for st in item.stages %}
+          {% set p.total = p.total + (st.progress or 0) %}
+          {% set p.count = p.count + 1 %}
+          {% if (st.progress or 0) >= 100 %}
+            {% set done.count = done.count + 1 %}
+          {% endif %}
+        {% endfor %}
+        {% set project_overall = (p.total / p.count) if p.count > 0 else 0 %}
         <div class="flex flex-wrap items-center justify-between gap-3">
-          <h4 class="text-base font-semibold">{{ item.b_name }}</h4>
+          <div>
+            <h4 class="text-base font-semibold">{{ item.b_name }}</h4>
+            <p class="text-[11px] text-emerald-700 mt-1">{{ done.count }}/{{ p.count }} stages completed</p>
+          </div>
           <div class="flex items-center gap-3">
+            <span class="project-overall-pill px-3 py-1 text-xs font-semibold rounded-full">
+              Overall {{ project_overall|round(0) }}%
+            </span>
             <span class="px-3 py-1 text-xs font-semibold rounded-full border border-gray-200 bg-gray-50 text-gray-700">
               PM: {{ item.pm_name or item.pm_email or 'Unassigned' }}
             </span>
@@ -404,12 +486,21 @@
           {% set stage_count = item.stages|length or 1 %}
           <div class="project-timeline-track" style="--stage-count: {{ stage_count }};">
             <div class="timeline-line"></div>
+            <div class="timeline-line-fill" style="width: {{ project_overall|round(0) }}%;"></div>
             {% for st in item.stages %}
             {% set index = loop.index0 %}
             {% set is_active = index <= item.current_stage_index %}
-            <div class="text-center">
-              <div class="project-timeline-dot relative mx-auto border border-gray-200 {% if is_active %}bg-gray-900/10{% else %}bg-white{% endif %}">
-                <div class="project-timeline-dot__inner absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 {% if is_active %}bg-gray-900{% else %}bg-gray-300{% endif %}"></div>
+            {% set pct = st.progress|default(0)|int %}
+            {% if pct >= 100 %}
+              {% set dot_state = 'is-complete' %}
+            {% elif pct > 0 or is_active %}
+              {% set dot_state = 'is-active' %}
+            {% else %}
+              {% set dot_state = 'is-pending' %}
+            {% endif %}
+            <div class="text-center project-stage-node" title="{{ _project_stage_label_map.get((st.name or '')|lower, st.name) }} - {{ pct }}%">
+              <div class="project-timeline-dot {{ dot_state }} relative mx-auto border">
+                <div class="project-timeline-dot__inner absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2"></div>
               </div>
               <p class="mt-2 project-timeline-label">{{ _project_stage_label_map.get((st.name or '')|lower, st.name) }}</p>
               <p class="project-timeline-progress">{{ st.progress }}%</p>

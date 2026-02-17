@@ -353,6 +353,65 @@ def status_texts(stage: str) -> tuple[str, str]:
         work = f'Updated by {from_txt} to {to_txt}'
     return proj, work
 
+def normalize_task_status(value) -> str:
+    """Normalize status variants to canonical task states."""
+    s = (value or '').strip().lower()
+    s = s.replace('-', ' ').replace('_', ' ')
+    s = ' '.join(s.split())
+    if s in ('completed', 'complete', 'done', 'finished', 'closed'):
+        return 'completed'
+    if s in ('submitted', 'submit', 'submission'):
+        return 'submitted'
+    if s in ('rejected', 'reject'):
+        return 'rejected'
+    if s in ('in progress', 'inprogress', 'working', 'wip', 'started'):
+        return 'in_progress'
+    if s in ('pending', 'not started', 'notstarted', 'new', ''):
+        return 'pending'
+    return 'pending'
+
+def _status_to_progress_pct(status: str, progress_pct=None) -> int:
+    try:
+        if progress_pct is not None and str(progress_pct).strip() != '':
+            return max(0, min(100, int(float(progress_pct))))
+    except Exception:
+        pass
+    st = normalize_task_status(status)
+    if st == 'completed':
+        return 100
+    if st == 'submitted':
+        return 75
+    if st == 'in_progress':
+        return 50
+    return 0
+
+def _compute_checklist_stage_progress(cur, g_id: int) -> dict:
+    """Compute per-stage progress map from bid_checklists rows."""
+    try:
+        cur.execute(
+            """
+            SELECT stage, status, progress_pct
+            FROM bid_checklists
+            WHERE g_id=%s AND team_archive IS NULL
+            """,
+            (int(g_id),),
+        )
+        rows = cur.fetchall() or []
+    except Exception:
+        return {}
+    grouped = {}
+    for row in rows:
+        stage_key = _normalize_department_key(row.get('stage') or '') or ''
+        if not stage_key:
+            continue
+        grouped.setdefault(stage_key, []).append(
+            _status_to_progress_pct(row.get('status'), row.get('progress_pct'))
+        )
+    out = {}
+    for k, vals in grouped.items():
+        out[k] = int(round(sum(vals) / len(vals))) if vals else 0
+    return out
+
 def _task_code_prefix(stage: str) -> str | None:
     key = (stage or '').strip().lower()
     mapping = {
@@ -6269,6 +6328,15 @@ def top_admin_overview():
             for pr in (cur.fetchall() or []):
                 progress_map[int(pr.get('stage_id'))] = int(pr.get('progress_pct') or 0)
 
+        # Prefer live checklist-derived progress when available.
+        checklist_progress = {}
+        g_id_for_progress = r.get('g_id')
+        if g_id_for_progress:
+            try:
+                checklist_progress = _compute_checklist_stage_progress(cur, int(g_id_for_progress))
+            except Exception:
+                checklist_progress = {}
+
         cur.execute(
             "SELECT stage_id FROM project_timeline_current WHERE project_id=%s",
             (project_id,),
@@ -6284,11 +6352,14 @@ def top_admin_overview():
             sid = sr.get('id')
             if sid == current_stage_id:
                 current_index = idx
+            stage_name = sr.get('stage_name') or ''
+            stage_key = _normalize_department_key(stage_name) or stage_name.lower().replace(' ', '_')
+            computed_pct = checklist_progress.get(stage_key)
             stages.append({
                 'id': sid,
-                'name': sr.get('stage_name') or '',
+                'name': stage_name,
                 'order': int(sr.get('stage_order') or 0),
-                'progress': int(progress_map.get(int(sid), 0)) if sid is not None else 0,
+                'progress': int(computed_pct if computed_pct is not None else progress_map.get(int(sid), 0)) if sid is not None else 0,
             })
 
         stage_progress = 0
@@ -12784,11 +12855,11 @@ def project_manager_dashboard():
             if bid_date == today:
                 today_bids += 1
             for t in checklist:
-                status = (t.get('status') or t.get('state') or t.get('progress') or '').strip().lower()
+                status = normalize_task_status(t.get('status') or t.get('state') or t.get('progress') or '')
                 due = _parse_date(t.get('due_date') or t.get('assign_due_date') or '')
-                if status in ('done', 'completed', 'submitted'):
+                if status == 'completed':
                     completed_tasks += 1
-                elif status in ('in_progress', 'in progress'):
+                elif status in ('in_progress', 'submitted'):
                     in_progress_tasks += 1
                 else:
                     pending_tasks += 1
@@ -17057,9 +17128,88 @@ def create_bid_incoming():
             cur2.close()
             log_write('sync', f"Auto-synced GO bid '{b_name}' (id={bid_id}) from bid_incoming to go_bids")
         
+        # Optional: upload and link multiple bid documents at create time.
+        upload_files = request.files.getlist('rfp_files')
+        upload_files = [f for f in (upload_files or []) if f and getattr(f, 'filename', '').strip()]
+        uploaded_count = 0
+        if upload_files:
+            g_id_val = None
+            try:
+                cur_gid = mysql.connection.cursor(DictCursor)
+                cur_gid.execute("SELECT g_id FROM go_bids WHERE id=%s LIMIT 1", (bid_id,))
+                g_row = cur_gid.fetchone() or {}
+                g_id_val = g_row.get('g_id')
+            except Exception:
+                g_id_val = None
+            finally:
+                try:
+                    cur_gid.close()
+                except Exception:
+                    pass
+
+            folder_key = str(g_id_val) if g_id_val else f"bid_{bid_id}"
+            folder = os.path.join(app.root_path, 'static', 'bid_documents', folder_key)
+            os.makedirs(folder, exist_ok=True)
+
+            cur_files = mysql.connection.cursor(DictCursor)
+            try:
+                _ensure_uploaded_rfp_table_exists(cur_files)
+                cur_files.execute("SHOW COLUMNS FROM uploaded_rfp_files")
+                available_columns = {row['Field'] for row in (cur_files.fetchall() or []) if 'Field' in row}
+
+                def add_col(cols, vals, col_name, val):
+                    if col_name in available_columns:
+                        cols.append(col_name)
+                        vals.append(val)
+
+                for f in upload_files:
+                    safe_original = secure_filename(f.filename) or f"file_{uuid.uuid4().hex}.bin"
+                    saved_filename = f"{uuid.uuid4().hex}_{safe_original}"
+                    file_path = os.path.join(folder, saved_filename)
+                    try:
+                        f.save(file_path)
+                    except Exception:
+                        continue
+                    try:
+                        file_size = os.path.getsize(file_path)
+                    except Exception:
+                        file_size = 0
+
+                    cols = []
+                    vals = []
+                    add_col(cols, vals, 'bid_id', bid_id)
+                    add_col(cols, vals, 'g_id', g_id_val)
+                    add_col(cols, vals, 'filename', safe_original)
+                    add_col(cols, vals, 'original_filename', f.filename)
+                    add_col(cols, vals, 'saved_filename', saved_filename)
+                    add_col(cols, vals, 'file_path', file_path)
+                    add_col(cols, vals, 'file_size', file_size)
+                    add_col(cols, vals, 'file_type', (f.mimetype or ''))
+                    add_col(cols, vals, 'uploaded_by', getattr(current_user, 'id', None))
+                    if not cols:
+                        continue
+                    placeholders = ','.join(['%s'] * len(cols))
+                    cur_files.execute(
+                        f"INSERT INTO uploaded_rfp_files ({','.join(cols)}) VALUES ({placeholders})",
+                        tuple(vals),
+                    )
+                    uploaded_count += 1
+
+                mysql.connection.commit()
+            except Exception:
+                mysql.connection.rollback()
+            finally:
+                try:
+                    cur_files.close()
+                except Exception:
+                    pass
+
         cur.close()
         log_write('create', f"table=bid_incoming, id={bid_id}")
-        flash(f'Bid "{b_name}" created successfully!', 'success')
+        if uploaded_count > 0:
+            flash(f'Bid "{b_name}" created successfully with {uploaded_count} attachment(s)!', 'success')
+        else:
+            flash(f'Bid "{b_name}" created successfully!', 'success')
         
     except Exception as e:
         mysql.connection.rollback()
@@ -24088,6 +24238,7 @@ def _load_assigned_projects_for_manager(user_id: int, limit: int = 200):
         pass
 
     task_files_map = {}
+    checklist_map = {}
     try:
         if g_ids:
             task_cur = mysql.connection.cursor(DictCursor)
@@ -24095,8 +24246,21 @@ def _load_assigned_projects_for_manager(user_id: int, limit: int = 200):
                 placeholders = ",".join(["%s"] * len(g_ids))
                 task_cur.execute(
                     f"""
-                    SELECT id, g_id
-                    FROM bid_checklists
+                    SELECT
+                        bc.id,
+                        bc.g_id,
+                        bc.task_name,
+                        bc.description,
+                        bc.status,
+                        bc.priority,
+                        bc.due_date,
+                        bc.stage,
+                        bc.assigned_to,
+                        bc.attachment_path,
+                        e.name AS assigned_employee_name,
+                        e.email AS employee_email
+                    FROM bid_checklists bc
+                    LEFT JOIN employees e ON e.id = bc.assigned_to
                     WHERE g_id IN ({placeholders})
                       AND team_archive IS NULL
                     """,
@@ -24111,7 +24275,24 @@ def _load_assigned_projects_for_manager(user_id: int, limit: int = 200):
                     if not tid or not gid:
                         continue
                     task_ids.append(tid)
-                    task_id_to_gid[tid] = gid
+                    try:
+                        gid_key = int(gid)
+                    except Exception:
+                        gid_key = gid
+                    task_id_to_gid[tid] = gid_key
+                    checklist_map.setdefault(gid_key, []).append({
+                        'id': tid,
+                        'task_name': row.get('task_name') or 'Task',
+                        'description': row.get('description') or '',
+                        'status': normalize_task_status(row.get('status') or ''),
+                        'priority': row.get('priority') or '',
+                        'due_date': row.get('due_date') or '',
+                        'stage': row.get('stage') or '',
+                        'assigned_to': row.get('assigned_to'),
+                        'assigned_employee_name': row.get('assigned_employee_name') or '',
+                        'employee_email': row.get('employee_email') or '',
+                        'attachment': row.get('attachment_path') or '',
+                    })
                 if task_ids:
                     _ensure_task_work_files_table(task_cur)
                     _ensure_task_manager_attachments_table(task_cur)
@@ -24165,6 +24346,7 @@ def _load_assigned_projects_for_manager(user_id: int, limit: int = 200):
                     pass
     except Exception:
         task_files_map = {}
+        checklist_map = {}
 
     def _table_exists(cur, name: str) -> bool:
         try:
@@ -24407,6 +24589,11 @@ def _load_assigned_projects_for_manager(user_id: int, limit: int = 200):
         except Exception:
             merged_rfp_files = meta_files or rfp_files_map.get(r.get('g_id'), [])
 
+        meta_checklist = meta.get('checklist') or []
+        for mt in meta_checklist:
+            if isinstance(mt, dict):
+                mt['status'] = normalize_task_status(mt.get('status') or mt.get('state') or '')
+        g_key = int(r.get('g_id')) if str(r.get('g_id')).isdigit() else r.get('g_id')
         items.append({
             'g_id': r.get('g_id'),
             'bid_id': r.get('bid_id') or r.get('id'),
@@ -24425,9 +24612,9 @@ def _load_assigned_projects_for_manager(user_id: int, limit: int = 200):
             'project_activity': meta.get('project_activity') or [],
             'progress': meta.get('progress') or '',
             'priority': meta.get('priority') or '',
-            'checklist': meta.get('checklist') or [],
+            'checklist': checklist_map.get(g_key) or meta_checklist,
             'rfp_files': merged_rfp_files,
-            'task_files': task_files_map.get(r.get('g_id'), []),
+            'task_files': task_files_map.get(g_key, []) or task_files_map.get(r.get('g_id'), []),
         })
     if updated_any:
         try:
@@ -24775,28 +24962,6 @@ def _load_project_timeline_items_for_manager(user_id: int, limit: int = 200):
                 for pr in (cur.fetchall() or []):
                     progress_map[int(pr.get('stage_id'))] = int(pr.get('progress_pct') or 0)
 
-            cur.execute(
-                "SELECT stage_id FROM project_timeline_current WHERE project_id=%s",
-                (project_id,),
-            )
-            current_row = cur.fetchone() or {}
-            current_stage_id = current_row.get('stage_id')
-            if not current_stage_id and stage_rows:
-                current_stage_id = stage_rows[0].get('id')
-
-            stages = []
-            current_index = 0
-            for idx, sr in enumerate(stage_rows):
-                sid = sr.get('id')
-                if sid == current_stage_id:
-                    current_index = idx
-                stages.append({
-                    'id': sid,
-                    'name': sr.get('stage_name') or '',
-                    'order': int(sr.get('stage_order') or 0),
-                    'progress': int(progress_map.get(int(sid), 0)) if sid is not None else 0,
-                })
-
             b_name = f"Project #{project_id}"
             company = ''
             g_id = g_id_map.get(int(project_id))
@@ -24814,6 +24979,38 @@ def _load_project_timeline_items_for_manager(user_id: int, limit: int = 200):
                     g_id = row.get('g_id')
             except Exception:
                 pass
+
+            checklist_progress = {}
+            if g_id:
+                try:
+                    checklist_progress = _compute_checklist_stage_progress(cur, int(g_id))
+                except Exception:
+                    checklist_progress = {}
+
+            cur.execute(
+                "SELECT stage_id FROM project_timeline_current WHERE project_id=%s",
+                (project_id,),
+            )
+            current_row = cur.fetchone() or {}
+            current_stage_id = current_row.get('stage_id')
+            if not current_stage_id and stage_rows:
+                current_stage_id = stage_rows[0].get('id')
+
+            stages = []
+            current_index = 0
+            for idx, sr in enumerate(stage_rows):
+                sid = sr.get('id')
+                if sid == current_stage_id:
+                    current_index = idx
+                stage_name = sr.get('stage_name') or ''
+                stage_key = _normalize_department_key(stage_name) or stage_name.lower().replace(' ', '_')
+                computed_pct = checklist_progress.get(stage_key)
+                stages.append({
+                    'id': sid,
+                    'name': stage_name,
+                    'order': int(sr.get('stage_order') or 0),
+                    'progress': int(computed_pct if computed_pct is not None else progress_map.get(int(sid), 0)) if sid is not None else 0,
+                })
 
             items.append({
                 'project_id': project_id,
