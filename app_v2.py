@@ -4853,6 +4853,30 @@ def top_level_admin_dashboard():
             (project_id,),
         )
         stage_rows = cur.fetchall() or []
+
+        # Normalize legacy stage names to new department stages for display
+        legacy_stage_map = {
+            'project kickoff': 'Engineering Team',
+            'planning': 'Procurement Team',
+            'execution': 'Accounts & Finance Team',
+            'commissioning': 'Accounts & Finance Team',
+            'closeout': None,
+        }
+        normalized_stage_rows = []
+        seen_stage_names = set()
+        for sr in stage_rows:
+            raw_name = (sr.get('stage_name') or '').strip()
+            mapped = legacy_stage_map.get(raw_name.lower(), raw_name)
+            if mapped is None:
+                continue
+            name_key = mapped.lower()
+            if name_key in seen_stage_names:
+                continue
+            seen_stage_names.add(name_key)
+            sr = dict(sr)
+            sr['stage_name'] = mapped
+            normalized_stage_rows.append(sr)
+        stage_rows = normalized_stage_rows
         stage_ids = [sr.get('id') for sr in stage_rows if sr.get('id') is not None]
         progress_map = {}
         if stage_ids:
@@ -4867,6 +4891,34 @@ def top_level_admin_dashboard():
             )
             for pr in (cur.fetchall() or []):
                 progress_map[int(pr.get('stage_id'))] = int(pr.get('progress_pct') or 0)
+
+        # Compute stage progress from checklist tasks (team-wise) if available
+        checklist_progress = {}
+        try:
+            cur.execute(
+                """
+                SELECT stage, status
+                FROM bid_checklists
+                WHERE g_id=%s AND team_archive IS NULL
+                """,
+                (int(r.get('g_id') or 0),),
+            )
+            task_rows = cur.fetchall() or []
+            counts = {}
+            for tr in task_rows:
+                stage_key = _normalize_department_key(tr.get('stage') or '') or ''
+                if not stage_key:
+                    continue
+                counts.setdefault(stage_key, {'total': 0, 'done': 0})
+                counts[stage_key]['total'] += 1
+                if normalize_task_status(tr.get('status') or '') == 'completed':
+                    counts[stage_key]['done'] += 1
+            for k, v in counts.items():
+                total = int(v.get('total') or 0)
+                done = int(v.get('done') or 0)
+                checklist_progress[k] = int(round((done / total) * 100)) if total else 0
+        except Exception:
+            checklist_progress = {}
 
         cur.execute(
             "SELECT stage_id FROM project_timeline_current WHERE project_id=%s",
@@ -4883,11 +4935,14 @@ def top_level_admin_dashboard():
             sid = sr.get('id')
             if sid == current_stage_id:
                 current_index = idx
+            stage_name = sr.get('stage_name') or ''
+            stage_key = _normalize_department_key(stage_name) or stage_name.lower().replace(' ', '_')
+            computed_pct = checklist_progress.get(stage_key)
             stages.append({
                 'id': sid,
-                'name': sr.get('stage_name') or '',
+                'name': stage_name,
                 'order': int(sr.get('stage_order') or 0),
-                'progress': int(progress_map.get(int(sid), 0)) if sid is not None else 0,
+                'progress': int(computed_pct if computed_pct is not None else progress_map.get(int(sid), 0)) if sid is not None else 0,
             })
 
         stage_progress = 0
@@ -7537,8 +7592,8 @@ def _normalize_department_key(raw: str | None) -> str | None:
         "ops executive",
     ) or compact in ("operations", "operation", "ops", "opsmanager", "operationmanager", "operationsexecutive", "opsexecutive"):
         return "operations"
-    if val in ("engineer", "engineering", "site engineer", "site manager", "site_engineer", "engineering team", "site engineering", "site engineer team") or compact in ("engineer", "engineering", "siteengineer", "sitemanager", "site"):
-        return "engineer"
+    if val in ("engineer", "site engineer", "site manager", "site_engineer", "site engineering", "site engineer team") or compact in ("engineer", "siteengineer", "sitemanager", "site"):
+        return "engineering_team"
     if val in ("team lead", "teamlead"):
         return None
     return val or None
@@ -7694,6 +7749,12 @@ def _department_aliases_for_compact(dept: str | None) -> list[str]:
         return ["operations", "operation", "ops", "opsmanager", "operationmanager"]
     if compact == "engineer":
         return ["engineer", "engineering", "siteengineer", "sitemanager", "site"]
+    if compact == "engineeringteam":
+        return ["engineeringteam", "engineering", "engineer", "siteengineer", "sitemanager", "site"]
+    if compact == "procurementteam":
+        return ["procurementteam", "procurement", "purchasing", "supplychain"]
+    if compact in ("accountsfinance", "accountsandfinance", "accountingfinance"):
+        return ["accountsfinance", "accountsandfinance", "accountingfinance", "accounting", "finance"]
     return [compact] if compact else []
 
 
@@ -8021,6 +8082,7 @@ def _notify_approval_request(
     employee_id: int | None,
     department_key: str | None,
     approval_target: str | None,
+    task_id: int | None = None,
     title: str,
     message: str,
 ) -> None:
@@ -8032,6 +8094,30 @@ def _notify_approval_request(
             department_key=department_key,
             approval_target=approval_target,
         )
+        # Ensure assigned project manager receives manager-level approvals for this task.
+        try:
+            target_norm = _normalize_approval_target(approval_target) or "admin"
+            if task_id and target_norm == "manager":
+                cur.execute("SELECT g_id FROM bid_checklists WHERE id=%s", (int(task_id),))
+                row = cur.fetchone() or {}
+                g_id = row.get("g_id")
+                if g_id:
+                    _ensure_project_manager_assignments_table(cur)
+                    cur.execute(
+                        """
+                        SELECT manager_user_id
+                        FROM project_manager_assignments
+                        WHERE g_id=%s
+                        LIMIT 1
+                        """,
+                        (int(g_id),),
+                    )
+                    pm_row = cur.fetchone() or {}
+                    pm_id = pm_row.get("manager_user_id")
+                    if pm_id and pm_id not in recipients:
+                        recipients.append(int(pm_id))
+        except Exception:
+            pass
     except Exception:
         recipients = []
     finally:
@@ -8774,6 +8860,7 @@ def approvals_escalate():
                 employee_id=None,
                 department_key=_normalize_department_key(item_dept),
                 approval_target=approval_target,
+                task_id=int(task_id or 0) if task_id else None,
                 title="Approval request",
                 message=f"Task #{int(task_id or 0)} approval requested.",
             )
@@ -14050,6 +14137,89 @@ def business_manager_project_timeline_set_current():
         cur.close()
 
 
+@app.route('/project-manager/project-timeline/stages/save', methods=['POST'])
+@login_required
+def project_manager_project_timeline_save_stages():
+    project_id = request.form.get('project_id') or request.args.get('project_id')
+    if not project_id:
+        data = request.get_json(silent=True) or {}
+        project_id = data.get('project_id')
+    denied = _require_project_timeline_edit_access(project_id=int(project_id) if project_id else None)
+    if denied:
+        return denied
+    try:
+        project_id = int(project_id)
+    except Exception:
+        return jsonify({'ok': False, 'error': 'Invalid project id'}), 400
+
+    data = request.get_json(silent=True) or {}
+    stages = data.get('stages')
+    if stages is None:
+        stages_raw = request.form.get('stages') or ''
+        stages = [s.strip() for s in stages_raw.split(',') if s.strip()]
+    if not isinstance(stages, list):
+        return jsonify({'ok': False, 'error': 'Invalid stages payload'}), 400
+
+    # Normalize and map to display names
+    stage_name_map = {
+        'engineering_team': 'Engineering Team',
+        'procurement_team': 'Procurement Team',
+        'accounts_finance': 'Accounts & Finance Team',
+    }
+    normalized = []
+    seen = set()
+    for st in stages:
+        key = _normalize_department_key(str(st)) or str(st).strip().lower().replace(' ', '_')
+        if not key:
+            continue
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized.append(key)
+    if not normalized:
+        return jsonify({'ok': False, 'error': 'No stages selected'}), 400
+
+    cur = mysql.connection.cursor(DictCursor)
+    try:
+        _ensure_project_timeline_tables(cur)
+        # Clear existing stages + progress/current
+        cur.execute("DELETE FROM project_timeline_progress WHERE project_id=%s", (project_id,))
+        cur.execute("DELETE FROM project_timeline_current WHERE project_id=%s", (project_id,))
+        cur.execute("DELETE FROM project_timeline_stages WHERE project_id=%s", (project_id,))
+        # Insert new stages
+        for idx, key in enumerate(normalized):
+            stage_name = stage_name_map.get(key, key.replace('_', ' ').title())
+            cur.execute(
+                "INSERT INTO project_timeline_stages (project_id, stage_name, stage_order) VALUES (%s,%s,%s)",
+                (project_id, stage_name, idx),
+            )
+        # Set current stage to the first
+        cur.execute(
+            "SELECT id FROM project_timeline_stages WHERE project_id=%s ORDER BY stage_order ASC, id ASC LIMIT 1",
+            (project_id,),
+        )
+        row = cur.fetchone() or {}
+        if row.get('id'):
+            cur.execute(
+                """
+                INSERT INTO project_timeline_current (project_id, stage_id)
+                VALUES (%s,%s)
+                ON DUPLICATE KEY UPDATE stage_id=VALUES(stage_id)
+                """,
+                (project_id, int(row.get('id'))),
+            )
+        mysql.connection.commit()
+        return jsonify({'ok': True, 'stages': normalized})
+    except Exception as e:
+        mysql.connection.rollback()
+        return jsonify({'ok': False, 'error': str(e)}), 500
+    finally:
+        try:
+            cur.close()
+        except Exception:
+            pass
+
+
 @app.route('/api/project-manager/assign', methods=['POST'])
 @login_required
 def api_assign_project_manager():
@@ -18255,7 +18425,7 @@ def assign_task_team_lead_api(task_id):
                 FROM user_company_access
                 WHERE user_id=%s AND COALESCE(is_active, TRUE)=TRUE
                 """ + (" AND company_id=%s" if active_cid else "") + """
-                ORDER BY updated_at DESC
+                ORDER BY id DESC
                 LIMIT 1
                 """,
                 tuple([lead_id] + ([int(active_cid)] if active_cid else [])),
@@ -18267,17 +18437,40 @@ def assign_task_team_lead_api(task_id):
                 uca_role = (uca.get('role') or '').strip()
                 if uca_role:
                     lead_role = uca_role
+                elif lead_dept:
+                    # If scoped dept exists but role is missing, assume team lead.
+                    lead_role = 'teamlead'
         except Exception:
             lead_dept = None
+
+        # Fallback: check team_leads roster for role/department
+        if not lead_dept or _normalize_role_key(lead_role) != 'teamlead':
+            try:
+                cur.execute(
+                    "SELECT department, role FROM team_leads WHERE (user_id=%s OR LOWER(email)=LOWER(%s)) LIMIT 1",
+                    (int(lead_id), (user_row.get('email') or '').strip()),
+                )
+                tl = cur.fetchone() or {}
+                if tl:
+                    lead_dept = _normalize_department_key(tl.get('department') or '') or lead_dept
+                    tl_role = (tl.get('role') or '').strip()
+                    if tl_role:
+                        lead_role = tl_role
+            except Exception:
+                pass
 
         acceptable_roles = {
             'teamlead', 'team lead', 'team_lead',
             'business', 'design', 'operations', 'site engineer', 'site_engineer', 'engineering', 'engineer',
             'engineering team', 'procurement team', 'accounts finance', 'accounts', 'finance'
         }
-        if lead_role not in acceptable_roles and _normalize_role_key(lead_role) != 'teamlead':
+        lead_role_norm = _normalize_role_key(lead_role)
+        if lead_role_norm != 'teamlead' and lead_role not in acceptable_roles:
             cur.close()
             return jsonify({'success': False, 'error': 'Selected user is not a team lead'}), 400
+
+        if not lead_dept and dept_key:
+            lead_dept = dept_key
 
         if task_stage and lead_dept and lead_dept != task_stage:
             cur.close()
@@ -18568,6 +18761,7 @@ def task_upload_work(task_id):
                         employee_id=effective_employee_id,
                         department_key=department_key,
                         approval_target=approval_target,
+                        task_id=int(task_id),
                         title="Approval request",
                         message=f"New upload for task #{int(task_id)} requires approval.",
                     )
@@ -18581,6 +18775,7 @@ def task_upload_work(task_id):
                         employee_id=effective_employee_id,
                         department_key=department_key,
                         approval_target=approval_target,
+                        task_id=int(task_id),
                         title=review_title,
                         message=review_msg,
                     )
@@ -18814,6 +19009,7 @@ def task_add_comment(task_id):
                     employee_id=employee_id,
                     department_key=dept,
                     approval_target=approval_target,
+                    task_id=int(task_id),
                     title="Approval request",
                     message=f"New note for task #{int(task_id)} requires approval.",
                 )
@@ -19432,11 +19628,88 @@ def api_project_tasks(g_id):
     """Return all tasks for a project (grouped by stage on the client)."""
     cur = mysql.connection.cursor(DictCursor)
     try:
+        try:
+            _ensure_document_approvals_table(cur)
+            _ensure_task_comments_table(cur)
+            _ensure_task_work_files_table(cur)
+            _ensure_task_manager_attachments_table(cur)
+        except Exception:
+            pass
         cur.execute(
             """
             SELECT bc.id, bc.g_id, bc.task_code, bc.task_name, bc.description, bc.stage, bc.status, bc.priority,
                    bc.due_date, bc.progress_pct, bc.assigned_to, bc.created_at,
-                   e.name AS assigned_employee_name, e.email AS employee_email, e.department
+                   e.name AS assigned_employee_name, e.email AS employee_email, e.department,
+                   (
+                       SELECT COUNT(*)
+                       FROM document_approvals da
+                       JOIN task_work_files twf
+                         ON da.source_table='task_work_files' AND da.source_id=twf.id
+                       WHERE twf.task_id = bc.id AND da.status='pending'
+                   ) +
+                   (
+                       SELECT COUNT(*)
+                       FROM document_approvals da
+                       JOIN task_comments tc
+                         ON da.source_table='task_comments' AND da.source_id=tc.id
+                       WHERE tc.task_id = bc.id AND da.status='pending'
+                   ) +
+                   (
+                       SELECT COUNT(*)
+                       FROM task_comments tc
+                       LEFT JOIN document_approvals da
+                         ON da.source_table='task_comments' AND da.source_id=tc.id
+                       WHERE tc.task_id = bc.id AND tc.needs_approval=1 AND da.id IS NULL
+                   ) +
+                   (
+                       SELECT COUNT(*)
+                       FROM document_approvals da
+                       JOIN task_manager_attachments tma
+                         ON da.source_table='task_manager_attachments' AND da.source_id=tma.id
+                       WHERE tma.task_id = bc.id AND da.status='pending'
+                   ) AS pending_approvals,
+                   (
+                       SELECT COUNT(*)
+                       FROM document_approvals da
+                       JOIN task_work_files twf
+                         ON da.source_table='task_work_files' AND da.source_id=twf.id
+                       WHERE twf.task_id = bc.id AND da.status='review'
+                   ) +
+                   (
+                       SELECT COUNT(*)
+                       FROM document_approvals da
+                       JOIN task_comments tc
+                         ON da.source_table='task_comments' AND da.source_id=tc.id
+                       WHERE tc.task_id = bc.id AND da.status='review'
+                   ) +
+                   (
+                       SELECT COUNT(*)
+                       FROM document_approvals da
+                       JOIN task_manager_attachments tma
+                         ON da.source_table='task_manager_attachments' AND da.source_id=tma.id
+                       WHERE tma.task_id = bc.id AND da.status='review'
+                   ) AS review_items,
+                   (
+                       SELECT COUNT(*)
+                       FROM document_approvals da
+                       JOIN task_work_files twf
+                         ON da.source_table='task_work_files' AND da.source_id=twf.id
+                       WHERE twf.task_id = bc.id AND da.status='approved'
+                   ) +
+                   (
+                       SELECT COUNT(*)
+                       FROM document_approvals da
+                       JOIN task_comments tc
+                         ON da.source_table='task_comments' AND da.source_id=tc.id
+                       WHERE tc.task_id = bc.id AND da.status='approved'
+                   ) +
+                   (
+                       SELECT COUNT(*)
+                       FROM document_approvals da
+                       JOIN task_manager_attachments tma
+                         ON da.source_table='task_manager_attachments' AND da.source_id=tma.id
+                       WHERE tma.task_id = bc.id AND da.status='approved'
+                   ) AS approved_items
             FROM bid_checklists bc
             LEFT JOIN employees e ON bc.assigned_to = e.id
             WHERE g_id=%s AND team_archive IS NULL
@@ -19445,11 +19718,122 @@ def api_project_tasks(g_id):
             (int(g_id),),
         )
         tasks = cur.fetchall() or []
+        task_ids = [t.get('id') for t in tasks if t.get('id')]
+        comments_map = {}
+        employee_files_map = {}
+        manager_files_map = {}
+        if task_ids:
+            placeholders = ",".join(["%s"] * len(task_ids))
+            try:
+                cur.execute(f"""
+                    SELECT tc.*, e.name as employee_name, u.email as user_email, da.status as approval_status, da.decision_note as decision_note
+                    FROM task_comments tc
+                    LEFT JOIN employees e ON tc.employee_id = e.id
+                    LEFT JOIN users u ON tc.user_id = u.id
+                    LEFT JOIN document_approvals da ON da.source_table='task_comments' AND da.source_id=tc.id
+                    WHERE tc.task_id IN ({placeholders})
+                    ORDER BY tc.created_at DESC
+                """, tuple(task_ids))
+                all_comments = cur.fetchall() or []
+                for c in all_comments:
+                    tid = c.get('task_id')
+                    if not tid:
+                        continue
+                    created_at = c.get('created_at')
+                    try:
+                        created_str = created_at.strftime('%Y-%m-%d %H:%M') if created_at else ''
+                    except Exception:
+                        created_str = str(created_at) if created_at else ''
+                    comments_map.setdefault(tid, []).append({
+                        'id': c.get('id'),
+                        'comment': c.get('comment'),
+                        'employee_name': c.get('employee_name') or c.get('user_email') or 'User',
+                        'employee_email': c.get('employee_email') or '',
+                        'created_at': created_str,
+                        'approval_status': ((c.get('approval_status') or '').strip().lower() or None),
+                        'approval_target': (c.get('approval_target') or 'admin'),
+                        'needs_approval': bool(c.get('needs_approval')),
+                        'decision_note': c.get('decision_note') or ''
+                    })
+            except Exception:
+                comments_map = {}
+            try:
+                cur.execute(f"""
+                    SELECT twf.*, e.name as employee_name, e.email as employee_email, da.status as approval_status, da.decision_note as decision_note
+                    FROM task_work_files twf
+                    LEFT JOIN employees e ON twf.employee_id = e.id
+                    LEFT JOIN document_approvals da ON da.source_table='task_work_files' AND da.source_id=twf.id
+                    WHERE twf.task_id IN ({placeholders})
+                    ORDER BY twf.uploaded_at DESC
+                """, tuple(task_ids))
+                all_files = cur.fetchall() or []
+                for f in all_files:
+                    tid = f.get('task_id')
+                    if not tid:
+                        continue
+                    uploaded_at = f.get('uploaded_at')
+                    try:
+                        uploaded_str = uploaded_at.strftime('%Y-%m-%d %H:%M') if uploaded_at else ''
+                    except Exception:
+                        uploaded_str = str(uploaded_at) if uploaded_at else ''
+                    employee_files_map.setdefault(tid, []).append({
+                        'id': f.get('id'),
+                        'filename': f.get('original_filename') or f.get('filename'),
+                        'description': f.get('description', ''),
+                        'employee_name': f.get('employee_name', ''),
+                        'employee_email': f.get('employee_email', ''),
+                        'uploaded_at': uploaded_str,
+                        'download_url': f"/task/file/{f.get('id')}/download",
+                        'approval_status': ((f.get('approval_status') or '').strip().lower() or None),
+                        'approval_target': f.get('approval_target') or 'admin',
+                        'decision_note': f.get('decision_note') or ''
+                    })
+            except Exception:
+                employee_files_map = {}
+            try:
+                cur.execute(f"""
+                    SELECT tma.*, u.email as manager_email, da.status as approval_status, da.decision_note as decision_note
+                    FROM task_manager_attachments tma
+                    LEFT JOIN users u ON tma.user_id = u.id
+                    LEFT JOIN document_approvals da ON da.source_table='task_manager_attachments' AND da.source_id=tma.id
+                    WHERE tma.task_id IN ({placeholders})
+                    ORDER BY tma.uploaded_at DESC
+                """, tuple(task_ids))
+                all_manager_files = cur.fetchall() or []
+                for f in all_manager_files:
+                    tid = f.get('task_id')
+                    if not tid:
+                        continue
+                    uploaded_at = f.get('uploaded_at')
+                    try:
+                        uploaded_str = uploaded_at.strftime('%Y-%m-%d %H:%M') if uploaded_at else ''
+                    except Exception:
+                        uploaded_str = str(uploaded_at) if uploaded_at else ''
+                    manager_files_map.setdefault(tid, []).append({
+                        'id': f.get('id'),
+                        'filename': f.get('original_filename') or f.get('filename'),
+                        'manager_email': f.get('manager_email') or 'Manager',
+                        'uploaded_at': uploaded_str,
+                        'download_url': f"/task/manager-file/{f.get('id')}/download",
+                        'approval_status': ((f.get('approval_status') or '').strip().lower() or None),
+                        'approval_target': f.get('approval_target') or 'admin',
+                        'decision_note': f.get('decision_note') or ''
+                    })
+            except Exception:
+                manager_files_map = {}
         try:
             _assign_missing_task_codes(cur, tasks, fallback_stage='engineering_team')
             mysql.connection.commit()
         except Exception:
             mysql.connection.rollback()
+        for t in tasks:
+            tid = t.get('id')
+            t['pending_approvals'] = int(t.get('pending_approvals') or 0)
+            t['review_items'] = int(t.get('review_items') or 0)
+            t['approved_items'] = int(t.get('approved_items') or 0)
+            t['employee_comments'] = comments_map.get(tid, [])
+            t['employee_files'] = employee_files_map.get(tid, [])
+            t['manager_files'] = manager_files_map.get(tid, [])
         return jsonify({'tasks': tasks})
     except Exception as e:
         return jsonify({'error': str(e), 'tasks': []}), 500
@@ -24452,11 +24836,16 @@ def _load_project_timeline_items_for_manager(user_id: int, limit: int = 200):
 def _load_assigned_tasks_for_employee(dept_key: str, employee_id: int | None, limit: int = 200):
     if not employee_id:
         return []
-    items = _load_assigned_tasks_for_department(dept_key, limit)
+    dept_key_norm = _normalize_department_key(dept_key or '') or (dept_key or '').strip().lower()
+    items = _load_assigned_tasks_for_department(dept_key_norm or dept_key, limit)
     cur = mysql.connection.cursor(DictCursor)
     try:
         cur.execute(
-            "SELECT DISTINCT g_id FROM bid_checklists WHERE assigned_to = %s",
+            """
+            SELECT DISTINCT g_id
+            FROM bid_checklists
+            WHERE assigned_to = %s
+            """,
             (int(employee_id),),
         )
         g_ids = {int(r.get('g_id')) for r in (cur.fetchall() or []) if r.get('g_id')}
@@ -24469,7 +24858,84 @@ def _load_assigned_tasks_for_employee(dept_key: str, employee_id: int | None, li
             pass
     if not g_ids:
         return []
-    return [it for it in (items or []) if it.get('g_id') in g_ids]
+    filtered = [it for it in (items or []) if it.get('g_id') in g_ids]
+    if filtered:
+        return filtered
+
+    # Fallback: build minimal items directly from go_bids/bid_incoming when bid_assign_meta is empty.
+    try:
+        cur = mysql.connection.cursor(DictCursor)
+        placeholders = ",".join(["%s"] * len(g_ids))
+        cur.execute(
+            f"""
+            SELECT gb.g_id,
+                   gb.b_name,
+                   gb.company,
+                   gb.state,
+                   gb.due_date,
+                   gb.summary,
+                   gb.type,
+                   gb.id AS incoming_id,
+                   bi.id AS bid_id,
+                   bi.b_name AS bi_name,
+                   bi.comp_name,
+                   bi.state AS bi_state,
+                   bi.summary AS bi_summary,
+                   bi.type AS bi_type,
+                   bi.scope AS bi_scope
+            FROM go_bids gb
+            LEFT JOIN bid_incoming bi ON bi.id = gb.id
+            WHERE gb.g_id IN ({placeholders})
+            """,
+            tuple(g_ids),
+        )
+        rows = cur.fetchall() or []
+    except Exception:
+        rows = []
+    finally:
+        try:
+            cur.close()
+        except Exception:
+            pass
+
+    items = []
+    update_cur = mysql.connection.cursor(DictCursor)
+    updated_any = False
+    for r in rows:
+        scope_text = r.get('bi_scope') or ''
+        type_text = r.get('type') or r.get('bi_type') or ''
+        try:
+            meta = {}
+            ik_code = _ensure_ik_project_code(update_cur, int(r.get('g_id') or 0), meta, scope_text, type_text)
+            if ik_code:
+                updated_any = True
+        except Exception:
+            ik_code = ''
+        items.append({
+            'g_id': r.get('g_id'),
+            'bid_id': r.get('bid_id') or r.get('incoming_id'),
+            'name': r.get('b_name') or r.get('bi_name') or 'Bid',
+            'company': r.get('company') or r.get('comp_name') or '',
+            'state': r.get('state') or r.get('bi_state') or '',
+            'summary': r.get('summary') or r.get('bi_summary') or '',
+            'scope': r.get('bi_scope') or '',
+            'type': r.get('type') or r.get('bi_type') or '',
+            'priority': 'normal',
+            'ik_project_code': ik_code or '',
+            'project_activity': [],
+            'rfp_files': [],
+            'task_files': [],
+        })
+    if updated_any:
+        try:
+            mysql.connection.commit()
+        except Exception:
+            mysql.connection.rollback()
+    try:
+        update_cur.close()
+    except Exception:
+        pass
+    return items
 
 
 def _render_employee_assigned_tasks(dept_key: str, employee_id: int | None, title: str):
@@ -24496,7 +24962,7 @@ def _render_employee_assigned_tasks(dept_key: str, employee_id: int | None, titl
         employee_email = ''
         employee_name = ''
     try:
-        dept_keys = ['business', 'design', 'operations', 'engineer']
+        dept_keys = ['engineering_team', 'procurement_team', 'accounts_finance', 'business', 'design', 'operations', 'engineer']
         dept_metrics = {}
         for k in dept_keys:
             try:
@@ -24604,6 +25070,12 @@ def _team_key_from_access(dept_key: str | None) -> str | None:
         return 'operations'
     if d in ['site_engineer', 'site_engineering', 'engineer', 'engineering']:
         return 'engineer'
+    if d in ['engineering_team', 'engineering team']:
+        return 'engineering_team'
+    if d in ['procurement_team', 'procurement team']:
+        return 'procurement_team'
+    if d in ['accounts_finance', 'accounts & finance team', 'accounts finance', 'accounts team', 'finance team']:
+        return 'accounts_finance'
     return None
 
 
@@ -24626,7 +25098,7 @@ def _render_assigned_tasks(
     )
     allowed_dept_keys = []
     if admin_like:
-        allowed_dept_keys = ['business', 'design', 'operations', 'engineer']
+        allowed_dept_keys = ['engineering_team', 'procurement_team', 'accounts_finance', 'business', 'design', 'operations', 'engineer']
     else:
         dept_role_map = {
             'business manager': 'business',
@@ -24635,6 +25107,10 @@ def _render_assigned_tasks(
             'operations manager': 'operations',
             'site manager': 'engineer',
             'engineer': 'engineer',
+            'engineering manager': 'engineering_team',
+            'procurement manager': 'procurement_team',
+            'accounts manager': 'accounts_finance',
+            'finance manager': 'accounts_finance',
         }
         if role_raw in dept_role_map:
             allowed_dept_keys = [dept_role_map[role_raw]]

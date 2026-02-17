@@ -139,6 +139,44 @@
     .bid-timeline-compact .bid-timeline-stage {
       min-width: 72px;
     }
+    .project-timeline-track {
+      display: grid;
+      grid-template-columns: repeat(var(--stage-count), minmax(0, 1fr));
+      gap: 0;
+      width: 100%;
+      max-width: 100%;
+      margin: 0 auto;
+      position: relative;
+    }
+    .project-timeline-track .timeline-line {
+      position: absolute;
+      top: 18px;
+      left: 0;
+      width: 100%;
+      height: 6px;
+      background: #f3f4f6;
+      border: 1px solid #e5e7eb;
+      border-radius: 999px;
+    }
+    .project-timeline-dot {
+      width: 32px;
+      height: 32px;
+      border-radius: 9999px;
+    }
+    .project-timeline-dot__inner {
+      width: 12px;
+      height: 12px;
+      border-radius: 9999px;
+    }
+    .project-timeline-label {
+      font-size: 12px;
+      font-weight: 600;
+      color: #374151;
+    }
+    .project-timeline-progress {
+      font-size: 11px;
+      color: #6b7280;
+    }
   </style>
 
     
@@ -336,14 +374,11 @@
       <div class="text-xs text-gray-500 mt-0.5">Won bids moved into delivery tracking</div>
     </div>
     {% set _project_stage_label_map = {
-      'project kickoff': 'Engineering Team',
-      'planning': 'Procurement Team',
-      'execution': 'Accounts & Finance Team',
-      'commissioning': 'Accounts & Finance Team',
       'engineering team': 'Engineering Team',
       'procurement team': 'Procurement Team',
       'accounts & finance team': 'Accounts & Finance Team',
-      'accounts and finance team': 'Accounts & Finance Team'
+      'accounts and finance team': 'Accounts & Finance Team',
+      'closeout': 'Closeout'
     } %}
     <div class="p-5 space-y-5" id="projectTimelineList">
       {% for item in project_timeline_items %}
@@ -366,17 +401,18 @@
           </div>
         </div>
         <div class="relative mt-6">
-          <div class="absolute top-4 left-0 w-full h-1 bg-gray-100 rounded-full border border-gray-200"></div>
-          <div class="relative flex justify-between">
+          {% set stage_count = item.stages|length or 1 %}
+          <div class="project-timeline-track" style="--stage-count: {{ stage_count }};">
+            <div class="timeline-line"></div>
             {% for st in item.stages %}
             {% set index = loop.index0 %}
             {% set is_active = index <= item.current_stage_index %}
             <div class="text-center">
-              <div class="relative w-8 h-8 rounded-full mx-auto border border-gray-200 {% if is_active %}bg-gray-900/10{% else %}bg-white{% endif %}">
-                <div class="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-3 h-3 {% if is_active %}bg-gray-900{% else %}bg-gray-300{% endif %} rounded-full"></div>
+              <div class="project-timeline-dot relative mx-auto border border-gray-200 {% if is_active %}bg-gray-900/10{% else %}bg-white{% endif %}">
+                <div class="project-timeline-dot__inner absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 {% if is_active %}bg-gray-900{% else %}bg-gray-300{% endif %}"></div>
               </div>
-              <p class="mt-2 text-[11px] font-semibold text-gray-600">{{ _project_stage_label_map.get((st.name or '')|lower, st.name) }}</p>
-              <p class="text-[10px] text-gray-500">{{ st.progress }}%</p>
+              <p class="mt-2 project-timeline-label">{{ _project_stage_label_map.get((st.name or '')|lower, st.name) }}</p>
+              <p class="project-timeline-progress">{{ st.progress }}%</p>
             </div>
             {% endfor %}
           </div>
