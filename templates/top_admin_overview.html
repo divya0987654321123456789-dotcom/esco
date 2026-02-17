@@ -139,24 +139,6 @@
     .bid-timeline-compact .bid-timeline-stage {
       min-width: 72px;
     }
-    .project-timeline-track {
-      display: grid;
-      grid-template-columns: repeat(var(--stage-count), minmax(0, 1fr));
-      gap: 0;
-      max-width: min(100%, calc(180px * var(--stage-count)));
-      margin: 0 auto;
-      position: relative;
-    }
-    .project-timeline-track .timeline-line {
-      position: absolute;
-      top: 16px;
-      left: 0;
-      width: 100%;
-      height: 4px;
-      background: #f3f4f6;
-      border: 1px solid #e5e7eb;
-      border-radius: 999px;
-    }
   </style>
 
     
@@ -354,11 +336,14 @@
       <div class="text-xs text-gray-500 mt-0.5">Won bids moved into delivery tracking</div>
     </div>
     {% set _project_stage_label_map = {
+      'project kickoff': 'Engineering Team',
+      'planning': 'Procurement Team',
+      'execution': 'Accounts & Finance Team',
+      'commissioning': 'Accounts & Finance Team',
       'engineering team': 'Engineering Team',
       'procurement team': 'Procurement Team',
       'accounts & finance team': 'Accounts & Finance Team',
-      'accounts and finance team': 'Accounts & Finance Team',
-      'closeout': 'Closeout'
+      'accounts and finance team': 'Accounts & Finance Team'
     } %}
     <div class="p-5 space-y-5" id="projectTimelineList">
       {% for item in project_timeline_items %}
@@ -381,8 +366,8 @@
           </div>
         </div>
         <div class="relative mt-6">
-          <div class="project-timeline-track" style="--stage-count: {{ item.stages|length or 1 }};">
-            <div class="timeline-line"></div>
+          <div class="absolute top-4 left-0 w-full h-1 bg-gray-100 rounded-full border border-gray-200"></div>
+          <div class="relative flex justify-between">
             {% for st in item.stages %}
             {% set index = loop.index0 %}
             {% set is_active = index <= item.current_stage_index %}

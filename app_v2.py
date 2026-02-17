@@ -4853,30 +4853,6 @@ def top_level_admin_dashboard():
             (project_id,),
         )
         stage_rows = cur.fetchall() or []
-
-        # Normalize legacy stage names to new department stages for display
-        legacy_stage_map = {
-            'project kickoff': 'Engineering Team',
-            'planning': 'Procurement Team',
-            'execution': 'Accounts & Finance Team',
-            'commissioning': 'Accounts & Finance Team',
-            'closeout': None,
-        }
-        normalized_stage_rows = []
-        seen_stage_names = set()
-        for sr in stage_rows:
-            raw_name = (sr.get('stage_name') or '').strip()
-            mapped = legacy_stage_map.get(raw_name.lower(), raw_name)
-            if mapped is None:
-                continue
-            name_key = mapped.lower()
-            if name_key in seen_stage_names:
-                continue
-            seen_stage_names.add(name_key)
-            sr = dict(sr)
-            sr['stage_name'] = mapped
-            normalized_stage_rows.append(sr)
-        stage_rows = normalized_stage_rows
         stage_ids = [sr.get('id') for sr in stage_rows if sr.get('id') is not None]
         progress_map = {}
         if stage_ids:
@@ -4891,34 +4867,6 @@ def top_level_admin_dashboard():
             )
             for pr in (cur.fetchall() or []):
                 progress_map[int(pr.get('stage_id'))] = int(pr.get('progress_pct') or 0)
-
-        # Compute stage progress from checklist tasks (team-wise) if available
-        checklist_progress = {}
-        try:
-            cur.execute(
-                """
-                SELECT stage, status
-                FROM bid_checklists
-                WHERE g_id=%s AND team_archive IS NULL
-                """,
-                (int(r.get('g_id') or 0),),
-            )
-            task_rows = cur.fetchall() or []
-            counts = {}
-            for tr in task_rows:
-                stage_key = _normalize_department_key(tr.get('stage') or '') or ''
-                if not stage_key:
-                    continue
-                counts.setdefault(stage_key, {'total': 0, 'done': 0})
-                counts[stage_key]['total'] += 1
-                if normalize_task_status(tr.get('status') or '') == 'completed':
-                    counts[stage_key]['done'] += 1
-            for k, v in counts.items():
-                total = int(v.get('total') or 0)
-                done = int(v.get('done') or 0)
-                checklist_progress[k] = int(round((done / total) * 100)) if total else 0
-        except Exception:
-            checklist_progress = {}
 
         cur.execute(
             "SELECT stage_id FROM project_timeline_current WHERE project_id=%s",
@@ -4935,14 +4883,11 @@ def top_level_admin_dashboard():
             sid = sr.get('id')
             if sid == current_stage_id:
                 current_index = idx
-            stage_name = sr.get('stage_name') or ''
-            stage_key = _normalize_department_key(stage_name) or stage_name.lower().replace(' ', '_')
-            computed_pct = checklist_progress.get(stage_key)
             stages.append({
                 'id': sid,
-                'name': stage_name,
+                'name': sr.get('stage_name') or '',
                 'order': int(sr.get('stage_order') or 0),
-                'progress': int(computed_pct if computed_pct is not None else progress_map.get(int(sid), 0)) if sid is not None else 0,
+                'progress': int(progress_map.get(int(sid), 0)) if sid is not None else 0,
             })
 
         stage_progress = 0
@@ -7592,8 +7537,8 @@ def _normalize_department_key(raw: str | None) -> str | None:
         "ops executive",
     ) or compact in ("operations", "operation", "ops", "opsmanager", "operationmanager", "operationsexecutive", "opsexecutive"):
         return "operations"
-    if val in ("engineer", "site engineer", "site manager", "site_engineer", "site engineering", "site engineer team") or compact in ("engineer", "siteengineer", "sitemanager", "site"):
-        return "engineering_team"
+    if val in ("engineer", "engineering", "site engineer", "site manager", "site_engineer", "engineering team", "site engineering", "site engineer team") or compact in ("engineer", "engineering", "siteengineer", "sitemanager", "site"):
+        return "engineer"
     if val in ("team lead", "teamlead"):
         return None
     return val or None
@@ -14105,89 +14050,6 @@ def business_manager_project_timeline_set_current():
         cur.close()
 
 
-@app.route('/project-manager/project-timeline/stages/save', methods=['POST'])
-@login_required
-def project_manager_project_timeline_save_stages():
-    project_id = request.form.get('project_id') or request.args.get('project_id')
-    if not project_id:
-        data = request.get_json(silent=True) or {}
-        project_id = data.get('project_id')
-    denied = _require_project_timeline_edit_access(project_id=int(project_id) if project_id else None)
-    if denied:
-        return denied
-    try:
-        project_id = int(project_id)
-    except Exception:
-        return jsonify({'ok': False, 'error': 'Invalid project id'}), 400
-
-    data = request.get_json(silent=True) or {}
-    stages = data.get('stages')
-    if stages is None:
-        stages_raw = request.form.get('stages') or ''
-        stages = [s.strip() for s in stages_raw.split(',') if s.strip()]
-    if not isinstance(stages, list):
-        return jsonify({'ok': False, 'error': 'Invalid stages payload'}), 400
-
-    # Normalize and map to display names
-    stage_name_map = {
-        'engineering_team': 'Engineering Team',
-        'procurement_team': 'Procurement Team',
-        'accounts_finance': 'Accounts & Finance Team',
-    }
-    normalized = []
-    seen = set()
-    for st in stages:
-        key = _normalize_department_key(str(st)) or str(st).strip().lower().replace(' ', '_')
-        if not key:
-            continue
-        if key in seen:
-            continue
-        seen.add(key)
-        normalized.append(key)
-    if not normalized:
-        return jsonify({'ok': False, 'error': 'No stages selected'}), 400
-
-    cur = mysql.connection.cursor(DictCursor)
-    try:
-        _ensure_project_timeline_tables(cur)
-        # Clear existing stages + progress/current
-        cur.execute("DELETE FROM project_timeline_progress WHERE project_id=%s", (project_id,))
-        cur.execute("DELETE FROM project_timeline_current WHERE project_id=%s", (project_id,))
-        cur.execute("DELETE FROM project_timeline_stages WHERE project_id=%s", (project_id,))
-        # Insert new stages
-        for idx, key in enumerate(normalized):
-            stage_name = stage_name_map.get(key, key.replace('_', ' ').title())
-            cur.execute(
-                "INSERT INTO project_timeline_stages (project_id, stage_name, stage_order) VALUES (%s,%s,%s)",
-                (project_id, stage_name, idx),
-            )
-        # Set current stage to the first
-        cur.execute(
-            "SELECT id FROM project_timeline_stages WHERE project_id=%s ORDER BY stage_order ASC, id ASC LIMIT 1",
-            (project_id,),
-        )
-        row = cur.fetchone() or {}
-        if row.get('id'):
-            cur.execute(
-                """
-                INSERT INTO project_timeline_current (project_id, stage_id)
-                VALUES (%s,%s)
-                ON DUPLICATE KEY UPDATE stage_id=VALUES(stage_id)
-                """,
-                (project_id, int(row.get('id'))),
-            )
-        mysql.connection.commit()
-        return jsonify({'ok': True, 'stages': normalized})
-    except Exception as e:
-        mysql.connection.rollback()
-        return jsonify({'ok': False, 'error': str(e)}), 500
-    finally:
-        try:
-            cur.close()
-        except Exception:
-            pass
-
-
 @app.route('/api/project-manager/assign', methods=['POST'])
 @login_required
 def api_assign_project_manager():
@@ -18393,7 +18255,7 @@ def assign_task_team_lead_api(task_id):
                 FROM user_company_access
                 WHERE user_id=%s AND COALESCE(is_active, TRUE)=TRUE
                 """ + (" AND company_id=%s" if active_cid else "") + """
-                ORDER BY id DESC
+                ORDER BY updated_at DESC
                 LIMIT 1
                 """,
                 tuple([lead_id] + ([int(active_cid)] if active_cid else [])),
@@ -18405,40 +18267,17 @@ def assign_task_team_lead_api(task_id):
                 uca_role = (uca.get('role') or '').strip()
                 if uca_role:
                     lead_role = uca_role
-                elif lead_dept:
-                    # If scoped dept exists but role is missing, assume team lead.
-                    lead_role = 'teamlead'
         except Exception:
             lead_dept = None
-
-        # Fallback: check team_leads roster for role/department
-        if not lead_dept or _normalize_role_key(lead_role) != 'teamlead':
-            try:
-                cur.execute(
-                    "SELECT department, role FROM team_leads WHERE (user_id=%s OR LOWER(email)=LOWER(%s)) LIMIT 1",
-                    (int(lead_id), (user_row.get('email') or '').strip()),
-                )
-                tl = cur.fetchone() or {}
-                if tl:
-                    lead_dept = _normalize_department_key(tl.get('department') or '') or lead_dept
-                    tl_role = (tl.get('role') or '').strip()
-                    if tl_role:
-                        lead_role = tl_role
-            except Exception:
-                pass
 
         acceptable_roles = {
             'teamlead', 'team lead', 'team_lead',
             'business', 'design', 'operations', 'site engineer', 'site_engineer', 'engineering', 'engineer',
             'engineering team', 'procurement team', 'accounts finance', 'accounts', 'finance'
         }
-        lead_role_norm = _normalize_role_key(lead_role)
-        if lead_role_norm != 'teamlead' and lead_role not in acceptable_roles:
+        if lead_role not in acceptable_roles and _normalize_role_key(lead_role) != 'teamlead':
             cur.close()
             return jsonify({'success': False, 'error': 'Selected user is not a team lead'}), 400
-
-        if not lead_dept and dept_key:
-            lead_dept = dept_key
 
         if task_stage and lead_dept and lead_dept != task_stage:
             cur.close()
@@ -24613,16 +24452,11 @@ def _load_project_timeline_items_for_manager(user_id: int, limit: int = 200):
 def _load_assigned_tasks_for_employee(dept_key: str, employee_id: int | None, limit: int = 200):
     if not employee_id:
         return []
-    dept_key_norm = _normalize_department_key(dept_key or '') or (dept_key or '').strip().lower()
-    items = _load_assigned_tasks_for_department(dept_key_norm or dept_key, limit)
+    items = _load_assigned_tasks_for_department(dept_key, limit)
     cur = mysql.connection.cursor(DictCursor)
     try:
         cur.execute(
-            """
-            SELECT DISTINCT g_id
-            FROM bid_checklists
-            WHERE assigned_to = %s
-            """,
+            "SELECT DISTINCT g_id FROM bid_checklists WHERE assigned_to = %s",
             (int(employee_id),),
         )
         g_ids = {int(r.get('g_id')) for r in (cur.fetchall() or []) if r.get('g_id')}
@@ -24635,84 +24469,7 @@ def _load_assigned_tasks_for_employee(dept_key: str, employee_id: int | None, li
             pass
     if not g_ids:
         return []
-    filtered = [it for it in (items or []) if it.get('g_id') in g_ids]
-    if filtered:
-        return filtered
-
-    # Fallback: build minimal items directly from go_bids/bid_incoming when bid_assign_meta is empty.
-    try:
-        cur = mysql.connection.cursor(DictCursor)
-        placeholders = ",".join(["%s"] * len(g_ids))
-        cur.execute(
-            f"""
-            SELECT gb.g_id,
-                   gb.b_name,
-                   gb.company,
-                   gb.state,
-                   gb.due_date,
-                   gb.summary,
-                   gb.type,
-                   gb.id AS incoming_id,
-                   bi.id AS bid_id,
-                   bi.b_name AS bi_name,
-                   bi.comp_name,
-                   bi.state AS bi_state,
-                   bi.summary AS bi_summary,
-                   bi.type AS bi_type,
-                   bi.scope AS bi_scope
-            FROM go_bids gb
-            LEFT JOIN bid_incoming bi ON bi.id = gb.id
-            WHERE gb.g_id IN ({placeholders})
-            """,
-            tuple(g_ids),
-        )
-        rows = cur.fetchall() or []
-    except Exception:
-        rows = []
-    finally:
-        try:
-            cur.close()
-        except Exception:
-            pass
-
-    items = []
-    update_cur = mysql.connection.cursor(DictCursor)
-    updated_any = False
-    for r in rows:
-        scope_text = r.get('bi_scope') or ''
-        type_text = r.get('type') or r.get('bi_type') or ''
-        try:
-            meta = {}
-            ik_code = _ensure_ik_project_code(update_cur, int(r.get('g_id') or 0), meta, scope_text, type_text)
-            if ik_code:
-                updated_any = True
-        except Exception:
-            ik_code = ''
-        items.append({
-            'g_id': r.get('g_id'),
-            'bid_id': r.get('bid_id') or r.get('incoming_id'),
-            'name': r.get('b_name') or r.get('bi_name') or 'Bid',
-            'company': r.get('company') or r.get('comp_name') or '',
-            'state': r.get('state') or r.get('bi_state') or '',
-            'summary': r.get('summary') or r.get('bi_summary') or '',
-            'scope': r.get('bi_scope') or '',
-            'type': r.get('type') or r.get('bi_type') or '',
-            'priority': 'normal',
-            'ik_project_code': ik_code or '',
-            'project_activity': [],
-            'rfp_files': [],
-            'task_files': [],
-        })
-    if updated_any:
-        try:
-            mysql.connection.commit()
-        except Exception:
-            mysql.connection.rollback()
-    try:
-        update_cur.close()
-    except Exception:
-        pass
-    return items
+    return [it for it in (items or []) if it.get('g_id') in g_ids]
 
 
 def _render_employee_assigned_tasks(dept_key: str, employee_id: int | None, title: str):
@@ -24739,7 +24496,7 @@ def _render_employee_assigned_tasks(dept_key: str, employee_id: int | None, titl
         employee_email = ''
         employee_name = ''
     try:
-        dept_keys = ['engineering_team', 'procurement_team', 'accounts_finance', 'business', 'design', 'operations', 'engineer']
+        dept_keys = ['business', 'design', 'operations', 'engineer']
         dept_metrics = {}
         for k in dept_keys:
             try:
@@ -24847,12 +24604,6 @@ def _team_key_from_access(dept_key: str | None) -> str | None:
         return 'operations'
     if d in ['site_engineer', 'site_engineering', 'engineer', 'engineering']:
         return 'engineer'
-    if d in ['engineering_team', 'engineering team']:
-        return 'engineering_team'
-    if d in ['procurement_team', 'procurement team']:
-        return 'procurement_team'
-    if d in ['accounts_finance', 'accounts & finance team', 'accounts finance', 'accounts team', 'finance team']:
-        return 'accounts_finance'
     return None
 
 
@@ -24875,7 +24626,7 @@ def _render_assigned_tasks(
     )
     allowed_dept_keys = []
     if admin_like:
-        allowed_dept_keys = ['engineering_team', 'procurement_team', 'accounts_finance', 'business', 'design', 'operations', 'engineer']
+        allowed_dept_keys = ['business', 'design', 'operations', 'engineer']
     else:
         dept_role_map = {
             'business manager': 'business',
@@ -24884,10 +24635,6 @@ def _render_assigned_tasks(
             'operations manager': 'operations',
             'site manager': 'engineer',
             'engineer': 'engineer',
-            'engineering manager': 'engineering_team',
-            'procurement manager': 'procurement_team',
-            'accounts manager': 'accounts_finance',
-            'finance manager': 'accounts_finance',
         }
         if role_raw in dept_role_map:
             allowed_dept_keys = [dept_role_map[role_raw]]
