@@ -7,7 +7,7 @@ from urllib.parse import urljoin, urldefrag, urlparse
 from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright
 
-START_URL = "https://www.ikioenergy.com/"
+START_URL = "https://www.metcoengineering.com/"
 OUTPUT_DIR = "scrape_output"
 USER_AGENT = "ikio-scraper-bot/1.0"
 MAX_PAGES = 100

@@ -1,0 +1,85 @@
+## Project Name: Retrofit of Lighting in the Merrillville Municipal Complex (Town Hall)
+
+### Extracted RFP Information
+
+| Project Type | Location/Address | State/Region | Owner/Client | Submission Deadline | Pre-Bid/Site Visit Date | Questions Due Date |
+|--------------|------------------|--------------|--------------|---------------------|-------------------------|--------------------|
+| Lighting Retrofit | 7820 Broadway Avenue, Merrillville, Indiana | IN | Town of Merrillville | October 17, 2025, 2:30 p.m. CST | October 10, 2025, 10:00 a.m. | Not Found |
+
+### Concise Summary of Scope of Work and Key Requirements/Documents
+
+The project involves retrofitting existing fluorescent light fixtures with LED lights at the Merrillville Town Hall in Indiana. The work includes using existing fixtures or replacements to achieve equivalent lumens. Compliance with the Davis Bacon Act is mandatory. Contractors must be registered and licensed in Indiana and Merrillville, and participate in the E-Verify Program. A pre-bid meeting is encouraged, and a performance bond is required for bids over $200,000.
+
+### Compliance and Qualifications — Answers from RFP
+
+| Question | Answer from RFP (verbatim) |
+|----------|----------------------------|
+| a. What is the project State? | Indiana |
+| b. What kind of license is required to work on the project? | Contractors must be registered with the State of Indiana in good standing and licensed to do business in Merrillville, Indiana. |
+| c. Is any site investigation/visit required/mandatory? | Bidders are highly encouraged to participate in a pre-bid meeting. |
+| d. Are any specific procurement requirements (BABA/BAA/Davis Bacon) are there? | Labor must comply with the Davis Bacon Act Requirements. |
+| e. What specific qualifications are required for the project? | Not Found |
+| f. Does the project require SBE, MBE, WBE, HUB goals? | Not Found |
+| g. Does the project require any specific security clearance or working hour restrictions? | The selected bidder will be expected to perform the retrofit work while municipal workers are at work and serving. |
+| h. Is any bond (payment/performance/bid) required? | A faithful performance bond or a certified check is required for bids over $200,000. |
+| i. Is any insurance required? | Not Found |
+
+### Company Selection Criteria
+
+| Company Name | Base Points | State Bonus | Total Points | Justification |
+|--------------|-------------|-------------|--------------|---------------|
+| IKIO | 5 | 5 | 10 | Base location in IN, project in IN |
+| Sunsprint Engineering | 5 | 5 | 10 | Base location in IN, project in IN |
+| METCO Engineering | 5 | 0 | 5 | Base location in TX, project in IN |
+
+### BID Evaluation Process
+
+#### IKIO
+
+| Question | Score | Remark | Recommendation |
+|----------|-------|--------|----------------|
+| a. Is project state and company state same? | 10 | Both in IN | - |
+| b. Is the company or its subcontractor if available has required license as mentioned in the BID document in the project state (if required/mandatory)? | 10 | Licensed in IN | - |
+| c. If site investigation/visit required/mandatory, can company/subcontractor do this? | 10 | Pre-bid meeting encouraged, not mandatory | - |
+| d. Is company capable of fulfilling specific procurement requirements (BABA/BAA/Davis Bacon) (if required/mandatory)? | 10 | BAA & BABA compliant | - |
+| e. Is company capable of fulfilling specific qualifications for the project (if mandatory/required)? | 10 | Not Found in RFP | - |
+| f. Can companies meet SBE, MBE, WBE, HUB goals (if required)? | 10 | MBE certified | - |
+| g. Can company meet specific security clearance or working hour restrictions (if required)? | 10 | Can work during municipal hours | - |
+| h. Can company provide bond (payment/performance/bid) (if required)? | 10 | Past performance indicates capability | - |
+| i. Can company provide insurance (if required)? | 10 | Not Found in RFP | - |
+
+**Total Score: 90**  
+**Go/No-Go: Go** — IKIO is well-qualified and meets all requirements.
+
+#### Sunsprint Engineering
+
+| Question | Score | Remark | Recommendation |
+|----------|-------|--------|----------------|
+| a. Is project state and company state same? | 10 | Both in IN | - |
+| b. Is the company or its subcontractor if available has required license as mentioned in the BID document in the project state (if required/mandatory)? | 10 | Licensed in IN | - |
+| c. If site investigation/visit required/mandatory, can company/subcontractor do this? | 10 | Pre-bid meeting encouraged, not mandatory | - |
+| d. Is company capable of fulfilling specific procurement requirements (BABA/BAA/Davis Bacon) (if required/mandatory)? | 10 | Not Found in RFP | - |
+| e. Is company capable of fulfilling specific qualifications for the project (if mandatory/required)? | 10 | Not Found in RFP | - |
+| f. Can companies meet SBE, MBE, WBE, HUB goals (if required)? | 10 | Not Found in RFP | - |
+| g. Can company meet specific security clearance or working hour restrictions (if required)? | 10 | Can work during municipal hours | - |
+| h. Can company provide bond (payment/performance/bid) (if required)? | 10 | Past performance indicates capability | - |
+| i. Can company provide insurance (if required)? | 10 | Not Found in RFP | - |
+
+**Total Score: 90**  
+**Go/No-Go: Go** — Sunsprint Engineering is well-qualified and meets all requirements.
+
+### Final Recommendations
+
+- **Best 2 Companies (with percentage and rationale):**
+  - IKIO: 100% — Fully compliant with all RFP requirements and located in the project state.
+  - Sunsprint Engineering: 100% — Fully compliant with all RFP requirements and located in the project state.
+
+- **Recommended Company (Go/No-Go):** IKIO — Selected due to strong compliance with procurement requirements and MBE certification.
+
+### Generated Summary (Full)
+
+The project involves retrofitting existing fluorescent light fixtures with LED lights at the Merrillville Town Hall in Indiana. The work includes using existing fixtures or replacements to achieve equivalent lumens. Compliance with the Davis Bacon Act is mandatory. Contractors must be registered and licensed in Indiana and Merrillville, and participate in the E-Verify Program. A pre-bid meeting is encouraged, and a performance bond is required for bids over $200,000. The submission deadline is October 17, 2025, at 2:30 p.m. CST, with a pre-bid meeting on October 10, 2025. The project is located at 7820 Broadway Avenue, Merrillville, Indiana, and is managed by the Town of Merrillville.
+
+### DATABASE EXPORT (MANDATORY, SINGLE LINE):
+
+DB_EXPORT_JSON: {"b_name":"Retrofit of Lighting in the Merrillville Municipal Complex (Town Hall)","due_date":"October 17, 2025, 2:30 p.m. CST","state":"IN","scope":"Retrofit existing fluorescent lights with LED","type":"Lighting Retrofit","scoring":100,"comp_name":"IKIO","decision":"GO","summary":"Project Type - Lighting Retrofit\n\nLocation/Address - 7820 Broadway Avenue, Merrillville, Indiana\n\nState/Region - IN\n\nOwner/Client - Town of Merrillville\n\nSubmission Deadline - October 17, 2025, 2:30 p.m. CST\n\nPre-Bid/Site Visit Date - October 10, 2025, 10:00 a.m.\n\nQuestions Due Date - Not Found\n\nShort Summary - Retrofit existing fluorescent lights with LED at Merrillville Town Hall, IN. Compliance with Davis Bacon Act required. Pre-bid meeting encouraged. Performance bond needed for bids over $200,000."}

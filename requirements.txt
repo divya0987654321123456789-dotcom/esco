@@ -1,16 +1,25 @@
+# requirements.txt
 
+# --- Core Application & UI ---
 streamlit
 pandas
 openpyxl
 
-
+# --- AI & Language Models ---
 openai
 langgraph
 sentence-transformers
 
+# --- Document Processing ---
 python-doctr[torch]
 python-docx
 
+# --- Environment & Utilities ---
 python-dotenv
+
+# --- PyTorch ---
+# Note: For GPU support (CUDA), it's highly recommended to install PyTorch manually
+# by following the instructions on the official website: https://pytorch.org/get-started/locally/
+# The line below is for CPU-only as a general fallback.
 torch
 torchvision

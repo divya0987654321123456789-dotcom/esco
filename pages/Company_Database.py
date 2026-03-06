@@ -18,7 +18,7 @@ if not ok:
     st.stop()
 _ensure_company_tables(conn)
 
-companies = ["IKIO", "IKIO ENERGY Engineering", "Ikio Energy"]
+companies = ["IKIO", "METCO Engineering", "Sunsprint Engineering"]
 company = st.selectbox("Select Company", companies)
 
 tab1, tab2, tab3 = st.tabs(["Company Details", "Capabilities", "Preferences"])

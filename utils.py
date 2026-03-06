@@ -105,15 +105,15 @@ def read_company_file(file_path: str, doctr_model) -> str:
 def apply_scope_preweights(rfp_info: dict, full_text: str) -> dict:
     LIGHTING_KEYWORDS = ["lighting", "led", "illumination", "fixture", "luminaire"]
     PROJECT_TYPE_KEYWORDS = {
-        "hvac": {"IKIO": 0, "": 10, "IKIO Energy": 10}, "solar": {"IKIO": 0, "": 10, "IKIO Energy": 10},
-        "water": {"IKIO": 0, "": 10, "IKIO Energy": 10}, "waste water": {"IKIO": 0, "": 10, "IKIO Energy": 10},
-        "wastewater": {"IKIO": 0, "": 10, "IKIO Energy": 10}, "building envelope": {"IKIO": 0, "": 10, "IKIO Energy": 10},
-        "esco": {"IKIO": 0, "": 10, "IKIO Energy": 10}, "energy saving": {"IKIO": 0, "": 10, "IKIO Energy": 10},
-        "generator": {"IKIO": 0, "": 10, "IKIO Energy": 10},
+        "hvac": {"IKIO": 0, "METCO": 10, "SUNSPRINT": 10}, "solar": {"IKIO": 0, "METCO": 10, "SUNSPRINT": 10},
+        "water": {"IKIO": 0, "METCO": 10, "SUNSPRINT": 10}, "waste water": {"IKIO": 0, "METCO": 10, "SUNSPRINT": 10},
+        "wastewater": {"IKIO": 0, "METCO": 10, "SUNSPRINT": 10}, "building envelope": {"IKIO": 0, "METCO": 10, "SUNSPRINT": 10},
+        "esco": {"IKIO": 0, "METCO": 10, "SUNSPRINT": 10}, "energy saving": {"IKIO": 0, "METCO": 10, "SUNSPRINT": 10},
+        "generator": {"IKIO": 0, "METCO": 10, "SUNSPRINT": 10},
     }
     filename_part = rfp_info.get('filename', '').lower()
     text = (filename_part + " " + full_text).lower()
-    preweights = {"IKIO": 0, "": 0, "IKIO Energy": 0}
+    preweights = {"IKIO": 0, "METCO": 0, "SUNSPRINT": 0}
     detected_type, condition, detection_source = "Unknown", "N/A", "N/A"
 
     if any(k in text for k in LIGHTING_KEYWORDS):
@@ -125,15 +125,15 @@ def apply_scope_preweights(rfp_info: dict, full_text: str) -> dict:
         detection_source = "Filename + Content" if any(kw in filename_part for kw in LIGHTING_KEYWORDS) else "Content"
 
         if has_supply and not has_install and substitution_allowed:
-            preweights, condition = {"IKIO": 10, "": 0, "IKIO Energy": 0}, "Supply + Substitution Allowed"
+            preweights, condition = {"IKIO": 10, "METCO": 0, "SUNSPRINT": 0}, "Supply + Substitution Allowed"
         elif has_supply and has_install and substitution_allowed:
-            preweights, condition = {"IKIO": 10, "": 10, "IKIO Energy": 10}, "Supply + Installation + Substitution Allowed"
+            preweights, condition = {"IKIO": 10, "METCO": 10, "SUNSPRINT": 10}, "Supply + Installation + Substitution Allowed"
         elif has_supply and has_install and no_substitution:
-            preweights, condition = {"IKIO": 0, "": 10, "IKIO Energy": 10}, "Supply + Installation + Substitution Not Allowed"
+            preweights, condition = {"IKIO": 0, "METCO": 10, "SUNSPRINT": 10}, "Supply + Installation + Substitution Not Allowed"
         elif not has_supply and has_install:
-            preweights, condition = {"IKIO": 0, "": 10, "IKIO Energy": 10}, "Installation Only"
+            preweights, condition = {"IKIO": 0, "METCO": 10, "SUNSPRINT": 10}, "Installation Only"
         else:
-            preweights, condition = {"IKIO": 10, "": 0, "IKIO Energy": 0}, "Lighting (Default All)"
+            preweights, condition = {"IKIO": 10, "METCO": 0, "SUNSPRINT": 0}, "Lighting (Default All)"
     else:
         for kw, weights in PROJECT_TYPE_KEYWORDS.items():
             if kw in text:
@@ -181,14 +181,14 @@ TEXT: {compact}"""
         no_sub = bool(data.get("no_substitution", False)) or local_no_sub
 
         if dtype.lower() == "lighting":
-            if has_supply and not has_install and sub_allowed: preweights, condition = {"IKIO": 10, "": 0, "IKIO Energy": 0}, "Supply + Substitution Allowed"
-            elif has_supply and has_install and sub_allowed: preweights, condition = {"IKIO": 10, "": 10, "IKIO Energy": 10}, "Supply + Installation + Substitution Allowed"
-            elif has_supply and has_install and no_sub: preweights, condition = {"IKIO": 0, "": 10, "IKIO Energy": 10}, "Supply + Installation + Substitution Not Allowed"
-            elif not has_supply and has_install: preweights, condition = {"IKIO": 0, "": 10, "IKIO Energy": 10}, "Installation Only"
-            else: preweights, condition = {"IKIO": 10, "": 0, "IKIO Energy": 0}, "Lighting (Default All)"
+            if has_supply and not has_install and sub_allowed: preweights, condition = {"IKIO": 10, "METCO": 0, "SUNSPRINT": 0}, "Supply + Substitution Allowed"
+            elif has_supply and has_install and sub_allowed: preweights, condition = {"IKIO": 10, "METCO": 10, "SUNSPRINT": 10}, "Supply + Installation + Substitution Allowed"
+            elif has_supply and has_install and no_sub: preweights, condition = {"IKIO": 0, "METCO": 10, "SUNSPRINT": 10}, "Supply + Installation + Substitution Not Allowed"
+            elif not has_supply and has_install: preweights, condition = {"IKIO": 0, "METCO": 10, "SUNSPRINT": 10}, "Installation Only"
+            else: preweights, condition = {"IKIO": 10, "METCO": 0, "SUNSPRINT": 0}, "Lighting (Default All)"
             return {"detected_type": "Lighting", "condition": condition, "preweights": preweights, "detection_source": "API"}
         else:
-            mapping = { "hvac": {"IKIO": 0, "": 10, "IKIO Energy": 10}, "solar": {"IKIO": 0, "": 10, "IKIO Energy": 10}, "water": {"IKIO": 0, "": 10, "IKIO Energy": 10}, "waste water": {"IKIO": 0, "": 10, "IKIO Energy": 10}, "building envelope": {"IKIO": 0, "": 10, "IKIO Energy": 10}, "esco": {"IKIO": 0, "": 10, "IKIO Energy": 10}, "energy saving": {"IKIO": 0, "": 10, "IKIO Energy": 10}, "generator": {"IKIO": 0, "": 10, "IKIO Energy": 10} }
+            mapping = { "hvac": {"IKIO": 0, "METCO": 10, "SUNSPRINT": 10}, "solar": {"IKIO": 0, "METCO": 10, "SUNSPRINT": 10}, "water": {"IKIO": 0, "METCO": 10, "SUNSPRINT": 10}, "waste water": {"IKIO": 0, "METCO": 10, "SUNSPRINT": 10}, "building envelope": {"IKIO": 0, "METCO": 10, "SUNSPRINT": 10}, "esco": {"IKIO": 0, "METCO": 10, "SUNSPRINT": 10}, "energy saving": {"IKIO": 0, "METCO": 10, "SUNSPRINT": 10}, "generator": {"IKIO": 0, "METCO": 10, "SUNSPRINT": 10} }
             key = dtype.lower()
             if key in mapping:
                 return {"detected_type": dtype.title(), "condition": f"Detected via API as {dtype}", "preweights": mapping[key], "detection_source": "API"}
@@ -216,14 +216,14 @@ def apply_location_preweights(raw_text: str, rfp_summary: dict, rfp_filename: st
     found_indiana = any(window_valid(w) and any_regex(in_patterns, w) for w in windows)
     found_dallas = any(window_valid(w) and any_regex(tx_patterns, w) for w in windows)
     
-    pre = {"IKIO": 0, "": 0, "IKIO Energy": 0}
+    pre = {"IKIO": 0, "METCO": 0, "SUNSPRINT": 0}
     matched, location_names = [], []
     if found_indiana:
-        pre["IKIO"], pre["IKIO Energy"] = 10, 10
+        pre["IKIO"], pre["SUNSPRINT"] = 10, 10
         matched.append("Indiana/Indianapolis")
         location_names.append("Indianapolis, IN" if any_regex([r"\bindianapolis\b", r"\bindianpolis\b"], t) else "Indiana")
     if found_dallas:
-        pre[""] = 10
+        pre["METCO"] = 10
         matched.append("Dallas/Texas")
         location_names.append("Dallas, TX" if any_regex([r"\bdallas\b"], t) else "Texas")
 
@@ -588,7 +588,7 @@ def export_to_docx(state: Dict[str, Any], file_path: str):
     table = doc.add_table(rows=1, cols=4)
     hdr_cells = table.rows[0].cells
     hdr_cells[0].text, hdr_cells[1].text, hdr_cells[2].text, hdr_cells[3].text = 'Company', 'Scope Score', 'Location Score', 'Total Score'
-    for company in ["IKIO", "IKIO Energy"]:
+    for company in ["IKIO", "METCO", "SUNSPRINT"]:
         row_cells = table.add_row().cells
         row_cells[0].text = company
         row_cells[1].text = f"{scope_res.get('preweights', {}).get(company, 0)}/10"

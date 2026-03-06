@@ -99,7 +99,7 @@ RFP Text (first 8000 chars): {rfp_text[:8000]}"""
         
         c1 = scope_results.get("preweights", {})
         c2 = location_results.get("preweights", {})
-        companies = ["IKIO", "IKIO ENERGY", "IKIO ENERGY"]
+        companies = ["IKIO", "METCO", "SUNSPRINT"]
         combined = {c: int(c1.get(c, 0)) + int(c2.get(c, 0)) for c in companies}
         
         # Select top 2 companies for detailed evaluation
@@ -119,7 +119,7 @@ RFP Text (first 8000 chars): {rfp_text[:8000]}"""
         evaluations: Dict[str, Any] = {}
 
         # Evaluate only top 2 after preweighting as per business rule
-        top_companies = state.get("top_companies", ["IKIO", "IKIO ENERGY"])[:2]
+        top_companies = state.get("top_companies", ["IKIO", "METCO"])[:2]
         votes = int(state.get("votes", 1) or 1)
         use_reranker = bool(state.get("use_reranker", False))
         reranker_top_k = int(state.get("reranker_top_k", 2) or 2)
