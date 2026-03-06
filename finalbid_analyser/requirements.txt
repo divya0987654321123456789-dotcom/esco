@@ -1,0 +1,16 @@
+
+streamlit
+pandas
+openpyxl
+
+
+openai
+langgraph
+sentence-transformers
+
+python-doctr[torch]
+python-docx
+
+python-dotenv
+torch
+torchvision
