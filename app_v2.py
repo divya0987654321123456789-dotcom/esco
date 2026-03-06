@@ -1,6 +1,7 @@
 
 import os
 import json
+import csv
 import secrets
 import re
 import uuid
@@ -9,6 +10,7 @@ import shutil
 import subprocess
 import base64
 import io
+import mimetypes
 import tempfile
 import zipfile
 from pathlib import Path
@@ -371,12 +373,20 @@ def normalize_task_status(value) -> str:
     return 'pending'
 
 def _status_to_progress_pct(status: str, progress_pct=None) -> int:
+    st = normalize_task_status(status)
+    # Status is authoritative for terminal states; stale numeric progress should not mask it.
+    if st == 'completed':
+        return 100
+    if st == 'submitted':
+        return 75
     try:
         if progress_pct is not None and str(progress_pct).strip() != '':
-            return max(0, min(100, int(float(progress_pct))))
+            pct = max(0, min(100, int(float(progress_pct))))
+            if st == 'in_progress':
+                return max(1, min(99, pct or 50))
+            return pct
     except Exception:
         pass
-    st = normalize_task_status(status)
     if st == 'completed':
         return 100
     if st == 'submitted':
@@ -386,18 +396,39 @@ def _status_to_progress_pct(status: str, progress_pct=None) -> int:
     return 0
 
 def _compute_checklist_stage_progress(cur, g_id: int) -> dict:
-    """Compute per-stage progress map from bid_checklists rows."""
+    """Compute per-stage progress map.
+
+    Prefer execution checklist (`won_project_checklists`) for won-project timeline,
+    fall back to bid checklist rows when execution rows are unavailable.
+    """
+    rows = []
     try:
+        _ensure_won_project_checklists_table(cur)
         cur.execute(
             """
-            SELECT stage, status, progress_pct
-            FROM bid_checklists
-            WHERE g_id=%s AND team_archive IS NULL
+            SELECT department_key AS stage, status, progress_pct
+            FROM won_project_checklists
+            WHERE g_id=%s
             """,
             (int(g_id),),
         )
         rows = cur.fetchall() or []
     except Exception:
+        rows = []
+    if not rows:
+        try:
+            cur.execute(
+                """
+                SELECT stage, status, progress_pct
+                FROM bid_checklists
+                WHERE g_id=%s AND team_archive IS NULL
+                """,
+                (int(g_id),),
+            )
+            rows = cur.fetchall() or []
+        except Exception:
+            rows = []
+    if not rows:
         return {}
     grouped = {}
     for row in rows:
@@ -439,6 +470,122 @@ def _next_task_code_number(cur, stage: str) -> tuple[str | None, int | None]:
     row = cur.fetchone() or {}
     max_num = int(row.get('mx') or 0)
     return prefix, max_num + 1
+
+
+def _next_won_task_code_number(cur, stage: str) -> tuple[str | None, int | None]:
+    prefix = _task_code_prefix(stage)
+    if not prefix:
+        return None, None
+    like = f"{prefix}-%"
+    start_pos = len(prefix) + 2
+    _ensure_won_project_checklists_table(cur)
+    cur.execute(
+        "SELECT MAX(CAST(SUBSTRING(task_code, %s) AS UNSIGNED)) AS mx FROM won_project_checklists WHERE task_code LIKE %s",
+        (start_pos, like),
+    )
+    row = cur.fetchone() or {}
+    max_num = int(row.get('mx') or 0)
+    return prefix, max_num + 1
+
+
+def _ensure_won_standard_tasks(cur, g_id: int, stage_keys: list[str], anchor_start: date | None = None) -> int:
+    """Seed default execution tasks into won_project_checklists for missing departments.
+
+    Idempotent by department: if a department already has any execution tasks for the project,
+    no template tasks are inserted for that department.
+    """
+    try:
+        gid = int(g_id or 0)
+    except Exception:
+        gid = 0
+    if gid <= 0:
+        return 0
+    _ensure_won_project_checklists_table(cur)
+    cur.execute(
+        """
+        SELECT department_key
+        FROM won_project_checklists
+        WHERE g_id=%s
+        """,
+        (gid,),
+    )
+    existing_rows = cur.fetchall() or []
+    existing_stage_keys = set()
+    for rr in (existing_rows or []):
+        nk = _normalize_department_key((rr or {}).get('department_key'))
+        if nk:
+            existing_stage_keys.add(nk)
+
+    template_tasks = {
+        'engineering_team': [
+            ('ENG-PLAN', 'Engineering kickoff and requirement freeze', 'Baseline project requirements and freeze engineering scope', 10),
+            ('ENG-DESIGN', 'Technical design and drawing package', 'Prepare and validate technical drawings and design package', 12),
+            ('ENG-EXEC', 'Site execution preparation and handoff', 'Prepare site execution pack and engineering handoff', 8),
+        ],
+        'procurement_team': [
+            ('PRC-BOQ', 'BOQ finalization and quantity validation', 'Finalize BOQ and validate quantities for purchasing', 10),
+            ('PRC-RFQ', 'RFQ issue and vendor comparison', 'Issue RFQ and compare vendor quotations', 10),
+            ('PRC-PO', 'PO release and delivery tracking setup', 'Release PO and initialize delivery tracking', 10),
+        ],
+        'accounts_finance': [
+            ('AF-BUD', 'Budget baseline validation and allocation', 'Validate project budget baseline and allocation plan', 8),
+            ('AF-COMP', 'Invoice compliance and documentation', 'Verify invoice compliance and financial documents', 12),
+            ('AF-CLOSE', 'Final financial closure and sign-off', 'Prepare final closure note and financial sign-off', 10),
+        ],
+    }
+    canonical_stage_keys = []
+    for sk in (stage_keys or []):
+        nk = _normalize_department_key(sk)
+        if nk and nk not in canonical_stage_keys:
+            canonical_stage_keys.append(nk)
+    if not canonical_stage_keys:
+        canonical_stage_keys = ['engineering_team', 'procurement_team', 'accounts_finance']
+
+    inserted = 0
+    base_start = anchor_start or date.today()
+    for stage_idx, sk in enumerate(canonical_stage_keys):
+        if sk not in template_tasks:
+            continue
+        if sk in existing_stage_keys:
+            continue
+        segment_start = base_start + timedelta(days=stage_idx * 30)
+        cursor = segment_start
+        _, next_num = _next_won_task_code_number(cur, sk)
+        seq = int(next_num or 1)
+        for code_prefix, task_name, description, days in (template_tasks.get(sk) or []):
+            days_count = max(1, int(days or 1))
+            planned_start = cursor
+            planned_end = planned_start + timedelta(days=max(days_count - 1, 0))
+            cursor = planned_end + timedelta(days=1)
+            prefix = _task_code_prefix(sk)
+            task_code = f"{prefix}-{seq:03d}" if prefix else code_prefix
+            seq += 1
+            cur.execute(
+                """
+                INSERT INTO won_project_checklists (
+                    source_task_id, g_id, department_key, task_code, task_name, description, status,
+                    priority, due_date, progress_pct, assigned_to, attachment_path, created_at, updated_at
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, 'pending', %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    None,
+                    gid,
+                    sk,
+                    task_code,
+                    task_name,
+                    description,
+                    'normal',
+                    planned_end,
+                    0,
+                    None,
+                    None,
+                    datetime.combine(planned_start, datetime.min.time()),
+                    datetime.combine(planned_start, datetime.min.time()),
+                ),
+            )
+            inserted += 1
+    return inserted
 
 
 def _assign_missing_task_codes(cur, tasks: list[dict], fallback_stage: str | None = None) -> None:
@@ -544,6 +691,8 @@ def generate_team_checklist(cur, g_id, team):
             {'name': 'Budget Validation', 'description': 'Validate budget and cash flow', 'priority': 'high'},
             {'name': 'Cost Breakdown', 'description': 'Prepare cost breakdown and summary', 'priority': 'medium'},
             {'name': 'Financial Review', 'description': 'Finalize financial review for submission', 'priority': 'high'},
+            {'name': 'PO Read', 'description': 'Review purchase order details and terms', 'priority': 'high'},
+            {'name': 'Payment Receipt', 'description': 'Collect and verify payment receipt documents', 'priority': 'high'},
         ]
     }
     
@@ -918,6 +1067,61 @@ def _normalize_stage_key(raw: str | None) -> str | None:
     return None
 
 
+def _normalize_bid_timeline_stage_key(raw: str | None) -> str | None:
+    """Strict normalizer for bid-phase timeline stages only.
+
+    Keeps bid departments (business/design/operations/engineer) separate from
+    execution departments (engineering_team/procurement_team/accounts_finance).
+    """
+    s = (raw or '').strip().lower().replace('_', ' ')
+    s = ' '.join(s.split())
+    if not s:
+        return None
+
+    # Explicitly exclude execution/project timeline departments from bid timeline math.
+    if s in (
+        'engineering team',
+        'engineering_team',
+        'procurement team',
+        'procurement_team',
+        'accounts finance',
+        'accounts & finance',
+        'accounts and finance',
+        'accounts_finance',
+        'project manager',
+        'project_manager',
+    ):
+        return None
+
+    if s in ('business', 'business dev', 'business development', 'bdm', 'bde'):
+        return 'business'
+    if s in ('design', 'design team', 'design & marketing', 'design and marketing', 'marketing'):
+        return 'design'
+    if s in ('operations', 'operation', 'ops', 'operations team'):
+        return 'operations'
+    if s in ('site engineer', 'site manager', 'engineer'):
+        return 'engineer'
+    if s in ('handover', 'submitted', 'submit', 'won'):
+        return 'handover'
+    if s in ('bid analyzer', 'analyzer'):
+        return 'analyzer'
+
+    if 'business' in s or 'bdm' in s or 'bde' in s:
+        return 'business'
+    if 'design' in s or 'marketing' in s:
+        return 'design'
+    if 'operation' in s or 'ops' in s:
+        return 'operations'
+    # Treat only explicit site-engineer forms as bid engineer; do not absorb engineering team.
+    if 'site' in s and 'engineer' in s:
+        return 'engineer'
+    if 'handover' in s or 'submit' in s:
+        return 'handover'
+    if 'analy' in s:
+        return 'analyzer'
+    return None
+
+
 def _normalize_company_token(value: str | None) -> str:
     try:
         s = (value or '').strip().lower()
@@ -970,7 +1174,14 @@ def _ensure_project_manager_assignments_table(cur) -> None:
 
 def _fetch_project_manager_users(cur, active_company_name: str | None = None) -> list[dict]:
     try:
-        where = ["is_active=1", "LOWER(COALESCE(role,'')) LIKE '%%manager%%'"]
+        where = [
+            "is_active=1",
+            "("
+            "LOWER(REPLACE(REPLACE(COALESCE(role,''),'_',''),' ',''))='projectmanager' "
+            "OR LOWER(COALESCE(role,'')) LIKE '%%project manager%%' "
+            "OR LOWER(COALESCE(email,'')) LIKE 'projectmanager@%%'"
+            ")",
+        ]
         params = []
         if active_company_name:
             where.append("LOWER(COALESCE(company,'')) = LOWER(%s)")
@@ -988,6 +1199,77 @@ def _fetch_project_manager_users(cur, active_company_name: str | None = None) ->
         return cur.fetchall() or []
     except Exception:
         return []
+
+
+def _is_project_manager_role_value(raw_role: str | None) -> bool:
+    rr = (raw_role or '').strip().lower().replace('_', ' ')
+    compact = rr.replace(' ', '')
+    return compact == 'projectmanager' or ('project manager' in rr)
+
+
+def _pick_project_manager_user(cur, active_company_name: str | None = None) -> dict | None:
+    try:
+        users = _fetch_project_manager_users(cur, active_company_name) or []
+        return users[0] if users else None
+    except Exception:
+        return None
+
+
+def _reconcile_approved_projects_for_pm(cur, manager_user_id: int) -> None:
+    """
+    Ensure approved estimate projects are mapped to a real project manager assignment.
+    For current PM user, move approved projects that are unassigned or assigned to non-PM roles.
+    """
+    try:
+        _ensure_project_manager_assignments_table(cur)
+        _ensure_project_estimate_approvals_table(cur)
+        cur.execute(
+            """
+            SELECT pea.g_id, wlr.w_id,
+                   pma.id AS pma_id, pma.manager_user_id,
+                   u.role AS assigned_role
+            FROM project_estimate_approvals pea
+            LEFT JOIN win_lost_results wlr ON wlr.g_id = pea.g_id
+            LEFT JOIN project_manager_assignments pma ON pma.project_id = wlr.w_id
+            LEFT JOIN users u ON u.id = pma.manager_user_id
+            WHERE LOWER(COALESCE(pea.status,''))='approved'
+              AND pea.g_id IS NOT NULL
+            """
+        )
+        rows = cur.fetchall() or []
+        for rr in rows:
+            g_id = rr.get('g_id')
+            w_id = rr.get('w_id')
+            if not g_id or not w_id:
+                continue
+            pma_id = rr.get('pma_id')
+            assigned_role = rr.get('assigned_role')
+            should_replace = (not pma_id) or (not _is_project_manager_role_value(assigned_role))
+            if not should_replace:
+                continue
+            if pma_id:
+                cur.execute(
+                    """
+                    UPDATE project_manager_assignments
+                    SET manager_user_id=%s, g_id=%s, assigned_by_user_id=%s, assigned_at=NOW()
+                    WHERE id=%s
+                    """,
+                    (int(manager_user_id), int(g_id), int(manager_user_id), int(pma_id)),
+                )
+            else:
+                cur.execute(
+                    """
+                    INSERT INTO project_manager_assignments (project_id, g_id, manager_user_id, assigned_by_user_id)
+                    VALUES (%s, %s, %s, %s)
+                    """,
+                    (int(w_id), int(g_id), int(manager_user_id), int(manager_user_id)),
+                )
+        mysql.connection.commit()
+    except Exception:
+        try:
+            mysql.connection.rollback()
+        except Exception:
+            pass
 
 
 def _get_project_manager_map(cur, project_ids: list[int]) -> dict[int, dict]:
@@ -1058,48 +1340,9 @@ def _basic_bid_timeline_rows(cur, company_sql_clause: str, company_params: tuple
 
 
 def _compute_stage_progress_for_bid(cur, g_id: int, default_stages: list[str]):
+    # Bid-phase progress must come only from bid_checklists (no bid_assign_meta mix).
     stage_map = {k: 0 for k in default_stages}
     counts = {k: {'total': 0, 'completed': 0} for k in default_stages}
-    def _merge_meta(stage_map_local, counts_local):
-        try:
-            _ensure_bid_assign_meta_table()
-            cur.execute("SELECT data FROM bid_assign_meta WHERE g_id=%s", (int(g_id),))
-            row = cur.fetchone() or {}
-            meta = {}
-            try:
-                meta = json.loads(row.get('data') or "{}")
-            except Exception:
-                meta = {}
-            checklist = meta.get('checklist') if isinstance(meta, dict) else None
-            if isinstance(checklist, list) and checklist:
-                meta_buckets = {k: [] for k in default_stages}
-                for item in checklist:
-                    if not isinstance(item, dict):
-                        continue
-                    stage = _normalize_stage_key(
-                        item.get('dept') or item.get('stage') or item.get('department') or item.get('team') or ''
-                    )
-                    if not stage or stage not in meta_buckets:
-                        continue
-                    st = (item.get('status') or '').strip().lower()
-                    pct = item.get('progress_pct')
-                    if pct is None:
-                        pct = 100 if st in ('completed', 'submitted') else 50 if st in ('in_progress', 'in progress') else 0
-                    try:
-                        pct = max(0, min(100, int(pct)))
-                    except Exception:
-                        pct = 0
-                    meta_buckets[stage].append(pct)
-                def _avg(lst):
-                    return int(round(sum(lst) / len(lst))) if lst else 0
-                for stage_key, vals in meta_buckets.items():
-                    if vals and (counts_local.get(stage_key, {}).get('total', 0) == 0 or _avg(vals) > stage_map_local.get(stage_key, 0)):
-                        stage_map_local[stage_key] = _avg(vals)
-                        counts_local[stage_key]['total'] = len(vals)
-                        counts_local[stage_key]['completed'] = len([v for v in vals if v >= 100])
-        except Exception:
-            pass
-        return stage_map_local, counts_local
     try:
         _ensure_bid_team_progress_table(cur)
         cur.execute(
@@ -1120,7 +1363,6 @@ def _compute_stage_progress_for_bid(cur, g_id: int, default_stages: list[str]):
                         'total': int(r.get('total_tasks') or 0),
                         'completed': int(r.get('completed_tasks') or 0),
                     }
-            stage_map, counts = _merge_meta(stage_map, counts)
             return stage_map, counts
     except Exception:
         pass
@@ -1137,58 +1379,26 @@ def _compute_stage_progress_for_bid(cur, g_id: int, default_stages: list[str]):
         rows = cur.fetchall() or []
         buckets = {k: [] for k in default_stages}
         for r in rows:
-            stage = _normalize_stage_key(r.get('stage_source'))
+            stage = _normalize_bid_timeline_stage_key(r.get('stage_source'))
             if not stage or stage not in buckets:
                 continue
             pct = r.get('progress_pct')
             if pct is None:
-                st = (r.get('status') or '').strip().lower()
-                pct = 100 if st in ('completed', 'submitted') else 50 if st in ('in_progress', 'in progress') else 0
+                pct = _status_to_progress_pct(r.get('status') or '')
             try:
                 pct = max(0, min(100, int(pct)))
             except Exception:
                 pct = 0
             buckets[stage].append(pct)
             counts[stage]['total'] += 1
-            if pct >= 100 or (r.get('status') or '').strip().lower() in ('completed', 'submitted'):
+            st_norm = normalize_task_status(r.get('status') or '')
+            if pct >= 100 or st_norm in ('completed', 'submitted'):
                 counts[stage]['completed'] += 1
-        def _avg(lst):
-            return int(round(sum(lst) / len(lst))) if lst else 0
-        stage_map = {k: _avg(v) for k, v in buckets.items()}
+        for k, vals in buckets.items():
+            if vals:
+                stage_map[k] = int(round(sum(vals) / len(vals)))
     except Exception:
         pass
-
-    try:
-        _ensure_bid_assign_meta_table()
-        cur.execute("SELECT data FROM bid_assign_meta WHERE g_id=%s", (int(g_id),))
-        row = cur.fetchone() or {}
-        meta = {}
-        try:
-            meta = json.loads(row.get('data') or "{}")
-        except Exception:
-            meta = {}
-        checklist = meta.get('checklist') if isinstance(meta, dict) else None
-        if isinstance(checklist, list) and checklist:
-            buckets = {k: [] for k in default_stages}
-            for item in checklist:
-                if not isinstance(item, dict):
-                    continue
-                stage = _normalize_stage_key(item.get('dept') or item.get('stage') or '')
-                if not stage or stage not in buckets:
-                    continue
-                st = (item.get('status') or '').strip().lower()
-                pct = 100 if st in ('completed', 'submitted') else 50 if st in ('in_progress', 'in progress') else 0
-                buckets[stage].append(pct)
-            def _avg(lst):
-                return int(round(sum(lst) / len(lst))) if lst else 0
-            for k, v in buckets.items():
-                if v and (counts[k]['total'] == 0 or stage_map.get(k, 0) == 0):
-                    stage_map[k] = _avg(v)
-                    counts[k]['total'] = len(v)
-                    counts[k]['completed'] = len([x for x in v if x >= 100])
-    except Exception:
-        pass
-
     return stage_map, counts
 
 
@@ -1209,20 +1419,20 @@ def _compute_stage_progress_from_checklists(cur, g_id: int, default_stages: list
         return stage_map, counts
     buckets = {k: [] for k in default_stages}
     for r in rows:
-        stage = _normalize_stage_key(r.get('stage'))
+        stage = _normalize_bid_timeline_stage_key(r.get('stage'))
         if not stage or stage not in buckets:
             continue
         pct = r.get('progress_pct')
         if pct is None:
-            st = (r.get('status') or '').strip().lower()
-            pct = 100 if st in ('completed', 'submitted') else 50 if st in ('in_progress', 'in progress') else 0
+            pct = _status_to_progress_pct(r.get('status') or '')
         try:
             pct = max(0, min(100, int(pct)))
         except Exception:
             pct = 0
         buckets[stage].append(pct)
         counts[stage]['total'] += 1
-        if pct >= 100 or (r.get('status') or '').strip().lower() in ('completed', 'submitted'):
+        st_norm = normalize_task_status(r.get('status') or '')
+        if pct >= 100 or st_norm in ('completed', 'submitted'):
             counts[stage]['completed'] += 1
     for k, vals in buckets.items():
         if vals:
@@ -1256,15 +1466,15 @@ def _compute_stage_progress_from_meta(cur, g_id: int, default_stages: list[str])
         for item in checklist:
             if not isinstance(item, dict):
                 continue
-            stage = _normalize_stage_key(
+            stage = _normalize_bid_timeline_stage_key(
                 item.get('dept') or item.get('stage') or item.get('department') or item.get('team') or ''
             )
             if not stage or stage not in buckets:
                 continue
-            st = (item.get('status') or '').strip().lower()
+            st = normalize_task_status(item.get('status') or '')
             pct = item.get('progress_pct')
             if pct is None:
-                pct = 100 if st in ('completed', 'submitted') else 50 if st in ('in_progress', 'in progress') else 0
+                pct = _status_to_progress_pct(st)
             try:
                 pct = max(0, min(100, int(pct)))
             except Exception:
@@ -1282,23 +1492,16 @@ def _compute_stage_progress_from_meta(cur, g_id: int, default_stages: list[str])
 
 
 def _compute_stage_progress_for_timeline(cur, g_id: int, default_stages: list[str]):
-    """Timeline-specific progress: merge bid_checklists + bid_assign_meta for stage %s."""
+    """Timeline-specific progress from bid_checklists only."""
     stage_map = {k: 0 for k in default_stages}
     counts = {k: {'total': 0, 'completed': 0} for k in default_stages}
     try:
         chk_map, chk_counts = _compute_stage_progress_from_checklists(cur, g_id, default_stages)
-        meta_map, meta_counts = _compute_stage_progress_from_meta(cur, g_id, default_stages)
         for k in default_stages:
-            stage_map[k] = max(int(chk_map.get(k, 0) or 0), int(meta_map.get(k, 0) or 0))
+            stage_map[k] = int(chk_map.get(k, 0) or 0)
             counts[k] = {
-                'total': max(
-                    int(chk_counts.get(k, {}).get('total', 0) or 0),
-                    int(meta_counts.get(k, {}).get('total', 0) or 0),
-                ),
-                'completed': max(
-                    int(chk_counts.get(k, {}).get('completed', 0) or 0),
-                    int(meta_counts.get(k, {}).get('completed', 0) or 0),
-                ),
+                'total': int(chk_counts.get(k, {}).get('total', 0) or 0),
+                'completed': int(chk_counts.get(k, {}).get('completed', 0) or 0),
             }
     except Exception:
         pass
@@ -1310,7 +1513,7 @@ def _compute_stage_progress_for_timeline(cur, g_id: int, default_stages: list[st
 
 
 def _bid_timeline_progress_maps(cur, g_ids: list[int], default_stages: list[str]):
-    """Compute per-team progress for bid timeline from bid_checklists + bid_assign_meta."""
+    """Compute per-team progress for bid timeline from bid_checklists only."""
     stage_map_by_gid: dict[int, dict] = {}
     counts_by_gid: dict[int, dict] = {}
     if not g_ids:
@@ -1360,7 +1563,7 @@ def _build_basic_timeline_items(cur, rows: list[dict]) -> list[dict]:
         'business': 'Business Development',
         'design': 'Design & Marketing',
         'operations': 'Operation Team',
-        'engineer': 'Engineering Team',
+        'engineer': 'Site Engineer',
         'handover': 'Submitted',
     }
     for r in (rows or []):
@@ -1575,20 +1778,19 @@ def _recalc_bid_team_progress(cur, g_id: int) -> None:
         buckets = {k: [] for k in ['analyzer', 'business', 'design', 'operations', 'engineer', 'handover']}
         counts = {k: {'total': 0, 'completed': 0} for k in buckets}
         for r in rows:
-            stage = _normalize_stage_key(r.get('stage_source'))
+            stage = _normalize_bid_timeline_stage_key(r.get('stage_source'))
             if not stage or stage not in buckets:
                 continue
             pct = r.get('progress_pct')
             if pct is None:
-                st = (r.get('status') or '').strip().lower()
-                pct = 100 if st in ('completed', 'submitted') else 50 if st in ('in_progress', 'in progress') else 0
+                pct = _status_to_progress_pct(r.get('status') or '')
             try:
                 pct = max(0, min(100, int(pct)))
             except Exception:
                 pct = 0
             buckets[stage].append(pct)
             counts[stage]['total'] += 1
-            if pct >= 100 or (r.get('status') or '').strip().lower() == 'completed':
+            if pct >= 100 or normalize_task_status(r.get('status') or '') in ('completed', 'submitted'):
                 counts[stage]['completed'] += 1
         def avg(lst):
             return int(round(sum(lst) / len(lst))) if lst else 0
@@ -1742,26 +1944,8 @@ def _init_db_once():
 # Removed eager import-time init to avoid referencing functions before definition
 
 def ensure_tasks_for_team(team: str):
-    cur = mysql.connection.cursor(DictCursor)
-    try:
-        cur.execute(
-            """
-            SELECT gb.g_id
-            FROM go_bids gb
-            LEFT JOIN bid_checklists bc
-              ON bc.g_id = gb.g_id AND LOWER(COALESCE(bc.stage,'')) = %s
-            WHERE bc.id IS NULL
-            """, (team,)
-        )
-        missing = [row['g_id'] for row in cur.fetchall()]
-        if missing:
-            for g_id in missing:
-                generate_team_checklist(cur, g_id, team)
-            mysql.connection.commit()
-    except Exception:
-        mysql.connection.rollback()
-    finally:
-        cur.close()
+    # Disabled by policy: bid tasks must be user-created, not auto-generated.
+    return None
 def assign_bids_by_revenue():
     return None
 
@@ -2465,7 +2649,11 @@ def _auto_mark_overdue_bids_as_nogo(cur) -> int:
         return 0
 
 # --- Utility: ensure GO bids from bid_incoming are mirrored in go_bids ---
-def sync_go_bids() -> int:
+_LAST_GO_BIDS_SYNC_AT = None
+_MIN_GO_BIDS_SYNC_INTERVAL_SECONDS = max(0, int(os.getenv('GO_BIDS_SYNC_MIN_INTERVAL_SECONDS', '5') or 5))
+
+
+def sync_go_bids(force: bool = False) -> int:
     """Synchronize GO decisions from bid_incoming into go_bids.
 
     - Inserts any missing GO bids.
@@ -2474,6 +2662,17 @@ def sync_go_bids() -> int:
 
     Returns number of newly inserted rows.
     """
+    global _LAST_GO_BIDS_SYNC_AT
+    now_utc = datetime.utcnow()
+    if (not force) and _LAST_GO_BIDS_SYNC_AT is not None:
+        try:
+            elapsed_s = (now_utc - _LAST_GO_BIDS_SYNC_AT).total_seconds()
+        except Exception:
+            elapsed_s = _MIN_GO_BIDS_SYNC_INTERVAL_SECONDS + 1
+        if elapsed_s < _MIN_GO_BIDS_SYNC_INTERVAL_SECONDS:
+            return 0
+    _LAST_GO_BIDS_SYNC_AT = now_utc
+
     cur = mysql.connection.cursor(DictCursor)
     inserted = 0
     try:
@@ -2751,6 +2950,24 @@ def _sync_won_bids_from_incoming(cur) -> None:
         'Procurement Team',
         'Accounts & Finance Team',
     ]
+    standard_stage_days = {
+        'engineering_team': 14,
+        'procurement_team': 21,
+        'accounts_finance': 7,
+        'closeout': 5,
+    }
+
+    def _as_date(value):
+        if not value:
+            return None
+        if isinstance(value, date) and not isinstance(value, datetime):
+            return value
+        if isinstance(value, datetime):
+            return value.date()
+        try:
+            return datetime.strptime(str(value)[:10], '%Y-%m-%d').date()
+        except Exception:
+            return None
 
     for r in rows:
         bid_id = r.get('id')
@@ -3167,6 +3384,19 @@ def login():
                 role_raw = (user.get('role') or '')
                 role_raw_key = role_raw.lower().strip()
                 role_key = role_raw_key.replace('_', ' ')
+                email_key = (user.get('email') or '').strip().lower()
+                full_name_key = ((user.get('full_name') or user.get('name') or '')).strip().lower()
+
+                inferred_manager_team = None
+                try:
+                    if any(k in email_key for k in ['proc.manager@', 'procurement.manager@']) or 'procurement manager' in full_name_key:
+                        inferred_manager_team = 'procurement_team'
+                    elif any(k in email_key for k in ['eng.manager@', 'engineering.manager@']) or 'engineering manager' in full_name_key:
+                        inferred_manager_team = 'engineering_team'
+                    elif any(k in email_key for k in ['accounts.manager@', 'finance.manager@']) or ('accounts' in full_name_key and 'manager' in full_name_key) or ('finance manager' in full_name_key):
+                        inferred_manager_team = 'accounts_finance'
+                except Exception:
+                    inferred_manager_team = None
 
                 # Top Level Admin gets their own dashboard (global role)
                 if role_key.replace(' ', '') in ['topleveladmin', 'top level admin'.replace(' ', '')]:
@@ -3175,6 +3405,18 @@ def login():
                     return redirect(url_for('manager_dashboard'))
                 if role_raw_key in ['business_manager', 'business manager'] or role_key == 'business manager':
                     return redirect(url_for('business_manager_team_allocation'))
+                if role_raw_key in ['procurement_manager', 'procurement manager'] or role_key == 'procurement manager':
+                    return redirect(url_for('procurement_manager_dashboard'))
+                if role_raw_key in ['engineering_manager', 'engineering manager'] or role_key == 'engineering manager':
+                    return redirect(url_for('engineering_manager_dashboard'))
+                if role_raw_key in ['accounts_manager', 'accounts manager', 'finance_manager', 'finance manager'] or role_key in ['accounts manager', 'finance manager']:
+                    return redirect(url_for('accounts_manager_dashboard'))
+                if inferred_manager_team == 'procurement_team':
+                    return redirect(url_for('procurement_manager_dashboard'))
+                if inferred_manager_team == 'engineering_team':
+                    return redirect(url_for('engineering_manager_dashboard'))
+                if inferred_manager_team == 'accounts_finance':
+                    return redirect(url_for('accounts_manager_dashboard'))
 
                 # Scoped role redirects (user_company_access)
                 try:
@@ -3193,6 +3435,36 @@ def login():
                     has_business_mgr_scope = False
                 if has_business_mgr_scope:
                     return redirect(url_for('business_manager_team_allocation'))
+                try:
+                    has_proc_mgr_scope = any(
+                        ((r.get('role') or '').strip().lower() == 'manager')
+                        and ((r.get('department_key') or '').strip().lower() in ['procurement_team', 'procurement'])
+                        for r in (access_rows or [])
+                    )
+                except Exception:
+                    has_proc_mgr_scope = False
+                if has_proc_mgr_scope:
+                    return redirect(url_for('procurement_manager_dashboard'))
+                try:
+                    has_eng_mgr_scope = any(
+                        ((r.get('role') or '').strip().lower() == 'manager')
+                        and ((r.get('department_key') or '').strip().lower() in ['engineering_team', 'engineering', 'engineer', 'site_engineer'])
+                        for r in (access_rows or [])
+                    )
+                except Exception:
+                    has_eng_mgr_scope = False
+                if has_eng_mgr_scope:
+                    return redirect(url_for('engineering_manager_dashboard'))
+                try:
+                    has_accounts_mgr_scope = any(
+                        ((r.get('role') or '').strip().lower() == 'manager')
+                        and ((r.get('department_key') or '').strip().lower() in ['accounts_finance', 'accounts', 'finance', 'accounting'])
+                        for r in (access_rows or [])
+                    )
+                except Exception:
+                    has_accounts_mgr_scope = False
+                if has_accounts_mgr_scope:
+                    return redirect(url_for('accounts_manager_dashboard'))
                 if 'manager' in roles:
                     return redirect(url_for('manager_dashboard'))
                 if 'teamlead' in roles:
@@ -5005,8 +5277,11 @@ def top_level_admin_dashboard():
             })
 
         stage_progress = 0
-        if len(stages) > 1:
-            stage_progress = int(round((current_index / (len(stages) - 1)) * 100))
+        if stages:
+            try:
+                stage_progress = int(round(sum(int(s.get('progress') or 0) for s in stages) / len(stages)))
+            except Exception:
+                stage_progress = 0
 
         project_timeline_items.append({
             'project_id': project_id,
@@ -5027,7 +5302,7 @@ def top_level_admin_dashboard():
             'business': 'Business Development',
             'design': 'Design & Marketing',
             'operations': 'Operation Team',
-            'engineer': 'Engineering Team',
+            'engineer': 'Site Engineer',
             'handover': 'Submitted',
             'won': 'Won',
             'closure': 'Closure'
@@ -5226,6 +5501,69 @@ def top_admin_overview():
             return cur.fetchone() is not None
         except Exception:
             return False
+
+    def _as_date(value):
+        if not value:
+            return None
+        if isinstance(value, date) and not isinstance(value, datetime):
+            return value
+        if isinstance(value, datetime):
+            return value.date()
+        try:
+            return datetime.strptime(str(value)[:10], '%Y-%m-%d').date()
+        except Exception:
+            return None
+
+    def _resolve_execution_gid(raw_gid, bid_name, company_name):
+        """Resolve the most reliable g_id for execution timelines/tasks."""
+        try:
+            rg = int(raw_gid or 0)
+        except Exception:
+            rg = 0
+        # If provided g_id already has execution checklist rows, keep it.
+        if rg > 0:
+            try:
+                cur.execute("SELECT COUNT(*) AS c FROM won_project_checklists WHERE g_id=%s", (rg,))
+                if int((cur.fetchone() or {}).get('c') or 0) > 0:
+                    return rg
+            except Exception:
+                pass
+
+        bname = (bid_name or '').strip()
+        cname = (company_name or '').strip()
+        if not bname:
+            return rg or None
+        try:
+            cur.execute(
+                """
+                SELECT
+                    gb.g_id,
+                    COUNT(wpc.id) AS task_count,
+                    MAX(COALESCE(wpc.updated_at, wpc.created_at, gb.due_date, gb.created_at)) AS last_touch
+                FROM go_bids gb
+                LEFT JOIN won_project_checklists wpc ON wpc.g_id = gb.g_id
+                WHERE (
+                    REPLACE(LOWER(COALESCE(gb.b_name,'')),' ','') LIKE CONCAT('%%', REPLACE(LOWER(%s),' ',''), '%%')
+                    OR REPLACE(LOWER(%s),' ','') LIKE CONCAT('%%', REPLACE(LOWER(COALESCE(gb.b_name,'')),' ',''), '%%')
+                )
+                AND (
+                    %s = ''
+                    OR REPLACE(LOWER(COALESCE(gb.company,'')),' ','') LIKE CONCAT('%%', REPLACE(LOWER(%s),' ',''), '%%')
+                    OR REPLACE(LOWER(%s),' ','') LIKE CONCAT('%%', REPLACE(LOWER(COALESCE(gb.company,'')),' ',''), '%%')
+                )
+                GROUP BY gb.g_id
+                ORDER BY task_count DESC, last_touch DESC, gb.g_id DESC
+                LIMIT 1
+                """,
+                (bname, bname, cname, cname, cname),
+            )
+            rr = cur.fetchone() or {}
+            gid = rr.get('g_id')
+            if gid:
+                return int(gid)
+        except Exception:
+            pass
+        return rg or None
 
     # Active company context for display + filtering
     active_company_id = session.get('active_company_id')
@@ -5672,7 +6010,7 @@ def top_admin_overview():
                 'business': 'Business Development',
                 'design': 'Design & Marketing',
                 'operations': 'Operation Team',
-                'engineer': 'Engineering Team',
+                'engineer': 'Site Engineer',
                 'handover': 'Submitted',
             }.get((key or '').lower(), (key or '').title())
 
@@ -5774,20 +6112,19 @@ def top_admin_overview():
                         buckets_local = {k: [] for k in default_stages}
                         counts_local = {k: dict(counts_local.get(k, {'total': 0, 'completed': 0})) for k in default_stages}
                         for r in rows_local:
-                            stage = _normalize_stage_key(r.get('stage_source'))
+                            stage = _normalize_bid_timeline_stage_key(r.get('stage_source'))
                             if not stage or stage not in buckets_local:
                                 continue
                             pct = r.get('progress_pct')
                             if pct is None:
-                                st = (r.get('status') or '').strip().lower()
-                                pct = 100 if st in ('completed', 'submitted') else 50 if st in ('in_progress', 'in progress') else 0
+                                pct = _status_to_progress_pct(r.get('status') or '')
                             try:
                                 pct = max(0, min(100, int(pct)))
                             except Exception:
                                 pct = 0
                             buckets_local[stage].append(pct)
                             counts_local[stage]['total'] += 1
-                            st = (r.get('status') or '').strip().lower()
+                            st = normalize_task_status(r.get('status') or '')
                             if pct >= 100 or st in ('completed', 'submitted'):
                                 counts_local[stage]['completed'] += 1
                         def _avg(lst):
@@ -5815,15 +6152,15 @@ def top_admin_overview():
                             for item in checklist:
                                 if not isinstance(item, dict):
                                     continue
-                                stage = _normalize_stage_key(
+                                stage = _normalize_bid_timeline_stage_key(
                                     item.get('dept') or item.get('stage') or item.get('department') or item.get('team') or ''
                                 )
                                 if not stage or stage not in meta_buckets:
                                     continue
-                                st = (item.get('status') or '').strip().lower()
+                                st = normalize_task_status(item.get('status') or '')
                                 pct = item.get('progress_pct')
                                 if pct is None:
-                                    pct = 100 if st in ('completed', 'submitted') else 50 if st in ('in_progress', 'in progress') else 0
+                                    pct = _status_to_progress_pct(st)
                                 try:
                                     pct = max(0, min(100, int(pct)))
                                 except Exception:
@@ -5880,64 +6217,22 @@ def top_admin_overview():
                     (g_id,),
                 )
                 rows = cur2.fetchall() or []
-                role_to_stage = {
-                    'business dev': 'business',
-                    'business development': 'business',
-                    'bdm': 'business',
-                    'bde': 'business',
-                    'design': 'design',
-                    'design team': 'design',
-                    'design & marketing': 'design',
-                    'design and marketing': 'design',
-                    'marketing': 'design',
-                    'operations': 'operations',
-                    'operation': 'operations',
-                    'ops': 'operations',
-                    'operations team': 'operations',
-                    'site manager': 'engineer',
-                    'site engineer': 'engineer',
-                    'engineering': 'engineer',
-                    'engineer': 'engineer',
-                    'engineering team': 'engineer',
-                    'handover': 'handover',
-                    'submitted': 'handover',
-                    'submit': 'handover',
-                    'bid analyzer': 'analyzer',
-                    'analyzer': 'analyzer',
-                }
                 buckets = {k: [] for k in default_stages}
                 counts = {k: {'total': 0, 'completed': 0} for k in default_stages}
                 for r in rows:
-                    source = (r.get('stage_source') or '').strip().lower()
-                    stage = role_to_stage.get(source)
-                    if not stage and source in buckets:
-                        stage = source
-                    if not stage and source:
-                        if 'design' in source or 'marketing' in source:
-                            stage = 'design'
-                        elif 'business' in source or 'bdm' in source or 'bde' in source:
-                            stage = 'business'
-                        elif 'operation' in source or 'ops' in source:
-                            stage = 'operations'
-                        elif 'engineer' in source or 'site' in source:
-                            stage = 'engineer'
-                        elif 'submit' in source or 'handover' in source or source == 'won':
-                            stage = 'handover'
-                        elif 'analy' in source:
-                            stage = 'analyzer'
+                    stage = _normalize_bid_timeline_stage_key(r.get('stage_source'))
                     if not stage:
                         continue
                     pct = r.get('progress_pct')
                     if pct is None:
-                        st = (r.get('status') or '').strip().lower()
-                        pct = 100 if st in ('completed', 'submitted') else 50 if st in ('in_progress', 'in progress') else 0
+                        pct = _status_to_progress_pct(r.get('status') or '')
                     try:
                         pct = max(0, min(100, int(pct)))
                     except Exception:
                         pct = 0
                     buckets[stage].append(pct)
                     counts[stage]['total'] += 1
-                    st = (r.get('status') or '').strip().lower()
+                    st = normalize_task_status(r.get('status') or '')
                     if pct >= 100 or st in ('completed', 'submitted'):
                         counts[stage]['completed'] += 1
                 def avg(lst):
@@ -5993,20 +6288,19 @@ def top_admin_overview():
                                 (gid,),
                             )
                             for row in (cur.fetchall() or []):
-                                stage = _normalize_stage_key(row.get('stage'))
+                                stage = _normalize_bid_timeline_stage_key(row.get('stage'))
                                 if not stage or stage not in buckets:
                                     continue
                                 pct = row.get('progress_pct')
                                 if pct is None:
-                                    st = (row.get('status') or '').strip().lower()
-                                    pct = 100 if st in ('completed', 'submitted') else 50 if st in ('in_progress', 'in progress') else 0
+                                    pct = _status_to_progress_pct(row.get('status') or '')
                                 try:
                                     pct = max(0, min(100, int(pct)))
                                 except Exception:
                                     pct = 0
                                 buckets[stage].append(pct)
                                 counts[stage]['total'] += 1
-                                if pct >= 100 or (row.get('status') or '').strip().lower() in ('completed', 'submitted'):
+                                if pct >= 100 or normalize_task_status(row.get('status') or '') in ('completed', 'submitted'):
                                     counts[stage]['completed'] += 1
                         except Exception:
                             pass
@@ -6024,11 +6318,11 @@ def top_admin_overview():
                                     for item in checklist:
                                         if not isinstance(item, dict):
                                             continue
-                                        stage = _normalize_stage_key(item.get('dept') or item.get('stage') or '')
+                                        stage = _normalize_bid_timeline_stage_key(item.get('dept') or item.get('stage') or '')
                                         if not stage or stage not in buckets:
                                             continue
-                                        st = (item.get('status') or '').strip().lower()
-                                        pct = 100 if st in ('completed', 'submitted') else 50 if st in ('in_progress', 'in progress') else 0
+                                        st = normalize_task_status(item.get('status') or '')
+                                        pct = _status_to_progress_pct(st)
                                         buckets[stage].append(pct)
                                         counts[stage]['total'] += 1
                                         if pct >= 100 or st in ('completed', 'submitted'):
@@ -6329,8 +6623,8 @@ def top_admin_overview():
                 progress_map[int(pr.get('stage_id'))] = int(pr.get('progress_pct') or 0)
 
         # Prefer live checklist-derived progress when available.
+        g_id_for_progress = _resolve_execution_gid(r.get('g_id'), r.get('b_name'), r.get('company'))
         checklist_progress = {}
-        g_id_for_progress = r.get('g_id')
         if g_id_for_progress:
             try:
                 checklist_progress = _compute_checklist_stage_progress(cur, int(g_id_for_progress))
@@ -6363,8 +6657,11 @@ def top_admin_overview():
             })
 
         stage_progress = 0
-        if len(stages) > 1:
-            stage_progress = int(round((current_index / (len(stages) - 1)) * 100))
+        if stages:
+            try:
+                stage_progress = int(round(sum(int(s.get('progress') or 0) for s in stages) / len(stages)))
+            except Exception:
+                stage_progress = 0
 
         pm_info = project_manager_map.get(int(project_id)) if project_id is not None else None
         if not pm_info and default_pm:
@@ -6377,7 +6674,7 @@ def top_admin_overview():
                         INSERT INTO project_manager_assignments (project_id, g_id, manager_user_id, assigned_by_user_id)
                         VALUES (%s, %s, %s, %s)
                         """,
-                        (int(project_id), int(r.get('g_id') or 0), int(default_pm.get('id')), int(getattr(current_user, 'id', 0))),
+                        (int(project_id), int(g_id_for_progress or r.get('g_id') or 0), int(default_pm.get('id')), int(getattr(current_user, 'id', 0))),
                     )
                     mysql.connection.commit()
                 pm_info = {
@@ -6391,9 +6688,214 @@ def top_admin_overview():
                 except Exception:
                     pass
 
+        # Portfolio Gantt model (task-wise planned vs actual) from execution checklist.
+        gantt_stage_bars = []
+        project_planned_start = None
+        project_planned_end = None
+        project_actual_start = None
+        project_actual_end = None
+        stage_keys_in_order = []
+        for st in (stages or []):
+            sk = _normalize_department_key(st.get('name') or st.get('key') or '')
+            if sk:
+                stage_keys_in_order.append(sk)
+        if not stage_keys_in_order:
+            stage_keys_in_order = ['engineering_team', 'procurement_team', 'accounts_finance']
+        fallback_stage_days = {
+            'engineering_team': 30,
+            'procurement_team': 30,
+            'accounts_finance': 30,
+        }
+        stage_label_lookup = {}
+        for st in (stages or []):
+            sk = _normalize_department_key(st.get('name') or st.get('key') or '')
+            if sk:
+                stage_label_lookup[sk] = st.get('name') or sk.replace('_', ' ').title()
+
+        task_rows = []
+        try:
+            # Ensure template execution tasks exist in backend for missing execution departments.
+            if g_id_for_progress:
+                inserted = _ensure_won_standard_tasks(
+                    cur,
+                    int(g_id_for_progress),
+                    stage_keys_in_order,
+                    anchor_start=(project_planned_start or date.today()),
+                )
+                if inserted:
+                    mysql.connection.commit()
+            if g_id_for_progress:
+                cur.execute(
+                    """
+                    SELECT
+                        id,
+                        COALESCE(task_code, '') AS task_code,
+                        COALESCE(task_name, 'Task') AS task_name,
+                        LOWER(COALESCE(department_key, '')) AS stage_key,
+                        LOWER(COALESCE(status, 'pending')) AS status,
+                        COALESCE(progress_pct, 0) AS progress_pct,
+                        DATE(created_at) AS created_date,
+                        DATE(due_date) AS due_date,
+                        DATE(updated_at) AS updated_date
+                    FROM won_project_checklists
+                    WHERE g_id=%s
+                    ORDER BY COALESCE(due_date, created_at) ASC, id ASC
+                    """,
+                    (int(g_id_for_progress),),
+                )
+                task_rows = cur.fetchall() or []
+        except Exception:
+            task_rows = []
+
+        if task_rows:
+            stage_progress_buckets = {}
+            for tr in task_rows:
+                sk = _normalize_department_key(tr.get('stage_key') or '')
+                if not sk:
+                    continue
+                created_d = _as_date(tr.get('created_date') or tr.get('updated_date'))
+                planned_start = created_d or date.today()
+                planned_end = _as_date(tr.get('due_date')) or planned_start
+                if planned_end < planned_start:
+                    planned_end = planned_start
+
+                st_norm = normalize_task_status(tr.get('status') or 'pending')
+                raw_pct = 0
+                try:
+                    raw_pct = int(tr.get('progress_pct') or 0)
+                except Exception:
+                    raw_pct = 0
+                if st_norm == 'completed':
+                    progress_pct = 100
+                elif st_norm == 'submitted':
+                    progress_pct = 75
+                elif st_norm == 'in_progress':
+                    progress_pct = max(1, min(99, raw_pct if raw_pct > 0 else 50))
+                else:
+                    progress_pct = 0
+                stage_progress_buckets.setdefault(sk, []).append(progress_pct)
+                actual_start = (created_d or planned_start) if st_norm in ('in_progress', 'submitted', 'completed') else None
+                if st_norm == 'completed':
+                    actual_end = _as_date(tr.get('updated_date') or tr.get('due_date') or tr.get('created_date')) or planned_end
+                elif st_norm in ('in_progress', 'submitted'):
+                    today_d = date.today()
+                    actual_end = min(planned_end, today_d) if today_d >= (actual_start or planned_start) else (actual_start or planned_start)
+                else:
+                    actual_end = None
+
+                if project_planned_start is None or planned_start < project_planned_start:
+                    project_planned_start = planned_start
+                if project_planned_end is None or planned_end > project_planned_end:
+                    project_planned_end = planned_end
+                if actual_start and (project_actual_start is None or actual_start < project_actual_start):
+                    project_actual_start = actual_start
+                if actual_end and (project_actual_end is None or actual_end > project_actual_end):
+                    project_actual_end = actual_end
+
+                label = tr.get('task_name') or 'Task'
+                code = (tr.get('task_code') or '').strip()
+                display = f"{code} {label}".strip() if code else label
+                gantt_stage_bars.append({
+                    'stage_key': sk,
+                    'stage_name': display,
+                    'task_code': code,
+                    'status': st_norm,
+                    'planned_start': planned_start.isoformat() if planned_start else None,
+                    'planned_end': planned_end.isoformat() if planned_end else None,
+                    'actual_start': actual_start.isoformat() if actual_start else None,
+                    'actual_end': actual_end.isoformat() if actual_end else None,
+                    'progress_pct': int(progress_pct or 0),
+                    'task_done': 1 if st_norm == 'completed' else 0,
+                    'task_total': 1,
+                    'duration_days': max(1, (planned_end - planned_start).days + 1),
+                    'is_task': True,
+                })
+
+            # Keep top timeline stages aligned with real task progress (parallel updates).
+            if stage_progress_buckets:
+                existing_stage_keys = set()
+                for st in stages:
+                    sk = _normalize_department_key(st.get('name') or st.get('key') or '')
+                    if sk:
+                        existing_stage_keys.add(sk)
+                    vals = stage_progress_buckets.get(sk) or []
+                    if vals:
+                        st['progress'] = int(round(sum(vals) / len(vals)))
+                # If checklist has a valid department that is not present in timeline stages,
+                # append it so top timeline always reflects execution tasks.
+                for sk, vals in stage_progress_buckets.items():
+                    if not vals or sk in existing_stage_keys:
+                        continue
+                    label = stage_label_lookup.get(sk) or sk.replace('_', ' ').title()
+                    stages.append({
+                        'id': None,
+                        'name': label,
+                        'order': len(stages),
+                        'progress': int(round(sum(vals) / len(vals))),
+                    })
+                try:
+                    stage_progress = int(round(sum(int(s.get('progress') or 0) for s in stages) / len(stages))) if stages else 0
+                except Exception:
+                    stage_progress = 0
+
+        # Fill missing departments with standard dummy tasks so the full process/window is visible.
+        template_tasks = {
+            'engineering_team': [
+                ('ENG-PLAN', 'Engineering kickoff and requirement freeze', 10),
+                ('ENG-DESIGN', 'Technical design and drawing package', 12),
+                ('ENG-EXEC', 'Site execution preparation and handoff', 8),
+            ],
+            'procurement_team': [
+                ('PRC-BOQ', 'BOQ finalization and quantity validation', 10),
+                ('PRC-RFQ', 'RFQ issue and vendor comparison', 10),
+                ('PRC-PO', 'PO release and delivery tracking setup', 10),
+            ],
+            'accounts_finance': [
+                ('AF-BUD', 'Budget baseline validation and allocation', 8),
+                ('AF-COMP', 'Invoice compliance and documentation', 12),
+                ('AF-CLOSE', 'Final financial closure and sign-off', 10),
+            ],
+        }
+        existing_stages = set()
+        for b in (gantt_stage_bars or []):
+            existing_stages.add(_normalize_department_key(b.get('stage_key') or '') or '')
+        anchor_start = project_planned_start or date.today()
+        for idx, sk in enumerate(stage_keys_in_order):
+            if sk in existing_stages:
+                continue
+            seg_days = int(fallback_stage_days.get(sk, 30) or 30)
+            seg_start = anchor_start + timedelta(days=idx * 30)
+            task_defs = template_tasks.get(sk) or [(sk.upper(), f'{stage_label_lookup.get(sk, sk.replace("_"," ").title())} standard task', seg_days)]
+            cursor = seg_start
+            for t_code, t_name, t_days in task_defs:
+                pdays = max(1, int(t_days or 1))
+                planned_start = cursor
+                planned_end = planned_start + timedelta(days=max(pdays - 1, 0))
+                cursor = planned_end + timedelta(days=1)
+                if project_planned_start is None or planned_start < project_planned_start:
+                    project_planned_start = planned_start
+                if project_planned_end is None or planned_end > project_planned_end:
+                    project_planned_end = planned_end
+                gantt_stage_bars.append({
+                    'stage_key': sk,
+                    'stage_name': t_name,
+                    'task_code': t_code,
+                    'status': 'pending',
+                    'planned_start': planned_start.isoformat(),
+                    'planned_end': planned_end.isoformat(),
+                    'actual_start': None,
+                    'actual_end': None,
+                    'progress_pct': 0,
+                    'task_done': 0,
+                    'task_total': 0,
+                    'duration_days': pdays,
+                    'is_task': True,
+                    'is_dummy': True,
+                })
+
         project_timeline_items.append({
             'project_id': project_id,
-            'g_id': r.get('g_id'),
+            'g_id': g_id_for_progress or r.get('g_id'),
             'b_name': r.get('b_name') or f"Won #{r.get('w_id')}",
             'company': r.get('company'),
             'current_stage_index': current_index,
@@ -6402,6 +6904,13 @@ def top_admin_overview():
             'pm_user_id': (pm_info or {}).get('user_id'),
             'pm_name': (pm_info or {}).get('name'),
             'pm_email': (pm_info or {}).get('email'),
+            'gantt': {
+                'planned_start': project_planned_start.isoformat() if project_planned_start else None,
+                'planned_end': project_planned_end.isoformat() if project_planned_end else None,
+                'actual_start': project_actual_start.isoformat() if project_actual_start else None,
+                'actual_end': project_actual_end.isoformat() if project_actual_end else None,
+                'stages': gantt_stage_bars,
+            },
         })
 
     cur.close()
@@ -6807,6 +7316,580 @@ def top_admin_approvals():
         user=current_user,
         user_role=getattr(current_user, 'role', 'admin'),
     )
+
+
+@app.route('/top-admin/product-library')
+@login_required
+def top_admin_product_library():
+    denied = _top_admin_guard()
+    if denied:
+        return denied
+    cur = mysql.connection.cursor(DictCursor)
+    try:
+        _ensure_product_library_tables(cur)
+        _seed_product_library_categories(cur)
+        _seed_ikio_application_products(cur)
+        categories = _fetch_product_categories(cur)
+    finally:
+        try:
+            cur.close()
+        except Exception:
+            pass
+    return render_template(
+        'top_admin_product_library.html',
+        active_nav='product_library',
+        categories=categories,
+    )
+
+
+@app.route('/api/top-admin/product-library/bootstrap')
+@login_required
+def api_top_admin_product_library_bootstrap():
+    denied = _top_admin_guard()
+    if denied:
+        return jsonify({'ok': False, 'error': 'access_denied'}), 403
+    cur = mysql.connection.cursor(DictCursor)
+    try:
+        _ensure_product_library_tables(cur)
+        _seed_product_library_categories(cur)
+        _seed_ikio_application_products(cur)
+        categories = _fetch_product_categories(cur)
+        cur.execute("SELECT COUNT(*) AS c FROM product_library_products WHERE is_active=1")
+        product_count = int((cur.fetchone() or {}).get('c') or 0)
+        cur.execute("SELECT COUNT(*) AS c FROM product_library_documents")
+        doc_count = int((cur.fetchone() or {}).get('c') or 0)
+    finally:
+        try:
+            cur.close()
+        except Exception:
+            pass
+    return jsonify({
+        'ok': True,
+        'categories': categories,
+        'summary': {
+            'products': product_count,
+            'documents': doc_count,
+        }
+    })
+
+
+@app.route('/api/top-admin/product-library/products')
+@login_required
+def api_top_admin_product_library_products():
+    denied = _top_admin_guard()
+    if denied:
+        return jsonify({'ok': False, 'error': 'access_denied'}), 403
+
+    q = (request.args.get('q') or '').strip()
+    category_id = request.args.get('category_id', type=int)
+    subcategory_id = request.args.get('subcategory_id', type=int)
+    status = (request.args.get('status') or '').strip().lower()
+    page = max(1, int(request.args.get('page', 1) or 1))
+    per_page = max(1, min(200, int(request.args.get('per_page', 25) or 25)))
+    offset = (page - 1) * per_page
+
+    where_sql = ["p.is_active=1"]
+    params = []
+    if q:
+        where_sql.append("(LOWER(p.sku) LIKE %s OR LOWER(p.name) LIKE %s OR LOWER(COALESCE(p.brand,'')) LIKE %s OR LOWER(COALESCE(p.model,'')) LIKE %s)")
+        like = f"%{q.lower()}%"
+        params.extend([like, like, like, like])
+    if category_id:
+        where_sql.append("p.category_id=%s")
+        params.append(int(category_id))
+    if subcategory_id:
+        where_sql.append("p.subcategory_id=%s")
+        params.append(int(subcategory_id))
+    if status in ('active', 'inactive', 'draft'):
+        where_sql.append("LOWER(COALESCE(p.status,''))=%s")
+        params.append(status)
+    where_clause = " AND ".join(where_sql)
+
+    cur = mysql.connection.cursor(DictCursor)
+    try:
+        _ensure_product_library_tables(cur)
+        query = f"""
+            SELECT
+                p.id, p.sku, p.name, p.brand, p.model, p.status, p.default_currency,
+                p.description, p.tags, p.created_at, p.updated_at,
+                c1.name AS category_name,
+                c2.name AS subcategory_name,
+                COUNT(DISTINCT v.id) AS variant_count,
+                COUNT(DISTINCT d.id) AS document_count,
+                MIN(v.selling_price) AS min_price,
+                MAX(v.selling_price) AS max_price
+            FROM product_library_products p
+            LEFT JOIN product_library_categories c1 ON c1.id = p.category_id
+            LEFT JOIN product_library_categories c2 ON c2.id = p.subcategory_id
+            LEFT JOIN product_library_price_variants v ON v.product_id = p.id AND v.is_active=1
+            LEFT JOIN product_library_documents d ON d.product_id = p.id
+            WHERE {where_clause}
+            GROUP BY p.id
+            ORDER BY p.updated_at DESC, p.id DESC
+            LIMIT %s OFFSET %s
+        """
+        cur.execute(query, tuple(params + [per_page, offset]))
+        rows = cur.fetchall() or []
+
+        cur.execute(f"SELECT COUNT(*) AS c FROM product_library_products p WHERE {where_clause}", tuple(params))
+        total = int((cur.fetchone() or {}).get('c') or 0)
+    finally:
+        try:
+            cur.close()
+        except Exception:
+            pass
+
+    return jsonify({
+        'ok': True,
+        'items': rows,
+        'pagination': {
+            'page': page,
+            'per_page': per_page,
+            'total': total,
+            'pages': (total + per_page - 1) // per_page if per_page else 1,
+        }
+    })
+
+
+@app.route('/api/top-admin/product-library/products/<int:product_id>')
+@login_required
+def api_top_admin_product_library_product_detail(product_id: int):
+    denied = _top_admin_guard()
+    if denied:
+        return jsonify({'ok': False, 'error': 'access_denied'}), 403
+    cur = mysql.connection.cursor(DictCursor)
+    try:
+        _ensure_product_library_tables(cur)
+        cur.execute(
+            """
+            SELECT p.*, c1.name AS category_name, c2.name AS subcategory_name
+            FROM product_library_products p
+            LEFT JOIN product_library_categories c1 ON c1.id = p.category_id
+            LEFT JOIN product_library_categories c2 ON c2.id = p.subcategory_id
+            WHERE p.id=%s AND p.is_active=1
+            LIMIT 1
+            """,
+            (int(product_id),),
+        )
+        product = cur.fetchone()
+        if not product:
+            return jsonify({'ok': False, 'error': 'not_found'}), 404
+        cur.execute(
+            """
+            SELECT *
+            FROM product_library_price_variants
+            WHERE product_id=%s AND is_active=1
+            ORDER BY id ASC
+            """,
+            (int(product_id),),
+        )
+        variants = cur.fetchall() or []
+        cur.execute(
+            """
+            SELECT *
+            FROM product_library_documents
+            WHERE product_id=%s
+            ORDER BY created_at DESC, id DESC
+            """,
+            (int(product_id),),
+        )
+        docs = cur.fetchall() or []
+    finally:
+        try:
+            cur.close()
+        except Exception:
+            pass
+    for d in docs:
+        d['download_url'] = f"/uploads/{d.get('file_path')}"
+    return jsonify({'ok': True, 'product': product, 'variants': variants, 'documents': docs})
+
+
+@app.route('/api/top-admin/product-library/products/<int:product_id>', methods=['DELETE'])
+@login_required
+def api_top_admin_product_library_delete_product(product_id: int):
+    denied = _top_admin_guard()
+    if denied:
+        return jsonify({'ok': False, 'error': 'access_denied'}), 403
+    cur = mysql.connection.cursor(DictCursor)
+    try:
+        _ensure_product_library_tables(cur)
+        cur.execute(
+            "UPDATE product_library_products SET is_active=0, status='inactive', updated_at=NOW() WHERE id=%s",
+            (int(product_id),),
+        )
+        mysql.connection.commit()
+    except Exception as e:
+        mysql.connection.rollback()
+        return jsonify({'ok': False, 'error': 'delete_failed', 'message': str(e)}), 500
+    finally:
+        try:
+            cur.close()
+        except Exception:
+            pass
+    return jsonify({'ok': True})
+
+
+@app.route('/api/top-admin/product-library/products', methods=['POST'])
+@login_required
+def api_top_admin_product_library_save_product():
+    denied = _top_admin_guard()
+    if denied:
+        return jsonify({'ok': False, 'error': 'access_denied'}), 403
+    payload = request.get_json(silent=True) or {}
+
+    product_id = payload.get('id')
+    sku = (payload.get('sku') or '').strip().upper()
+    name = (payload.get('name') or '').strip()
+    if not sku or not name:
+        return jsonify({'ok': False, 'error': 'missing_required', 'message': 'SKU and product name are required'}), 400
+
+    category_id = payload.get('category_id')
+    subcategory_id = payload.get('subcategory_id')
+    brand = (payload.get('brand') or '').strip() or None
+    model = (payload.get('model') or '').strip() or None
+    status = (payload.get('status') or 'active').strip().lower()
+    if status not in ('active', 'inactive', 'draft'):
+        status = 'active'
+    default_currency = (payload.get('default_currency') or 'INR').strip().upper()[:8]
+    description = (payload.get('description') or '').strip() or None
+    tags = (payload.get('tags') or '').strip() or None
+    specs_payload = payload.get('specs')
+    if isinstance(specs_payload, (dict, list)):
+        specs_json = json.dumps(specs_payload)
+    else:
+        specs_json = (str(specs_payload).strip() if specs_payload is not None else None) or None
+    variants = payload.get('variants') or []
+    if not isinstance(variants, list):
+        variants = []
+
+    cur = mysql.connection.cursor(DictCursor)
+    try:
+        _ensure_product_library_tables(cur)
+        if product_id:
+            cur.execute(
+                """
+                UPDATE product_library_products
+                SET sku=%s, name=%s, category_id=%s, subcategory_id=%s, brand=%s, model=%s,
+                    status=%s, default_currency=%s, description=%s, tags=%s, specs_json=%s, updated_at=NOW()
+                WHERE id=%s
+                """,
+                (sku, name, category_id, subcategory_id, brand, model, status, default_currency, description, tags, specs_json, int(product_id)),
+            )
+            pid = int(product_id)
+        else:
+            cur.execute(
+                """
+                INSERT INTO product_library_products (
+                    sku, name, category_id, subcategory_id, brand, model, status, default_currency,
+                    description, tags, specs_json, created_by, is_active
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 1)
+                ON DUPLICATE KEY UPDATE
+                    name=VALUES(name),
+                    category_id=VALUES(category_id),
+                    subcategory_id=VALUES(subcategory_id),
+                    brand=VALUES(brand),
+                    model=VALUES(model),
+                    status=VALUES(status),
+                    default_currency=VALUES(default_currency),
+                    description=VALUES(description),
+                    tags=VALUES(tags),
+                    specs_json=VALUES(specs_json),
+                    updated_at=NOW()
+                """,
+                (sku, name, category_id, subcategory_id, brand, model, status, default_currency, description, tags, specs_json, getattr(current_user, 'id', None)),
+            )
+            cur.execute("SELECT id FROM product_library_products WHERE sku=%s LIMIT 1", (sku,))
+            pid = int((cur.fetchone() or {}).get('id') or 0)
+
+        cur.execute("DELETE FROM product_library_price_variants WHERE product_id=%s", (pid,))
+        for item in variants:
+            if not isinstance(item, dict):
+                continue
+            variant_name = (item.get('variant_name') or item.get('name') or '').strip()
+            if not variant_name:
+                continue
+            fixture_spec = (item.get('fixture_spec') or '').strip() or None
+            currency = (item.get('currency') or default_currency or 'INR').strip().upper()[:8]
+            unit_cost = _parse_decimal(item.get('unit_cost'))
+            selling_price = _parse_decimal(item.get('selling_price'))
+            min_qty = int(item.get('min_qty') or 0) if str(item.get('min_qty') or '').strip() else None
+            max_qty = int(item.get('max_qty') or 0) if str(item.get('max_qty') or '').strip() else None
+            effective_from = (item.get('effective_from') or '').strip() or None
+            effective_to = (item.get('effective_to') or '').strip() or None
+            cur.execute(
+                """
+                INSERT INTO product_library_price_variants (
+                    product_id, variant_name, fixture_spec, currency, unit_cost, selling_price, min_qty, max_qty, effective_from, effective_to, is_active
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 1)
+                """,
+                (pid, variant_name, fixture_spec, currency, unit_cost, selling_price, min_qty, max_qty, effective_from, effective_to),
+            )
+        mysql.connection.commit()
+    except Exception as e:
+        mysql.connection.rollback()
+        return jsonify({'ok': False, 'error': 'save_failed', 'message': str(e)}), 500
+    finally:
+        try:
+            cur.close()
+        except Exception:
+            pass
+    return jsonify({'ok': True, 'product_id': pid})
+
+
+@app.route('/api/top-admin/product-library/products/<int:product_id>/documents', methods=['POST'])
+@login_required
+def api_top_admin_product_library_upload_documents(product_id: int):
+    denied = _top_admin_guard()
+    if denied:
+        return jsonify({'ok': False, 'error': 'access_denied'}), 403
+    files = request.files.getlist('files')
+    if not files:
+        return jsonify({'ok': False, 'error': 'missing_files'}), 400
+    cur = mysql.connection.cursor(DictCursor)
+    saved = []
+    try:
+        _ensure_product_library_tables(cur)
+        cur.execute("SELECT id, sku FROM product_library_products WHERE id=%s AND is_active=1 LIMIT 1", (int(product_id),))
+        product = cur.fetchone()
+        if not product:
+            return jsonify({'ok': False, 'error': 'not_found'}), 404
+        sku = (product.get('sku') or f"product_{product_id}").lower()
+        folder = os.path.join(os.getcwd(), 'uploads', 'product_library', secure_filename(sku))
+        os.makedirs(folder, exist_ok=True)
+
+        for f in files:
+            if not f or not (f.filename or '').strip():
+                continue
+            safe = secure_filename(f.filename) or f"doc_{uuid.uuid4().hex}"
+            filename = f"{uuid.uuid4().hex}_{safe}"
+            abs_path = os.path.join(folder, filename)
+            rel_path = os.path.join('product_library', secure_filename(sku), filename).replace("\\", "/")
+            f.save(abs_path)
+            file_size = 0
+            try:
+                file_size = os.path.getsize(abs_path)
+            except Exception:
+                file_size = 0
+            mime_type = mimetypes.guess_type(abs_path)[0] or None
+            cur.execute(
+                """
+                INSERT INTO product_library_documents (
+                    product_id, document_name, file_path, mime_type, file_size, uploaded_by
+                )
+                VALUES (%s, %s, %s, %s, %s, %s)
+                """,
+                (int(product_id), safe, rel_path, mime_type, file_size, getattr(current_user, 'id', None)),
+            )
+            saved.append({'name': safe, 'file_path': rel_path, 'download_url': f"/uploads/{rel_path}"})
+        mysql.connection.commit()
+    except Exception as e:
+        mysql.connection.rollback()
+        return jsonify({'ok': False, 'error': 'upload_failed', 'message': str(e)}), 500
+    finally:
+        try:
+            cur.close()
+        except Exception:
+            pass
+    return jsonify({'ok': True, 'files': saved})
+
+
+@app.route('/api/top-admin/product-library/documents/<int:document_id>', methods=['DELETE'])
+@login_required
+def api_top_admin_product_library_delete_document(document_id: int):
+    denied = _top_admin_guard()
+    if denied:
+        return jsonify({'ok': False, 'error': 'access_denied'}), 403
+    cur = mysql.connection.cursor(DictCursor)
+    try:
+        _ensure_product_library_tables(cur)
+        cur.execute("SELECT id, file_path FROM product_library_documents WHERE id=%s LIMIT 1", (int(document_id),))
+        row = cur.fetchone()
+        if not row:
+            return jsonify({'ok': False, 'error': 'not_found'}), 404
+        cur.execute("DELETE FROM product_library_documents WHERE id=%s", (int(document_id),))
+        mysql.connection.commit()
+        fp = row.get('file_path') or ''
+        if fp:
+            abs_path = os.path.join(os.getcwd(), 'uploads', fp)
+            try:
+                if os.path.isfile(abs_path):
+                    os.remove(abs_path)
+            except Exception:
+                pass
+    except Exception as e:
+        mysql.connection.rollback()
+        return jsonify({'ok': False, 'error': 'delete_failed', 'message': str(e)}), 500
+    finally:
+        try:
+            cur.close()
+        except Exception:
+            pass
+    return jsonify({'ok': True})
+
+
+@app.route('/api/top-admin/product-library/bulk-import', methods=['POST'])
+@login_required
+def api_top_admin_product_library_bulk_import():
+    denied = _top_admin_guard()
+    if denied:
+        return jsonify({'ok': False, 'error': 'access_denied'}), 403
+    upload = request.files.get('file')
+    if not upload or not (upload.filename or '').strip():
+        return jsonify({'ok': False, 'error': 'missing_file'}), 400
+    filename = (upload.filename or '').lower()
+    rows = []
+    try:
+        if filename.endswith('.csv'):
+            text = upload.read().decode('utf-8-sig', errors='ignore')
+            reader = csv.DictReader(io.StringIO(text))
+            rows = [dict(r or {}) for r in reader]
+        elif filename.endswith('.xlsx') or filename.endswith('.xls'):
+            try:
+                from openpyxl import load_workbook  # type: ignore
+            except Exception:
+                return jsonify({'ok': False, 'error': 'xlsx_not_supported', 'message': 'Install openpyxl for Excel bulk import'}), 400
+            wb = load_workbook(upload, read_only=True, data_only=True)
+            ws = wb.active
+            header = []
+            for cell in next(ws.iter_rows(min_row=1, max_row=1)):
+                header.append((str(cell.value).strip() if cell.value is not None else ''))
+            for r in ws.iter_rows(min_row=2):
+                entry = {}
+                has_any = False
+                for idx, cell in enumerate(r):
+                    key = header[idx] if idx < len(header) else f"col_{idx+1}"
+                    val = cell.value
+                    if val is not None and str(val).strip() != '':
+                        has_any = True
+                    entry[key] = val
+                if has_any:
+                    rows.append(entry)
+        else:
+            return jsonify({'ok': False, 'error': 'unsupported_file'}), 400
+    except Exception as e:
+        return jsonify({'ok': False, 'error': 'parse_failed', 'message': str(e)}), 400
+
+    if not rows:
+        return jsonify({'ok': False, 'error': 'empty_file'}), 400
+
+    required = {'sku', 'name'}
+    normalized_rows = []
+    for r in rows:
+        nr = {str(k or '').strip().lower(): r.get(k) for k in r.keys()}
+        normalized_rows.append(nr)
+    header_keys = set(normalized_rows[0].keys())
+    if not required.issubset(header_keys):
+        return jsonify({'ok': False, 'error': 'missing_columns', 'message': 'Required columns: sku, name'}), 400
+
+    cur = mysql.connection.cursor(DictCursor)
+    created = 0
+    updated = 0
+    variants_added = 0
+    try:
+        _ensure_product_library_tables(cur)
+        _seed_product_library_categories(cur)
+        cur.execute("SELECT id, name, parent_id FROM product_library_categories WHERE is_active=1")
+        cat_rows = cur.fetchall() or []
+        parent_by_name = {}
+        child_by_name = {}
+        for c in cat_rows:
+            nm = (c.get('name') or '').strip().lower()
+            if c.get('parent_id') is None:
+                parent_by_name[nm] = int(c.get('id'))
+            else:
+                child_by_name[nm] = int(c.get('id'))
+
+        grouped = {}
+        for r in normalized_rows:
+            sku = str(r.get('sku') or '').strip().upper()
+            if not sku:
+                continue
+            grouped.setdefault(sku, []).append(r)
+
+        for sku, entries in grouped.items():
+            base = entries[0]
+            name = str(base.get('name') or '').strip()
+            if not name:
+                continue
+            category_name = str(base.get('category') or '').strip().lower()
+            subcategory_name = str(base.get('subcategory') or '').strip().lower()
+            category_id = parent_by_name.get(category_name)
+            subcategory_id = child_by_name.get(subcategory_name)
+            brand = (str(base.get('brand') or '').strip() or None)
+            model = (str(base.get('model') or '').strip() or None)
+            description = (str(base.get('description') or '').strip() or None)
+            tags = (str(base.get('tags') or '').strip() or None)
+            default_currency = (str(base.get('currency') or 'INR').strip().upper()[:8] or 'INR')
+            status = (str(base.get('status') or 'active').strip().lower() or 'active')
+            if status not in ('active', 'inactive', 'draft'):
+                status = 'active'
+
+            cur.execute("SELECT id FROM product_library_products WHERE sku=%s LIMIT 1", (sku,))
+            existing = cur.fetchone()
+            if existing:
+                pid = int(existing.get('id'))
+                cur.execute(
+                    """
+                    UPDATE product_library_products
+                    SET name=%s, category_id=%s, subcategory_id=%s, brand=%s, model=%s, status=%s,
+                        default_currency=%s, description=%s, tags=%s, updated_at=NOW(), is_active=1
+                    WHERE id=%s
+                    """,
+                    (name, category_id, subcategory_id, brand, model, status, default_currency, description, tags, pid),
+                )
+                updated += 1
+            else:
+                cur.execute(
+                    """
+                    INSERT INTO product_library_products (
+                        sku, name, category_id, subcategory_id, brand, model, status, default_currency,
+                        description, tags, created_by, is_active
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 1)
+                    """,
+                    (sku, name, category_id, subcategory_id, brand, model, status, default_currency, description, tags, getattr(current_user, 'id', None)),
+                )
+                pid = int(cur.lastrowid or 0)
+                created += 1
+
+            cur.execute("DELETE FROM product_library_price_variants WHERE product_id=%s", (pid,))
+            for item in entries:
+                variant_name = str(item.get('variant_name') or item.get('variant') or '').strip() or 'Default'
+                fixture_spec = str(item.get('fixture_spec') or item.get('spec') or '').strip() or None
+                currency = (str(item.get('currency') or default_currency).strip().upper()[:8] or default_currency)
+                unit_cost = _parse_decimal(item.get('unit_cost'))
+                selling_price = _parse_decimal(item.get('selling_price') or item.get('price'))
+                min_qty = int(float(item.get('min_qty'))) if str(item.get('min_qty') or '').strip() else None
+                max_qty = int(float(item.get('max_qty'))) if str(item.get('max_qty') or '').strip() else None
+                cur.execute(
+                    """
+                    INSERT INTO product_library_price_variants (
+                        product_id, variant_name, fixture_spec, currency, unit_cost, selling_price, min_qty, max_qty, is_active
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 1)
+                    """,
+                    (pid, variant_name, fixture_spec, currency, unit_cost, selling_price, min_qty, max_qty),
+                )
+                variants_added += 1
+        mysql.connection.commit()
+    except Exception as e:
+        mysql.connection.rollback()
+        return jsonify({'ok': False, 'error': 'import_failed', 'message': str(e)}), 500
+    finally:
+        try:
+            cur.close()
+        except Exception:
+            pass
+
+    return jsonify({
+        'ok': True,
+        'created': created,
+        'updated': updated,
+        'variants_added': variants_added,
+        'rows_processed': len(rows),
+    })
 
 
 @app.route('/top-admin/team-chats')
@@ -7641,11 +8724,43 @@ def _normalize_department_key(raw: str | None) -> str | None:
     val = (raw or "").strip().lower().replace("_", " ")
     val = " ".join(val.split())
     compact = val.replace(" ", "")
-    if val in ("engineering team", "engineering") or compact in ("engineeringteam", "engineering"):
+    if (
+        val in ("engineering team", "engineering dept", "engineering department")
+        or compact in ("engineeringteam", "engineeringdept", "engineeringdepartment")
+        or ("engineering" in val and "team" in val)
+    ):
         return "engineering_team"
-    if val in ("procurement team", "procurement") or compact in ("procurementteam", "procurement"):
+    if (
+        val in ("procurement team", "procurement", "procurement dept", "procurement department")
+        or compact in ("procurementteam", "procurement", "procurementdept", "procurementdepartment")
+        or ("procurement" in val and "team" in val)
+    ):
         return "procurement_team"
-    if val in ("accounts finance", "accounts & finance", "accounts and finance", "accounting", "finance", "accounts") or compact in ("accountsfinance", "accountsandfinance", "accounting", "finance", "accounts"):
+    if (
+        val in (
+            "accounts finance",
+            "accounts & finance",
+            "accounts and finance",
+            "accounts finance team",
+            "accounts & finance team",
+            "accounts and finance team",
+            "accounts finance dept",
+            "accounts finance department",
+            "accounting",
+            "finance",
+            "accounts",
+        )
+        or compact in (
+            "accountsfinance",
+            "accountsandfinance",
+            "accountsfinanceteam",
+            "accountsandfinanceteam",
+            "accounting",
+            "finance",
+            "accounts",
+        )
+        or (("account" in val or "finance" in val) and "team" in val)
+    ):
         return "accounts_finance"
     if val in ("business", "business dev", "business development", "business manager", "business team", "business development team") or compact in ("bd", "bdm", "businessdev", "businessdevelopment"):
         return "business"
@@ -7663,8 +8778,8 @@ def _normalize_department_key(raw: str | None) -> str | None:
         "ops executive",
     ) or compact in ("operations", "operation", "ops", "opsmanager", "operationmanager", "operationsexecutive", "opsexecutive"):
         return "operations"
-    if val in ("engineer", "site engineer", "site manager", "site_engineer", "site engineering", "site engineer team") or compact in ("engineer", "siteengineer", "sitemanager", "site"):
-        return "engineering_team"
+    if val in ("engineer", "site engineer", "site manager", "site_engineer", "site engineering", "site engineer team", "engineering") or compact in ("engineer", "siteengineer", "sitemanager", "site", "engineering"):
+        return "engineer"
     if val in ("team lead", "teamlead"):
         return None
     return val or None
@@ -7790,6 +8905,1978 @@ def _ensure_task_manager_attachments_table(cur):
     mysql.connection.commit()
 
 
+_SCHEMA_ENSURE_DONE = set()
+
+
+def _ensure_bid_stage_tables(cur):
+    if 'bid_stage_tables' in _SCHEMA_ENSURE_DONE:
+        return
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS bid_stage_exclusions (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            g_id INT NOT NULL,
+            stage VARCHAR(50) NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE KEY uniq_bid_stage (g_id, stage)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS bid_custom_stages (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            g_id INT NOT NULL,
+            stage VARCHAR(50) NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE KEY uniq_custom_stage (g_id, stage)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+        """
+    )
+    mysql.connection.commit()
+    _SCHEMA_ENSURE_DONE.add('bid_stage_tables')
+
+
+def _ensure_bid_assignment_members_table(cur):
+    if 'bid_assignment_members' in _SCHEMA_ENSURE_DONE:
+        return
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS bid_assignment_members (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            g_id INT NOT NULL,
+            employee_id INT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE KEY uniq_g_emp (g_id, employee_id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+        """
+    )
+    mysql.connection.commit()
+    _SCHEMA_ENSURE_DONE.add('bid_assignment_members')
+
+
+def _ensure_uploaded_rfp_files_schema(cur):
+    if 'uploaded_rfp_files' in _SCHEMA_ENSURE_DONE:
+        return
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS uploaded_rfp_files (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            bid_id INT,
+            g_id INT,
+            filename VARCHAR(500) NOT NULL,
+            file_path VARCHAR(1000) NOT NULL,
+            file_size BIGINT,
+            uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            uploaded_by INT,
+            INDEX idx_bid_id (bid_id),
+            INDEX idx_g_id (g_id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+        """
+    )
+    try:
+        cur.execute("SHOW COLUMNS FROM uploaded_rfp_files LIKE 'g_id'")
+        if not cur.fetchone():
+            cur.execute("ALTER TABLE uploaded_rfp_files ADD COLUMN g_id INT, ADD INDEX idx_g_id (g_id)")
+    except Exception:
+        pass
+    mysql.connection.commit()
+    _SCHEMA_ENSURE_DONE.add('uploaded_rfp_files')
+
+
+def _ensure_project_estimate_approvals_table(cur):
+    if 'project_estimate_approvals' in _SCHEMA_ENSURE_DONE:
+        # Keep additive migrations safe even after bootstrap cache is warm.
+        try:
+            cur.execute("ALTER TABLE project_estimate_approvals ADD COLUMN expected_total_cost DECIMAL(18,2) NULL")
+            mysql.connection.commit()
+        except Exception:
+            pass
+        try:
+            cur.execute(
+                """
+                UPDATE project_estimate_approvals
+                SET currency='USD'
+                WHERE UPPER(COALESCE(currency, 'USD')) <> 'USD'
+                """
+            )
+            mysql.connection.commit()
+        except Exception:
+            pass
+        return
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS project_estimate_approvals (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            g_id INT NOT NULL,
+            estimated_value DECIMAL(18,2) NOT NULL DEFAULT 0,
+            expected_total_cost DECIMAL(18,2) NULL,
+            currency VARCHAR(8) NOT NULL DEFAULT 'USD',
+            status VARCHAR(20) NOT NULL DEFAULT 'pending',
+            submitted_by_user_id INT NULL,
+            submitted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            approved_by_user_id INT NULL,
+            approved_at TIMESTAMP NULL,
+            won_reason TEXT,
+            approval_note TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            UNIQUE KEY uniq_project_estimate (g_id),
+            INDEX idx_status (status),
+            INDEX idx_submitted_by (submitted_by_user_id),
+            INDEX idx_approved_by (approved_by_user_id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """
+    )
+    try:
+        cur.execute("ALTER TABLE project_estimate_approvals ADD COLUMN won_reason TEXT")
+    except Exception:
+        pass
+    try:
+        cur.execute("ALTER TABLE project_estimate_approvals ADD COLUMN expected_total_cost DECIMAL(18,2) NULL")
+    except Exception:
+        pass
+    try:
+        # Accounts & Finance policy: all monetary calculations are normalized to USD.
+        cur.execute(
+            """
+            UPDATE project_estimate_approvals
+            SET currency='USD'
+            WHERE UPPER(COALESCE(currency, 'USD')) <> 'USD'
+            """
+        )
+    except Exception:
+        pass
+    mysql.connection.commit()
+    _SCHEMA_ENSURE_DONE.add('project_estimate_approvals')
+
+def _ensure_pm_agent_tables(cur):
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS pm_agents (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            manager_user_id INT NOT NULL,
+            name VARCHAR(160) NOT NULL,
+            instructions TEXT,
+            trigger_mode VARCHAR(32) NOT NULL DEFAULT 'manual',
+            scope_type VARCHAR(32) NOT NULL DEFAULT 'project',
+            llm_provider VARCHAR(32) NOT NULL DEFAULT 'openai',
+            llm_model VARCHAR(128) NOT NULL DEFAULT 'gpt-4o-mini',
+            temperature DECIMAL(4,2) NOT NULL DEFAULT 0.20,
+            is_active TINYINT(1) NOT NULL DEFAULT 1,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            INDEX idx_pm_agents_manager (manager_user_id),
+            UNIQUE KEY uniq_pm_agent_name_per_manager (manager_user_id, name)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS pm_agent_knowledge (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            agent_id INT NOT NULL,
+            source_key VARCHAR(64) NOT NULL,
+            is_enabled TINYINT(1) NOT NULL DEFAULT 1,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            UNIQUE KEY uniq_pm_agent_source (agent_id, source_key),
+            INDEX idx_pm_agent_knowledge_agent (agent_id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS pm_agent_runs (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            agent_id INT NOT NULL,
+            manager_user_id INT NOT NULL,
+            g_id INT NULL,
+            run_mode VARCHAR(24) NOT NULL DEFAULT 'test',
+            context_json LONGTEXT NULL,
+            output_json LONGTEXT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            INDEX idx_pm_agent_runs_agent (agent_id),
+            INDEX idx_pm_agent_runs_manager (manager_user_id),
+            INDEX idx_pm_agent_runs_gid (g_id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS pm_agent_messages (
+            id BIGINT AUTO_INCREMENT PRIMARY KEY,
+            session_id VARCHAR(64) NOT NULL,
+            agent_id INT NOT NULL,
+            manager_user_id INT NOT NULL,
+            g_id INT NULL,
+            role VARCHAR(16) NOT NULL,
+            message_text LONGTEXT NULL,
+            context_json LONGTEXT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            INDEX idx_pm_agent_msg_session (session_id),
+            INDEX idx_pm_agent_msg_agent (agent_id),
+            INDEX idx_pm_agent_msg_gid (g_id),
+            INDEX idx_pm_agent_msg_mgr (manager_user_id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS pm_agent_project_memory (
+            id BIGINT AUTO_INCREMENT PRIMARY KEY,
+            agent_id INT NOT NULL,
+            manager_user_id INT NOT NULL,
+            g_id INT NOT NULL,
+            memory_text TEXT NOT NULL,
+            source VARCHAR(24) NOT NULL DEFAULT 'user',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            INDEX idx_pm_agent_mem_agent (agent_id),
+            INDEX idx_pm_agent_mem_mgr (manager_user_id),
+            INDEX idx_pm_agent_mem_gid (g_id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """
+    )
+    try:
+        cur.execute("ALTER TABLE pm_agents ADD COLUMN llm_provider VARCHAR(32) NOT NULL DEFAULT 'openai'")
+    except Exception:
+        pass
+    try:
+        cur.execute("ALTER TABLE pm_agents ADD COLUMN llm_model VARCHAR(128) NOT NULL DEFAULT 'gpt-4o-mini'")
+    except Exception:
+        pass
+    try:
+        cur.execute("ALTER TABLE pm_agents ADD COLUMN temperature DECIMAL(4,2) NOT NULL DEFAULT 0.20")
+    except Exception:
+        pass
+
+
+def _pm_agents_access_allowed() -> bool:
+    role_raw = (get_user_role() or '').strip() or (getattr(current_user, 'role', '') or '')
+    role_key = _normalize_role_key(role_raw)
+    role_norm = role_raw.strip().lower().replace('_', ' ')
+    return bool(
+        getattr(current_user, 'is_admin', False)
+        or getattr(current_user, 'is_supervisor', False)
+        or role_key == 'project manager'
+        or 'project manager' in role_norm
+    )
+
+
+def _ensure_default_pm_agent(cur, manager_user_id: int):
+    _ensure_pm_agent_tables(cur)
+    cur.execute(
+        "SELECT id FROM pm_agents WHERE manager_user_id=%s LIMIT 1",
+        (int(manager_user_id),),
+    )
+    row = cur.fetchone() or {}
+    if row.get('id'):
+        return int(row.get('id'))
+    cur.execute(
+        """
+        INSERT INTO pm_agents (manager_user_id, name, instructions, trigger_mode, scope_type, llm_provider, llm_model, temperature, is_active)
+        VALUES (%s, %s, %s, 'manual', 'project', 'openai', 'gpt-4o-mini', 0.20, 1)
+        """,
+        (
+            int(manager_user_id),
+            'Risk & Delay Agent',
+            'Monitor checklist execution, highlight overdue risks, and propose immediate next actions.',
+        ),
+    )
+    agent_id = int(cur.lastrowid or 0)
+    for key in ('checklist', 'approvals', 'activity', 'documents'):
+        cur.execute(
+            """
+            INSERT INTO pm_agent_knowledge (agent_id, source_key, is_enabled)
+            VALUES (%s, %s, 1)
+            ON DUPLICATE KEY UPDATE is_enabled=VALUES(is_enabled), updated_at=CURRENT_TIMESTAMP
+            """,
+            (agent_id, key),
+        )
+    return agent_id
+
+
+def _to_date_safe(value):
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    try:
+        txt = str(value).strip()[:10]
+        return datetime.strptime(txt, "%Y-%m-%d").date()
+    except Exception:
+        return None
+
+
+def _build_pm_agent_project_context(manager_user_id: int, g_id: int):
+    rows = _load_assigned_projects_for_manager(int(manager_user_id)) or []
+    project = None
+    for r in rows:
+        try:
+            if int(r.get('g_id') or 0) == int(g_id):
+                project = r
+                break
+        except Exception:
+            continue
+    if not project:
+        return None
+    checklist = project.get('checklist') or []
+    today = datetime.utcnow().date()
+    task_rows = []
+    for t in checklist:
+        due = _to_date_safe(t.get('due_date') or t.get('assign_due_date'))
+        status = normalize_task_status(t.get('status') or t.get('state') or t.get('progress') or '')
+        progress = 0
+        try:
+            progress = int(t.get('progress_pct') or 0)
+        except Exception:
+            progress = 0
+        task_rows.append({
+            'task_code': t.get('task_code') or '',
+            'task_name': t.get('task_name') or t.get('name') or 'Task',
+            'department': (t.get('department') or t.get('department_key') or '').strip().lower(),
+            'status': status or 'pending',
+            'progress_pct': max(0, min(100, progress)),
+            'due_date': due.isoformat() if due else None,
+            'is_overdue': bool(due and due < today and status != 'completed'),
+            'is_due_7d': bool(due and today <= due <= (today + timedelta(days=7)) and status != 'completed'),
+            'assignee': (
+                t.get('assigned_employee_name')
+                or t.get('assignee')
+                or t.get('employee_email')
+                or ''
+            ),
+        })
+    return {
+        'g_id': int(project.get('g_id') or 0),
+        'project_code': project.get('ik_project_code') or '',
+        'project_name': project.get('name') or project.get('b_name') or f"Project #{g_id}",
+        'company': project.get('company') or '',
+        'task_count': len(task_rows),
+        'tasks': task_rows,
+    }
+
+
+def _run_risk_delay_agent(context: dict):
+    tasks = context.get('tasks') or []
+    overdue = [t for t in tasks if t.get('is_overdue')]
+    due_7d = [t for t in tasks if t.get('is_due_7d')]
+    pending = [t for t in tasks if t.get('status') == 'pending']
+    in_progress = [t for t in tasks if t.get('status') in ('in_progress', 'submitted', 'started')]
+    completed = [t for t in tasks if t.get('status') == 'completed']
+
+    risk_level = 'Low'
+    if len(overdue) >= 3 or (len(overdue) >= 1 and len(due_7d) >= 3):
+        risk_level = 'High'
+    elif len(overdue) >= 1 or len(due_7d) >= 2:
+        risk_level = 'Medium'
+
+    actions = []
+    if overdue:
+        actions.append(f"Escalate {len(overdue)} overdue task(s) and assign concrete owners today.")
+    if due_7d:
+        actions.append(f"Review {len(due_7d)} task(s) due within 7 days in a daily stand-up.")
+    if pending:
+        actions.append(f"Convert {min(3, len(pending))} high-impact pending task(s) to in-progress this week.")
+    if not actions:
+        actions.append("No critical delays detected. Maintain current cadence and monitor weekly.")
+
+    dept_summary = {}
+    for t in tasks:
+        dept = t.get('department') or 'unmapped'
+        d = dept_summary.setdefault(dept, {'total': 0, 'completed': 0, 'overdue': 0})
+        d['total'] += 1
+        if t.get('status') == 'completed':
+            d['completed'] += 1
+        if t.get('is_overdue'):
+            d['overdue'] += 1
+
+    return {
+        'agent': 'Risk & Delay Agent',
+        'generated_at': datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC'),
+        'project': {
+            'g_id': context.get('g_id'),
+            'project_code': context.get('project_code'),
+            'project_name': context.get('project_name'),
+            'company': context.get('company'),
+        },
+        'metrics': {
+            'total_tasks': len(tasks),
+            'completed': len(completed),
+            'in_progress': len(in_progress),
+            'pending': len(pending),
+            'overdue': len(overdue),
+            'due_next_7_days': len(due_7d),
+            'completion_pct': round((len(completed) * 100.0 / len(tasks)), 1) if tasks else 0.0,
+            'risk_level': risk_level,
+        },
+        'department_summary': dept_summary,
+        'priority_actions': actions,
+        'overdue_tasks': overdue[:10],
+    }
+
+
+def _pm_agent_fetch_knowledge_keys(cur, agent_id: int) -> list[str]:
+    try:
+        cur.execute(
+            """
+            SELECT source_key
+            FROM pm_agent_knowledge
+            WHERE agent_id=%s AND is_enabled=1
+            ORDER BY id ASC
+            """,
+            (int(agent_id),),
+        )
+        return [str((r or {}).get('source_key') or '').strip().lower() for r in (cur.fetchall() or []) if (r or {}).get('source_key')]
+    except Exception:
+        return []
+
+
+def _build_pm_agent_knowledge_context(cur, manager_user_id: int, g_id: int, knowledge_keys: list[str] | None):
+    keys = set([str(k or '').strip().lower() for k in (knowledge_keys or [])])
+    context = _build_pm_agent_project_context(int(manager_user_id), int(g_id)) or {}
+    task_rows = context.get('tasks') or []
+    project = {
+        'g_id': context.get('g_id'),
+        'project_code': context.get('project_code') or '',
+        'project_name': context.get('project_name') or '',
+        'company': context.get('company') or '',
+    }
+    task_ids = []
+    try:
+        cur.execute(
+            """
+            SELECT id
+            FROM won_project_checklists
+            WHERE g_id=%s
+            ORDER BY id ASC
+            """,
+            (int(g_id),),
+        )
+        task_ids = [int((r or {}).get('id') or 0) for r in (cur.fetchall() or []) if int((r or {}).get('id') or 0) > 0]
+    except Exception:
+        task_ids = []
+
+    approvals = []
+    activities = []
+    documents = []
+    if task_ids:
+        placeholders = ",".join(["%s"] * len(task_ids))
+        params = tuple(task_ids)
+        if 'approvals' in keys:
+            try:
+                cur.execute(
+                    f"""
+                    SELECT tc.task_id, tc.comment, tc.approval_target, tc.created_at,
+                           da.status AS approval_status, da.decision_note, da.updated_at
+                    FROM task_comments tc
+                    LEFT JOIN document_approvals da
+                      ON da.source_table='task_comments' AND da.source_id=tc.id
+                    WHERE tc.task_id IN ({placeholders}) AND COALESCE(tc.needs_approval,0)=1
+                    ORDER BY tc.created_at DESC
+                    LIMIT 40
+                    """,
+                    params,
+                )
+                approvals.extend(cur.fetchall() or [])
+            except Exception:
+                pass
+            try:
+                cur.execute(
+                    f"""
+                    SELECT twf.task_id, twf.original_filename, twf.description, twf.uploaded_at,
+                           da.status AS approval_status, da.decision_note, da.updated_at
+                    FROM task_work_files twf
+                    LEFT JOIN document_approvals da
+                      ON da.source_table='task_work_files' AND da.source_id=twf.id
+                    WHERE twf.task_id IN ({placeholders})
+                    ORDER BY twf.uploaded_at DESC
+                    LIMIT 40
+                    """,
+                    params,
+                )
+                approvals.extend(cur.fetchall() or [])
+            except Exception:
+                pass
+        if 'activity' in keys:
+            try:
+                cur.execute(
+                    f"""
+                    SELECT task_id, comment, created_at
+                    FROM task_comments
+                    WHERE task_id IN ({placeholders})
+                    ORDER BY created_at DESC
+                    LIMIT 60
+                    """,
+                    params,
+                )
+                activities = cur.fetchall() or []
+            except Exception:
+                activities = []
+        if 'documents' in keys:
+            try:
+                cur.execute(
+                    f"""
+                    SELECT task_id, original_filename, description, uploaded_at, file_path
+                    FROM task_work_files
+                    WHERE task_id IN ({placeholders})
+                    ORDER BY uploaded_at DESC
+                    LIMIT 60
+                    """,
+                    params,
+                )
+                documents.extend(cur.fetchall() or [])
+            except Exception:
+                pass
+            try:
+                cur.execute(
+                    f"""
+                    SELECT task_id, original_filename, description, uploaded_at, file_path
+                    FROM task_manager_attachments
+                    WHERE task_id IN ({placeholders})
+                    ORDER BY uploaded_at DESC
+                    LIMIT 60
+                    """,
+                    params,
+                )
+                documents.extend(cur.fetchall() or [])
+            except Exception:
+                pass
+
+    # Keep prompt compact.
+    checklist_compact = []
+    if 'checklist' in keys:
+        for t in (task_rows or [])[:80]:
+            checklist_compact.append({
+                'task_code': t.get('task_code'),
+                'task_name': t.get('task_name'),
+                'department': t.get('department'),
+                'status': t.get('status'),
+                'progress_pct': t.get('progress_pct'),
+                'due_date': t.get('due_date'),
+                'assignee': t.get('assignee'),
+            })
+
+    def _status_bucket(raw):
+        s = str(raw or '').strip().lower()
+        if s in ('completed', 'approved', 'done'):
+            return 'completed'
+        if s in ('in_progress', 'started', 'submitted'):
+            return 'in_progress'
+        if s in ('overdue',):
+            return 'overdue'
+        return 'pending'
+
+    summary = {
+        'checklist_total': len(checklist_compact),
+        'completed': 0,
+        'in_progress': 0,
+        'pending': 0,
+        'overdue': 0,
+        'approvals_total': len(approvals[:80] if 'approvals' in keys else []),
+        'activities_total': len(activities[:80] if 'activity' in keys else []),
+        'documents_total': len(documents[:80] if 'documents' in keys else []),
+    }
+    dept_summary = {}
+    for t in checklist_compact:
+        bucket = _status_bucket(t.get('status'))
+        summary[bucket] = int(summary.get(bucket) or 0) + 1
+        dept = str(t.get('department') or '-').strip() or '-'
+        d = dept_summary.setdefault(dept, {'total': 0, 'completed': 0, 'in_progress': 0, 'pending': 0, 'overdue': 0})
+        d['total'] += 1
+        d[bucket] += 1
+
+    document_text_snippets = _pm_agent_extract_document_snippets(documents[:80] if 'documents' in keys else [])
+
+    return {
+        'project': project,
+        'checklist': checklist_compact,
+        'approvals': approvals[:80] if 'approvals' in keys else [],
+        'activities': activities[:80] if 'activity' in keys else [],
+        'documents': documents[:80] if 'documents' in keys else [],
+        'document_text_snippets': document_text_snippets,
+        'summary': summary,
+        'dept_summary': dept_summary,
+    }
+
+
+def _pm_agent_context_to_text(knowledge: dict) -> str:
+    p = knowledge.get('project') or {}
+    s = knowledge.get('summary') or {}
+    lines = [
+        f"Project: {p.get('project_name') or '-'} ({p.get('project_code') or '-'})",
+        f"Company: {p.get('company') or '-'}",
+        (
+            "Metrics: "
+            f"tasks={int(s.get('checklist_total') or 0)}, "
+            f"completed={int(s.get('completed') or 0)}, "
+            f"in_progress={int(s.get('in_progress') or 0)}, "
+            f"pending={int(s.get('pending') or 0)}, "
+            f"overdue={int(s.get('overdue') or 0)}, "
+            f"approvals={int(s.get('approvals_total') or 0)}, "
+            f"documents={int(s.get('documents_total') or 0)}, "
+            f"activities={int(s.get('activities_total') or 0)}"
+        ),
+        "",
+    ]
+    dept_summary = knowledge.get('dept_summary') or {}
+    if dept_summary:
+        lines.append("Department summary:")
+        for dept, ds in list(dept_summary.items())[:12]:
+            lines.append(
+                f"- {dept}: total={int(ds.get('total') or 0)}, completed={int(ds.get('completed') or 0)}, in_progress={int(ds.get('in_progress') or 0)}, pending={int(ds.get('pending') or 0)}, overdue={int(ds.get('overdue') or 0)}"
+            )
+        lines.append("")
+    checklist = knowledge.get('checklist') or []
+    if checklist:
+        lines.append("Checklist:")
+        for t in checklist[:40]:
+            lines.append(
+                f"- [{t.get('status')}] {t.get('task_code') or ''} {t.get('task_name') or ''} | dept={t.get('department') or '-'} | due={t.get('due_date') or '-'} | progress={t.get('progress_pct') or 0}% | assignee={t.get('assignee') or '-'}"
+            )
+        lines.append("")
+    approvals = knowledge.get('approvals') or []
+    if approvals:
+        lines.append("Approval signals:")
+        for a in approvals[:30]:
+            lines.append(
+                f"- status={a.get('approval_status') or 'pending'} | note={str(a.get('decision_note') or a.get('comment') or a.get('description') or '')[:140]}"
+            )
+        lines.append("")
+    docs = knowledge.get('documents') or []
+    if docs:
+        lines.append("Documents:")
+        for d in docs[:30]:
+            lines.append(f"- {d.get('original_filename') or '-'} | {str(d.get('description') or '')[:80]}")
+        lines.append("")
+    doc_snips = knowledge.get('document_text_snippets') or []
+    if doc_snips:
+        lines.append("Document text snippets:")
+        for sn in doc_snips[:8]:
+            lines.append(f"- {sn.get('filename') or '-'}: {str(sn.get('text') or '')[:500]}")
+        lines.append("")
+    acts = knowledge.get('activities') or []
+    if acts:
+        lines.append("Recent activity:")
+        for a in acts[:30]:
+            lines.append(f"- {str(a.get('comment') or '')[:140]}")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def _pm_agent_extract_document_snippets(documents: list[dict], max_docs: int = 4) -> list[dict]:
+    snippets = []
+    seen = set()
+    for d in (documents or []):
+        if len(snippets) >= max_docs:
+            break
+        fp = str((d or {}).get('file_path') or '').strip()
+        fn = str((d or {}).get('original_filename') or '').strip() or os.path.basename(fp)
+        if not fp or not os.path.isfile(fp):
+            continue
+        key = (fp.lower(), fn.lower())
+        if key in seen:
+            continue
+        seen.add(key)
+        text = ''
+        try:
+            ext = os.path.splitext(fp)[1].lower()
+            if ext == '.pdf':
+                pages, _ = _extract_pdf_pages(fp, start_page=1, limit=2)
+                text = "\n".join([(p or {}).get('text') or '' for p in (pages or [])]).strip()
+            elif ext in ('.txt', '.md', '.csv', '.log'):
+                with open(fp, 'r', encoding='utf-8', errors='ignore') as fh:
+                    text = fh.read(4000)
+        except Exception:
+            text = ''
+        text = re.sub(r'\s+', ' ', str(text or '')).strip()
+        if not text:
+            continue
+        snippets.append({'filename': fn, 'text': text[:1200]})
+    return snippets
+
+
+def _pm_agent_save_project_memory(cur, agent_id: int, manager_user_id: int, g_id: int, memory_text: str, source: str = 'user'):
+    txt = str(memory_text or '').strip()
+    if not txt:
+        return
+    if len(txt) > 1200:
+        txt = txt[:1200]
+    cur.execute(
+        """
+        INSERT INTO pm_agent_project_memory (agent_id, manager_user_id, g_id, memory_text, source)
+        VALUES (%s, %s, %s, %s, %s)
+        """,
+        (int(agent_id), int(manager_user_id), int(g_id), txt, str(source or 'user')[:24]),
+    )
+
+
+def _pm_agent_project_memory_text(cur, agent_id: int, manager_user_id: int, g_id: int) -> str:
+    try:
+        cur.execute(
+            """
+            SELECT memory_text, source, created_at
+            FROM pm_agent_project_memory
+            WHERE agent_id=%s AND manager_user_id=%s AND g_id=%s
+            ORDER BY id DESC
+            LIMIT 40
+            """,
+            (int(agent_id), int(manager_user_id), int(g_id)),
+        )
+        rows = list(reversed(cur.fetchall() or []))
+        if not rows:
+            return ""
+        lines = ["Persistent project memory (learned from prior chats/corrections):"]
+        for r in rows:
+            txt = str((r or {}).get('memory_text') or '').strip()
+            if not txt:
+                continue
+            src = str((r or {}).get('source') or 'user').strip().lower()
+            if len(txt) > 220:
+                txt = txt[:220] + "..."
+            lines.append(f"- ({src}) {txt}")
+        return "\n".join(lines[:36])
+    except Exception:
+        return ""
+
+
+def _pm_agent_long_term_memory_text(cur, agent_id: int, manager_user_id: int, g_id: int, exclude_session_id: str | None = None) -> str:
+    try:
+        params = [int(agent_id), int(manager_user_id), int(g_id)]
+        session_clause = ""
+        if exclude_session_id:
+            session_clause = " AND session_id <> %s "
+            params.append(str(exclude_session_id))
+        cur.execute(
+            f"""
+            SELECT role, message_text, created_at
+            FROM pm_agent_messages
+            WHERE agent_id=%s
+              AND manager_user_id=%s
+              AND g_id=%s
+              {session_clause}
+            ORDER BY id DESC
+            LIMIT 40
+            """,
+            tuple(params),
+        )
+        rows = list(reversed(cur.fetchall() or []))
+        if not rows:
+            return ""
+        lines = ["Long-term memory from previous chats (same project):"]
+        for r in rows:
+            role = str((r or {}).get('role') or '').strip().lower()
+            if role not in ('user', 'assistant'):
+                continue
+            txt = str((r or {}).get('message_text') or '').strip()
+            if not txt:
+                continue
+            txt = txt.replace("\n", " ")
+            if len(txt) > 220:
+                txt = txt[:220] + "..."
+            lines.append(f"- {role}: {txt}")
+        return "\n".join(lines[:26])
+    except Exception:
+        return ""
+
+
+def _pm_agent_chat_fallback_reply(agent_name: str, user_message: str, knowledge_context: dict) -> str:
+    # Deterministic fallback if no LLM provider is available.
+    risk = _run_risk_delay_agent({
+        'g_id': (knowledge_context.get('project') or {}).get('g_id'),
+        'project_code': (knowledge_context.get('project') or {}).get('project_code'),
+        'project_name': (knowledge_context.get('project') or {}).get('project_name'),
+        'company': (knowledge_context.get('project') or {}).get('company'),
+        'tasks': knowledge_context.get('checklist') or [],
+    })
+    metrics = risk.get('metrics') or {}
+    actions = risk.get('priority_actions') or []
+    checklist = knowledge_context.get('checklist') or []
+    overdue_tasks = [
+        t for t in checklist
+        if str(t.get('status') or '').strip().lower() in ('overdue',)
+    ]
+    pending_tasks = [
+        t for t in checklist
+        if str(t.get('status') or '').strip().lower() in ('pending', 'not_started')
+    ]
+    in_progress_tasks = [
+        t for t in checklist
+        if str(t.get('status') or '').strip().lower() in ('in_progress', 'started', 'submitted')
+    ]
+    completed_tasks = [
+        t for t in checklist
+        if str(t.get('status') or '').strip().lower() in ('completed', 'approved')
+    ]
+    msg = str(user_message or '').strip().lower()
+
+    # Direct intent responses for common PM questions.
+    if ('how many' in msg or 'count' in msg or 'number' in msg) and (
+        'delay' in msg or 'delayed' in msg or 'overdue' in msg
+    ):
+        delayed_projects = 1 if (int(metrics.get('overdue', 0) or 0) > 0 or len(overdue_tasks) > 0) else 0
+        delayed_tasks = int(metrics.get('overdue', 0) or len(overdue_tasks) or 0)
+        return (
+            f"Delayed projects in current scope: {delayed_projects}\n"
+            f"Overdue tasks: {delayed_tasks}"
+        )
+    wants_list = any(k in msg for k in ['name', 'list', 'show', 'which', 'details'])
+    wants_due = any(k in msg for k in ['due', 'date', 'deadline'])
+    wants_assignee = any(k in msg for k in ['assignee', 'owner', 'who'])
+
+    def _task_lines(rows, limit=20):
+        out = []
+        for t in rows[:limit]:
+            part = f"- {t.get('task_code') or ''} {t.get('task_name') or ''}".strip()
+            if wants_due:
+                part += f" | due: {t.get('due_date') or '-'}"
+            if wants_assignee:
+                part += f" | assignee: {t.get('assignee') or '-'}"
+            part += f" | status: {t.get('status') or '-'}"
+            out.append(part)
+        return out
+
+    if ('how many' in msg or 'count' in msg or 'number' in msg) and ('pending' in msg):
+        total = int(metrics.get('pending', len(pending_tasks)) or 0)
+        if wants_list or wants_due or wants_assignee:
+            rows = _task_lines(pending_tasks, limit=25)
+            if rows:
+                return f"Pending tasks in current scope: {total}\n" + "\n".join(rows)
+        return f"Pending tasks in current scope: {total}"
+    if ('how many' in msg or 'count' in msg or 'number' in msg) and ('complete' in msg or 'completed' in msg):
+        return f"Completed tasks in current scope: {int(metrics.get('completed', len(completed_tasks)) or 0)}"
+    if ('how many' in msg or 'count' in msg or 'number' in msg) and (
+        'progress' in msg or 'in progress' in msg or 'started' in msg
+    ):
+        return f"In-progress tasks in current scope: {int(metrics.get('in_progress', len(in_progress_tasks)) or 0)}"
+    if 'overdue' in msg or 'delayed' in msg:
+        if not overdue_tasks:
+            return "No overdue tasks right now."
+        rows = _task_lines(overdue_tasks, limit=20)
+        return "Overdue tasks:\n" + "\n".join(rows)
+    if 'next action' in msg or 'what should' in msg or 'what to do' in msg or 'recommend' in msg:
+        if actions:
+            return "\n".join([f"- {a}" for a in actions[:5]])
+        return "No urgent action required. Continue closing pending tasks by due date."
+    if 'summary' in msg or 'status' in msg or 'health' in msg:
+        return (
+            f"Project summary: completed={int(metrics.get('completed', len(completed_tasks)) or 0)}, "
+            f"in_progress={int(metrics.get('in_progress', len(in_progress_tasks)) or 0)}, "
+            f"pending={int(metrics.get('pending', len(pending_tasks)) or 0)}, "
+            f"overdue={int(metrics.get('overdue', len(overdue_tasks)) or 0)}, "
+            f"risk={metrics.get('risk_level', 'Low')}."
+        )
+
+    # Generic concise fallback.
+    generic = (
+        f"Current status: completed={int(metrics.get('completed', len(completed_tasks)) or 0)}, "
+        f"in_progress={int(metrics.get('in_progress', len(in_progress_tasks)) or 0)}, "
+        f"pending={int(metrics.get('pending', len(pending_tasks)) or 0)}, "
+        f"overdue={int(metrics.get('overdue', len(overdue_tasks)) or 0)}.\n"
+        "Ask for exact counts like: overdue, pending, completed, or next actions."
+    )
+    if wants_list:
+        rows = _task_lines(checklist, limit=20)
+        if rows:
+            return generic + "\n\nTop tasks:\n" + "\n".join(rows)
+    return generic
+
+
+def _pm_agent_call_ollama(messages: list[dict], model: str, temperature: float):
+    base = (os.getenv('OLLAMA_BASE_URL') or 'http://127.0.0.1:11434').rstrip('/')
+    payload = {
+        'model': (model or 'llama3.1:8b'),
+        'messages': messages,
+        'stream': False,
+        'options': {'temperature': float(max(0.0, min(1.0, temperature)))},
+    }
+    r = requests.post(f"{base}/api/chat", json=payload, timeout=120)
+    r.raise_for_status()
+    data = r.json() or {}
+    msg = ((data.get('message') or {}).get('content') or '').strip()
+    return msg
+
+
+def _pm_agent_call_openai(messages: list[dict], model: str, temperature: float):
+    api_key = (
+        os.getenv('OPENAI_API_KEY')
+        or os.getenv('GROQ_API_KEY')
+        or os.getenv('OPENROUTER_API_KEY')
+        or ''
+    )
+    if not api_key:
+        raise RuntimeError("No API key set (OPENAI_API_KEY/GROQ_API_KEY/OPENROUTER_API_KEY)")
+    base_url = (
+        app.config.get('OPENAI_BASE_URL')
+        or os.getenv('OPENAI_BASE_URL')
+        or 'https://api.openai.com/v1'
+    ).rstrip('/')
+    # Guard against common misconfiguration where a console/dashboard URL is pasted
+    # instead of an API base URL.
+    base_url_l = str(base_url).lower()
+    if 'console.groq.com' in base_url_l:
+        base_url = 'https://api.groq.com/openai/v1'
+    elif 'platform.openai.com' in base_url_l:
+        base_url = 'https://api.openai.com/v1'
+    model_clean = (model or '').strip()
+    base_url_l = str(base_url).lower()
+    if not model_clean or model_clean == 'llama3.1:8b':
+        model_clean = (
+            app.config.get('OPENAI_MODEL')
+            or os.getenv('OPENAI_MODEL')
+            or os.getenv('GROQ_MODEL')
+            or 'gpt-4o-mini'
+        )
+    # Provider/model compatibility guard.
+    if 'api.groq.com' in base_url_l and model_clean.lower().startswith('gpt-'):
+        model_clean = (
+            os.getenv('GROQ_MODEL')
+            or app.config.get('GROQ_MODEL')
+            or os.getenv('OPENAI_MODEL')
+            or 'llama-3.1-8b-instant'
+        )
+    payload = {
+        'model': model_clean,
+        'messages': messages,
+        'temperature': float(max(0.0, min(1.0, temperature))),
+    }
+    headers = {
+        'Authorization': f'Bearer {api_key}',
+        'Content-Type': 'application/json',
+    }
+    endpoint = f"{base_url}/chat/completions"
+    r = requests.post(endpoint, headers=headers, json=payload, timeout=120)
+    if r.status_code >= 400:
+        detail = ''
+        try:
+            err = r.json() or {}
+            eobj = err.get('error') if isinstance(err, dict) else None
+            if isinstance(eobj, dict):
+                detail = str(eobj.get('message') or eobj.get('code') or '')
+            elif isinstance(err, dict):
+                detail = str(err.get('message') or '')
+        except Exception:
+            detail = (r.text or '')[:300]
+        raise RuntimeError(f"HTTP {r.status_code} at {endpoint} | model={model_clean} | {detail}".strip())
+    data = r.json() or {}
+    choices = data.get('choices') or []
+    if not choices:
+        return ''
+    return str(((choices[0] or {}).get('message') or {}).get('content') or '').strip()
+
+def _ensure_won_project_checklists_table(cur):
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS won_project_checklists (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            source_task_id INT NULL,
+            g_id INT NOT NULL,
+            department_key VARCHAR(64) NOT NULL,
+            task_code VARCHAR(64),
+            task_name VARCHAR(255) NOT NULL,
+            description TEXT,
+            status VARCHAR(64) DEFAULT 'pending',
+            priority VARCHAR(32) DEFAULT 'normal',
+            due_date DATE NULL,
+            progress_pct INT DEFAULT 0,
+            assigned_to INT NULL,
+            attachment_path VARCHAR(512) NULL,
+            created_at DATETIME NULL,
+            updated_at DATETIME NULL,
+            UNIQUE KEY uniq_source_task_id (source_task_id),
+            INDEX idx_wpc_g_id (g_id),
+            INDEX idx_wpc_dept (department_key),
+            INDEX idx_wpc_g_dept (g_id, department_key)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """
+    )
+    try:
+        cur.execute("ALTER TABLE won_project_checklists MODIFY COLUMN source_task_id INT NULL")
+    except Exception:
+        pass
+    mysql.connection.commit()
+
+
+def _slugify_text(value: str | None) -> str:
+    txt = (value or "").strip().lower()
+    txt = re.sub(r"[^a-z0-9]+", "-", txt)
+    txt = re.sub(r"-{2,}", "-", txt).strip("-")
+    return txt
+
+
+def _ensure_product_library_tables(cur):
+    if 'product_library_tables' in _SCHEMA_ENSURE_DONE:
+        return
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS product_library_categories (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            parent_id INT NULL,
+            name VARCHAR(255) NOT NULL,
+            slug VARCHAR(255) NOT NULL,
+            sort_order INT NOT NULL DEFAULT 0,
+            is_active TINYINT(1) NOT NULL DEFAULT 1,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            UNIQUE KEY uniq_product_category_slug (slug),
+            INDEX idx_product_category_parent (parent_id),
+            INDEX idx_product_category_active (is_active)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS product_library_products (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            sku VARCHAR(128) NOT NULL,
+            name VARCHAR(255) NOT NULL,
+            category_id INT NULL,
+            subcategory_id INT NULL,
+            brand VARCHAR(128) NULL,
+            model VARCHAR(128) NULL,
+            status VARCHAR(32) NOT NULL DEFAULT 'active',
+            default_currency VARCHAR(8) NOT NULL DEFAULT 'INR',
+            description TEXT NULL,
+            tags TEXT NULL,
+            specs_json LONGTEXT NULL,
+            created_by INT NULL,
+            is_active TINYINT(1) NOT NULL DEFAULT 1,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            UNIQUE KEY uniq_product_sku (sku),
+            INDEX idx_product_category (category_id),
+            INDEX idx_product_subcategory (subcategory_id),
+            INDEX idx_product_status (status),
+            INDEX idx_product_active (is_active)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS product_library_price_variants (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            product_id INT NOT NULL,
+            variant_name VARCHAR(255) NOT NULL,
+            fixture_spec VARCHAR(255) NULL,
+            currency VARCHAR(8) NOT NULL DEFAULT 'INR',
+            unit_cost DECIMAL(18,2) NULL,
+            selling_price DECIMAL(18,2) NULL,
+            min_qty INT NULL,
+            max_qty INT NULL,
+            effective_from DATE NULL,
+            effective_to DATE NULL,
+            is_active TINYINT(1) NOT NULL DEFAULT 1,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            INDEX idx_plv_product (product_id),
+            INDEX idx_plv_currency (currency),
+            INDEX idx_plv_active (is_active)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS product_library_documents (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            product_id INT NOT NULL,
+            document_name VARCHAR(255) NOT NULL,
+            file_path VARCHAR(512) NOT NULL,
+            mime_type VARCHAR(128) NULL,
+            file_size BIGINT NULL,
+            uploaded_by INT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            INDEX idx_pld_product (product_id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """
+    )
+    mysql.connection.commit()
+    _SCHEMA_ENSURE_DONE.add('product_library_tables')
+
+
+def _seed_product_library_categories(cur):
+    _ensure_product_library_tables(cur)
+    seed_tree = {
+        "Electronics": [
+            "Refrigerator Lamps",
+            "Living Lights",
+        ],
+        "Lighting": [
+            "Battens",
+            "Downlights",
+            "Spotlights",
+            "Street Lights",
+            "Tunnel Lights",
+            "Area Lights",
+        ],
+        "Renewable Energy": [
+            "Solar PV Modules",
+            "Solar Street Lights",
+        ],
+        "Railways": [
+            "Railway HPL Lights",
+            "Coach Lighting",
+        ],
+        "Infrastructure": [
+            "Urban Lighting",
+            "Industrial Lighting",
+        ],
+    }
+    for idx, (parent_name, children) in enumerate(seed_tree.items(), start=1):
+        p_slug = _slugify_text(parent_name)
+        cur.execute(
+            """
+            INSERT INTO product_library_categories (parent_id, name, slug, sort_order, is_active)
+            VALUES (NULL, %s, %s, %s, 1)
+            ON DUPLICATE KEY UPDATE
+                name=VALUES(name),
+                sort_order=VALUES(sort_order),
+                is_active=1
+            """,
+            (parent_name, p_slug, idx * 10),
+        )
+        cur.execute("SELECT id FROM product_library_categories WHERE slug=%s LIMIT 1", (p_slug,))
+        parent_row = cur.fetchone() or {}
+        parent_id = int(parent_row.get('id') or 0)
+        if parent_id <= 0:
+            continue
+        for c_idx, child_name in enumerate(children, start=1):
+            c_slug = _slugify_text(f"{parent_name}-{child_name}")
+            cur.execute(
+                """
+                INSERT INTO product_library_categories (parent_id, name, slug, sort_order, is_active)
+                VALUES (%s, %s, %s, %s, 1)
+                ON DUPLICATE KEY UPDATE
+                    parent_id=VALUES(parent_id),
+                    name=VALUES(name),
+                    sort_order=VALUES(sort_order),
+                    is_active=1
+                """,
+                (parent_id, child_name, c_slug, c_idx * 10),
+            )
+    mysql.connection.commit()
+
+
+def _seed_ikio_application_products(cur):
+    _ensure_product_library_tables(cur)
+    _seed_product_library_categories(cur)
+    seed_products = [
+        {
+            'sku': 'IKIO-LOCUS-001',
+            'name': 'Locus',
+            'brand': 'IKIO',
+            'model': 'Area Luminaire',
+            'description': 'Area luminaire suitable for transport hubs and open commercial zones.',
+            'tags': 'airports,train,bus stations,commercial stores,gas stations,application-area',
+            'status': 'active',
+        },
+        {
+            'sku': 'IKIO-SUPERIA-001',
+            'name': 'Superia',
+            'brand': 'IKIO',
+            'model': 'Linear High Bay',
+            'description': 'Linear high bay fixture for large indoor spaces and industrial applications.',
+            'tags': 'indoor stadiums & gyms,commercial stores,warehouses,application-area',
+            'status': 'active',
+        },
+        {
+            'sku': 'IKIO-AMPLIN-001',
+            'name': 'Amplin',
+            'brand': 'IKIO',
+            'model': 'Linear High Bay',
+            'description': 'Slim linear high bay luminaire for performance and uniform light spread.',
+            'tags': 'indoor stadiums & gyms,commercial stores,application-area',
+            'status': 'active',
+        },
+        {
+            'sku': 'IKIO-RODELLA-001',
+            'name': 'Rodella',
+            'brand': 'IKIO',
+            'model': 'UFO High Bay',
+            'description': 'UFO high bay light for high-ceiling indoor facilities.',
+            'tags': 'indoor stadiums & gyms,gas stations,industrial,application-area',
+            'status': 'active',
+        },
+        {
+            'sku': 'IKIO-SPELTA-001',
+            'name': 'Spelta',
+            'brand': 'IKIO',
+            'model': 'Corn Bulb',
+            'description': 'Corn bulb retrofit solution for utility and general lighting.',
+            'tags': 'commercial stores,hospitality,hotels,application-area',
+            'status': 'active',
+        },
+        {
+            'sku': 'IKIO-DELPHI-BL-22',
+            'name': "Delphi Back-Lit Panel Light 2' x 2'",
+            'brand': 'IKIO',
+            'model': 'Back-Lit Panel',
+            'description': 'CCT and power selectable back-lit panel for offices and classrooms.',
+            'tags': 'classrooms,commercial stores,hospitality,application-area',
+            'status': 'active',
+        },
+        {
+            'sku': 'IKIO-COLORIS-24',
+            'name': "Coloris",
+            'brand': 'IKIO',
+            'model': "RGBW Edge-Lit Panel 2' x 4'",
+            'description': 'RGBW edge-lit panel light for dynamic ambience and architectural spaces.',
+            'tags': 'hospitality,hotels,commercial stores,application-area',
+            'status': 'active',
+        },
+        {
+            'sku': 'IKIO-ORILED-WRAP-4',
+            'name': 'Oriled Wraparound Light (4\')',
+            'brand': 'IKIO',
+            'model': 'Wraparound',
+            'description': 'CCT and power selectable wraparound fixture for corridors and utility areas.',
+            'tags': 'classrooms,hotels,hospitality,commercial stores,application-area',
+            'status': 'active',
+        },
+    ]
+    for p in seed_products:
+        cur.execute("SELECT id FROM product_library_products WHERE sku=%s LIMIT 1", (p['sku'],))
+        if (cur.fetchone() or {}).get('id'):
+            continue
+        cur.execute(
+            """
+            INSERT INTO product_library_products (
+                sku, name, category_id, subcategory_id, brand, model, status, default_currency,
+                description, tags, specs_json, created_by, is_active
+            )
+            VALUES (%s, %s, NULL, NULL, %s, %s, %s, 'INR', %s, %s, NULL, NULL, 1)
+            """,
+            (
+                p['sku'],
+                p['name'],
+                p['brand'],
+                p['model'],
+                p['status'],
+                p['description'],
+                p['tags'],
+            ),
+        )
+    mysql.connection.commit()
+
+
+def _infer_project_application_area(project_name: str) -> str:
+    txt = str(project_name or '').strip().lower()
+    if any(k in txt for k in ('airport', 'train', 'bus station', 'metro', 'terminal')):
+        return 'Airports, Train & Bus Stations'
+    if any(k in txt for k in ('classroom', 'school', 'college', 'university', 'campus', 'institute')):
+        return 'Classrooms'
+    if any(k in txt for k in ('store', 'retail', 'mall', 'showroom', 'shop')):
+        return 'Commercial Stores'
+    if any(k in txt for k in ('gas station', 'petrol pump', 'fuel station')):
+        return 'Gas Stations'
+    if any(k in txt for k in ('hotel', 'resort')):
+        return 'Hotels'
+    if any(k in txt for k in ('hospitality', 'banquet', 'restaurant')):
+        return 'Hospitality'
+    if any(k in txt for k in ('stadium', 'gym', 'sports complex', 'arena')):
+        return 'Indoor Stadiums & Gyms'
+    return 'Commercial Stores'
+
+
+def _fetch_project_recommended_products(cur, project_name: str, limit: int = 12):
+    _ensure_product_library_tables(cur)
+    _seed_ikio_application_products(cur)
+    area = _infer_project_application_area(project_name)
+    like = f"%{area.lower()}%"
+    cur.execute(
+        """
+        SELECT
+            p.id, p.sku, p.name, p.brand, p.model, p.description, p.tags,
+            COUNT(DISTINCT d.id) AS document_count,
+            MIN(v.selling_price) AS min_price,
+            MAX(v.selling_price) AS max_price
+        FROM product_library_products p
+        LEFT JOIN product_library_documents d ON d.product_id = p.id
+        LEFT JOIN product_library_price_variants v ON v.product_id = p.id AND v.is_active=1
+        WHERE p.is_active=1
+          AND (
+                LOWER(COALESCE(p.tags, '')) LIKE %s
+                OR LOWER(COALESCE(p.name, '')) LIKE %s
+                OR LOWER(COALESCE(p.model, '')) LIKE %s
+              )
+        GROUP BY p.id
+        ORDER BY p.updated_at DESC, p.id DESC
+        LIMIT %s
+        """,
+        (like, like, like, int(max(1, min(40, limit)))),
+    )
+    return area, (cur.fetchall() or [])
+
+
+def _fetch_product_categories(cur):
+    _ensure_product_library_tables(cur)
+    cur.execute(
+        """
+        SELECT id, parent_id, name, slug, sort_order
+        FROM product_library_categories
+        WHERE is_active=1
+        ORDER BY COALESCE(parent_id, 0), sort_order, name
+        """
+    )
+    rows = cur.fetchall() or []
+    parents = []
+    children_by_parent = {}
+    for r in rows:
+        parent_id = r.get('parent_id')
+        if parent_id is None:
+            parents.append({
+                'id': int(r.get('id')),
+                'name': r.get('name') or '',
+                'slug': r.get('slug') or '',
+            })
+        else:
+            pid = int(parent_id)
+            children_by_parent.setdefault(pid, []).append({
+                'id': int(r.get('id')),
+                'name': r.get('name') or '',
+                'slug': r.get('slug') or '',
+            })
+    for p in parents:
+        p['children'] = children_by_parent.get(int(p['id']), [])
+    return parents
+
+
+def _parse_decimal(value):
+    try:
+        if value is None:
+            return None
+        txt = str(value).strip().replace(",", "")
+        if txt == "":
+            return None
+        return float(txt)
+    except Exception:
+        return None
+
+def _load_accounts_finance_estimate_items(cur, company_sql_clause: str, company_params: tuple | list):
+    """Lightweight loader for accounts/finance dashboard estimate rows."""
+    _ensure_project_estimate_approvals_table(cur)
+    cur.execute(
+        """
+        SELECT
+            gb.g_id,
+            gb.id AS bid_incoming_id,
+            gb.b_name,
+            gb.company,
+            gb.submission_status,
+            bi.scope AS incoming_scope,
+            bi.type AS incoming_type,
+            bi.ik_project_code,
+            ba.person_name AS assignee_name,
+            wlr.result AS wl_result,
+            wlr.status AS wl_status,
+            wbr.closure_status AS project_status,
+            wbr.work_progress_status
+        FROM go_bids gb
+        LEFT JOIN bid_incoming bi ON bi.id = gb.id
+        LEFT JOIN bid_assign ba ON ba.g_id = gb.g_id
+        LEFT JOIN win_lost_results wlr ON wlr.a_id = ba.a_id OR wlr.g_id = gb.g_id
+        LEFT JOIN won_bids_result wbr ON wbr.w_id = wlr.w_id
+        WHERE 1=1
+        """ + company_sql_clause + """
+        ORDER BY gb.created_at DESC, gb.g_id DESC
+        """,
+        company_params,
+    )
+    won_rows = cur.fetchall() or []
+    won_bids_raw = [
+        r for r in won_rows
+        if _is_won_bid_status(
+            r.get('wl_result'),
+            r.get('wl_status'),
+            r.get('submission_status'),
+            r.get('project_status'),
+            r.get('work_progress_status'),
+        )
+    ]
+    # Deduplicate by g_id (joins can produce repeated rows).
+    won_bids = []
+    seen_gids = set()
+    for r in (won_bids_raw or []):
+        try:
+            gid = int(r.get('g_id') or 0)
+        except Exception:
+            gid = 0
+        if not gid or gid in seen_gids:
+            continue
+        seen_gids.add(gid)
+        won_bids.append(r)
+    won_gids = [int(r.get('g_id')) for r in won_bids if r.get('g_id') is not None]
+    estimate_map = {}
+    if won_gids:
+        placeholders = ",".join(["%s"] * len(won_gids))
+        cur.execute(
+            f"""
+            SELECT pea.*,
+                   su.email AS submitted_by_email,
+                   au.email AS approved_by_email
+            FROM project_estimate_approvals pea
+            LEFT JOIN users su ON su.id = pea.submitted_by_user_id
+            LEFT JOIN users au ON au.id = pea.approved_by_user_id
+            WHERE pea.g_id IN ({placeholders})
+            """,
+            tuple(won_gids),
+        )
+        for rr in (cur.fetchall() or []):
+            estimate_map[int(rr.get('g_id'))] = rr
+
+    items = []
+    for b in won_bids:
+        gid = int(b.get('g_id') or 0)
+        if not gid:
+            continue
+        er = estimate_map.get(gid) or {}
+        items.append({
+            'g_id': gid,
+            # Keep this read-only for speed; generation is handled elsewhere.
+            'project_code': (b.get('ik_project_code') or '').strip(),
+            'project_name': b.get('name') or b.get('b_name') or f"Project #{gid}",
+            'company': b.get('company') or '',
+            'portfolio_type': (b.get('incoming_scope') or '').strip(),
+            'project_type': (b.get('incoming_type') or '').strip(),
+            'assignee_name': (b.get('assignee_name') or '').strip(),
+            'estimated_value': er.get('estimated_value'),
+            'expected_total_cost': er.get('expected_total_cost'),
+            'currency': 'USD',
+            'status': (er.get('status') or 'not_submitted'),
+            'won_reason': er.get('won_reason') or '',
+            'submitted_by_email': er.get('submitted_by_email') or '',
+            'submitted_at': er.get('submitted_at'),
+            'approved_by_email': er.get('approved_by_email') or '',
+            'approved_at': er.get('approved_at'),
+            'approval_note': er.get('approval_note') or '',
+        })
+    return items
+
+
+def _load_accounts_finance_portfolio_items(cur, estimate_items: list[dict]):
+    """Build portfolio-style P&L rows for Accounts dashboard."""
+    if not estimate_items:
+        return [], []
+
+    try:
+        _ensure_procurement_tables(cur)
+    except Exception:
+        pass
+
+    def _num(v, default=0.0):
+        try:
+            if v is None:
+                return float(default)
+            s = str(v).replace(',', '').strip()
+            if s == '':
+                return float(default)
+            return float(s)
+        except Exception:
+            return float(default)
+
+    def _safe_int(v, default=0):
+        try:
+            return int(v)
+        except Exception:
+            return int(default)
+
+    def _health_key(variance: float, spent_pct: float) -> str:
+        if variance >= 0 and spent_pct <= 70:
+            return 'healthy'
+        if variance >= 0:
+            return 'watch'
+        if variance > -5000:
+            return 'risk'
+        return 'critical'
+
+    gids = []
+    estimate_by_gid = {}
+    for it in (estimate_items or []):
+        gid = _safe_int(it.get('g_id'), 0)
+        if gid <= 0:
+            continue
+        gids.append(gid)
+        estimate_by_gid[gid] = it
+    if not gids:
+        return [], []
+
+    placeholders = ",".join(["%s"] * len(gids))
+
+    manager_by_gid = {}
+    try:
+        cur.execute(
+            f"""
+            SELECT
+                pma.g_id,
+                COALESCE(e.name, u.full_name, u.email) AS manager_name
+            FROM project_manager_assignments pma
+            LEFT JOIN users u ON u.id = pma.manager_user_id
+            LEFT JOIN employees e ON LOWER(COALESCE(e.email,'')) = LOWER(COALESCE(u.email,''))
+            WHERE pma.g_id IN ({placeholders})
+            ORDER BY pma.id DESC
+            """,
+            tuple(gids),
+        )
+        for rr in (cur.fetchall() or []):
+            gid = _safe_int(rr.get('g_id'), 0)
+            if gid and gid not in manager_by_gid:
+                manager_by_gid[gid] = (rr.get('manager_name') or '').strip()
+    except Exception:
+        manager_by_gid = {}
+
+    boq_total_by_gid = {}
+    try:
+        cur.execute(
+            f"""
+            SELECT g_id, COALESCE(SUM(estimated_cost),0) AS boq_total
+            FROM procurement_boq_items
+            WHERE g_id IN ({placeholders})
+            GROUP BY g_id
+            """,
+            tuple(gids),
+        )
+        for rr in (cur.fetchall() or []):
+            boq_total_by_gid[_safe_int(rr.get('g_id'), 0)] = _num(rr.get('boq_total'))
+    except Exception:
+        boq_total_by_gid = {}
+
+    po_total_by_gid = {}
+    try:
+        cur.execute(
+            f"""
+            SELECT g_id, COALESCE(SUM(total_amount),0) AS po_total
+            FROM procurement_purchase_orders
+            WHERE g_id IN ({placeholders})
+            GROUP BY g_id
+            """,
+            tuple(gids),
+        )
+        for rr in (cur.fetchall() or []):
+            po_total_by_gid[_safe_int(rr.get('g_id'), 0)] = _num(rr.get('po_total'))
+    except Exception:
+        po_total_by_gid = {}
+
+    po_item_rows = []
+    try:
+        cur.execute(
+            f"""
+            SELECT
+                po.g_id,
+                ppi.po_id,
+                ppi.boq_item_id,
+                COALESCE(ppi.quantity_ordered,0) AS quantity_ordered,
+                COALESCE(ppi.unit_price,0) AS unit_price,
+                COALESCE(ppi.line_total,0) AS line_total
+            FROM procurement_po_items ppi
+            JOIN procurement_purchase_orders po ON po.id = ppi.po_id
+            WHERE po.g_id IN ({placeholders})
+            """,
+            tuple(gids),
+        )
+        po_item_rows = cur.fetchall() or []
+    except Exception:
+        po_item_rows = []
+
+    delivery_qty_by_line = {}
+    try:
+        cur.execute(
+            f"""
+            SELECT
+                po.g_id,
+                pd.po_id,
+                pd.boq_item_id,
+                COALESCE(SUM(pd.quantity_received),0) AS delivered_qty
+            FROM procurement_deliveries pd
+            JOIN procurement_purchase_orders po ON po.id = pd.po_id
+            WHERE po.g_id IN ({placeholders})
+            GROUP BY po.g_id, pd.po_id, pd.boq_item_id
+            """,
+            tuple(gids),
+        )
+        for rr in (cur.fetchall() or []):
+            key = (
+                _safe_int(rr.get('g_id'), 0),
+                _safe_int(rr.get('po_id'), 0),
+                _safe_int(rr.get('boq_item_id'), 0),
+            )
+            delivery_qty_by_line[key] = _num(rr.get('delivered_qty'))
+    except Exception:
+        delivery_qty_by_line = {}
+
+    actual_by_gid = {}
+    committed_by_gid = {}
+    po_line_sum_by_gid = {}
+
+    for rr in (po_item_rows or []):
+        gid = _safe_int(rr.get('g_id'), 0)
+        if gid <= 0:
+            continue
+        po_id = _safe_int(rr.get('po_id'), 0)
+        boq_item_id = _safe_int(rr.get('boq_item_id'), 0)
+        qty_ordered = max(_num(rr.get('quantity_ordered')), 0.0)
+        unit_price = max(_num(rr.get('unit_price')), 0.0)
+        line_total = max(_num(rr.get('line_total')), 0.0)
+        delivered_qty = max(delivery_qty_by_line.get((gid, po_id, boq_item_id), 0.0), 0.0)
+
+        effective_qty = qty_ordered
+        if effective_qty <= 0 and unit_price > 0 and line_total > 0:
+            effective_qty = line_total / unit_price
+        if effective_qty <= 0 and line_total > 0:
+            # Cannot derive qty reliably; treat as fully committed unless any delivery exists.
+            delivered_value = line_total if delivered_qty > 0 else 0.0
+            committed_value = max(line_total - delivered_value, 0.0)
+        else:
+            effective_unit = unit_price
+            if effective_unit <= 0 and effective_qty > 0 and line_total > 0:
+                effective_unit = line_total / effective_qty
+            delivered_clamped = min(delivered_qty, effective_qty)
+            delivered_value = delivered_clamped * effective_unit
+            committed_value = max(effective_qty - delivered_clamped, 0.0) * effective_unit
+
+        actual_by_gid[gid] = actual_by_gid.get(gid, 0.0) + delivered_value
+        committed_by_gid[gid] = committed_by_gid.get(gid, 0.0) + committed_value
+        po_line_sum_by_gid[gid] = po_line_sum_by_gid.get(gid, 0.0) + line_total
+
+    for gid, po_total in (po_total_by_gid or {}).items():
+        line_sum = po_line_sum_by_gid.get(gid, 0.0)
+        if po_total > line_sum:
+            committed_by_gid[gid] = committed_by_gid.get(gid, 0.0) + (po_total - line_sum)
+
+    rows = []
+    totals_by_currency = {}
+    for gid in gids:
+        it = estimate_by_gid.get(gid) or {}
+        budget = max(_num(it.get('estimated_value')), 0.0)
+        currency = 'USD'
+        actual_spent = max(actual_by_gid.get(gid, 0.0), 0.0)
+        committed = max(committed_by_gid.get(gid, 0.0), 0.0)
+        boq_forecast = max(boq_total_by_gid.get(gid, 0.0), 0.0)
+        planned_total_cost = max(_num(it.get('expected_total_cost')), 0.0)
+
+        # Forecast precedence:
+        # 1) Won form expected total cost (planned P&L baseline)
+        # 2) BOQ forecast total
+        # 3) current obligations (actual + committed)
+        if planned_total_cost > 0:
+            total_at_completion = planned_total_cost
+        elif boq_forecast > 0:
+            total_at_completion = boq_forecast
+        else:
+            total_at_completion = (actual_spent + committed)
+        # Never allow forecast to be below already incurred/committed obligations.
+        total_at_completion = max(total_at_completion, actual_spent + committed)
+        estimate_to_complete = max(total_at_completion - actual_spent - committed, 0.0)
+        variance = budget - total_at_completion
+        # % Spent should reflect procurement exposure (actual + committed),
+        # otherwise projects with POs but pending deliveries appear as 0.0%.
+        exposure_spent = max(actual_spent + committed, 0.0)
+        spent_pct = (exposure_spent * 100.0 / budget) if budget > 0 else 0.0
+        profit_loss_pct = (variance * 100.0 / budget) if budget > 0 else 0.0
+
+        manager_name = (
+            manager_by_gid.get(gid)
+            or it.get('assignee_name')
+            or '-'
+        )
+        portfolio_label = (it.get('portfolio_type') or '').strip() or (it.get('project_type') or '').strip() or '-'
+        project_type_label = (it.get('project_type') or '').strip() or '-'
+
+        row = {
+            'g_id': gid,
+            'project_name': it.get('project_name') or f'Project #{gid}',
+            'project_code': it.get('project_code') or '',
+            'project_manager': manager_name,
+            'portfolio_type': portfolio_label,
+            'project_type': project_type_label,
+            'cost_health': _health_key(variance, spent_pct),
+            'currency': currency,
+            'budget': budget,
+            'expected_total_cost': planned_total_cost,
+            'actual_spent': actual_spent,
+            'committed': committed,
+            'exposure_spent': exposure_spent,
+            'estimate_to_complete': estimate_to_complete,
+            'total_at_completion': total_at_completion,
+            'variance': variance,
+            'profit_loss_pct': profit_loss_pct,
+            'percentage_spent': spent_pct,
+        }
+        rows.append(row)
+
+        agg = totals_by_currency.setdefault(currency, {
+            'currency': currency,
+            'budget': 0.0,
+            'actual_spent': 0.0,
+            'committed': 0.0,
+            'estimate_to_complete': 0.0,
+            'total_at_completion': 0.0,
+            'variance': 0.0,
+        })
+        agg['budget'] += budget
+        agg['actual_spent'] += actual_spent
+        agg['committed'] += committed
+        agg['estimate_to_complete'] += estimate_to_complete
+        agg['total_at_completion'] += total_at_completion
+        agg['variance'] += variance
+
+    rows.sort(key=lambda r: abs(_num(r.get('variance'))), reverse=True)
+    summary_rows = []
+    for cc in sorted(totals_by_currency.keys()):
+        agg = totals_by_currency[cc]
+        pct_spent = ((agg['actual_spent'] + agg['committed']) * 100.0 / agg['budget']) if agg['budget'] > 0 else 0.0
+        summary_rows.append({
+            **agg,
+            'percentage_spent': pct_spent,
+        })
+
+    return rows, summary_rows
+
+
+def _derive_won_checklist_department_key(row: dict) -> str | None:
+    # Project checklist table is strictly for post-win execution teams only.
+    # Bid phase keeps Site Engineer separately (`engineer`), while project
+    # phase uses Engineering Team (`engineering_team`).
+    stage_raw = _normalize_department_key(row.get('stage') or '')
+    if stage_raw in ('engineering_team', 'procurement_team', 'accounts_finance'):
+        return stage_raw
+    if stage_raw in ('engineer',):
+        return None
+
+    dept = _normalize_department_key(row.get('department') or '')
+    if dept in ('engineering_team', 'procurement_team', 'accounts_finance'):
+        return dept
+    if dept in ('engineer',):
+        return None
+
+    dept = _normalize_department_key(row.get('employee_department') or '')
+    if dept in ('engineering_team', 'procurement_team', 'accounts_finance'):
+        return dept
+    if dept in ('engineer',):
+        return None
+    return None
+
+
+def _sync_won_project_checklists(cur, only_g_id: int | None = None):
+    _ensure_won_project_checklists_table(cur)
+    won_rows = []
+    won_sql = """
+        SELECT
+            gb.g_id,
+            gb.submission_status,
+            gb.submission_reason,
+            wlr.result AS wl_result,
+            wlr.status AS wl_status,
+            wbr.closure_status AS project_status,
+            wbr.work_progress_status AS work_progress_status,
+            bi.results AS bi_results,
+            bi.bid_status AS bi_bid_status
+        FROM go_bids gb
+        LEFT JOIN bid_assign ba ON ba.g_id = gb.g_id
+        LEFT JOIN win_lost_results wlr ON (wlr.a_id = ba.a_id OR wlr.g_id = gb.g_id)
+        LEFT JOIN won_bids_result wbr ON wbr.w_id = wlr.w_id
+        LEFT JOIN bid_incoming bi ON bi.id = gb.id
+    """
+    params = []
+    if only_g_id:
+        won_sql += " WHERE gb.g_id=%s"
+        params.append(int(only_g_id))
+    cur.execute(won_sql, tuple(params))
+    won_rows = cur.fetchall() or []
+    won_gids = set()
+    for r in (won_rows or []):
+        gid = r.get('g_id')
+        if not gid:
+            continue
+        if _is_won_bid_status(
+            r.get('wl_result'),
+            r.get('wl_status'),
+            r.get('submission_status'),
+            r.get('project_status'),
+            r.get('work_progress_status'),
+            r.get('bi_results'),
+            r.get('bi_bid_status'),
+        ):
+            won_gids.add(int(gid))
+    # Additional won sources so won checklist sync does not depend only on go_bids flags.
+    try:
+        sql = """
+            SELECT DISTINCT g_id
+            FROM win_lost_results
+            WHERE g_id IS NOT NULL
+              AND (
+                LOWER(COALESCE(result,'')) LIKE '%won%'
+                OR LOWER(COALESCE(result,'')) LIKE '%award%'
+                OR LOWER(COALESCE(status,'')) LIKE '%won%'
+              )
+        """
+        params2 = []
+        if only_g_id:
+            sql += " AND g_id=%s"
+            params2.append(int(only_g_id))
+        cur.execute(sql, tuple(params2))
+        for rr in (cur.fetchall() or []):
+            gid = rr.get('g_id')
+            if gid:
+                won_gids.add(int(gid))
+    except Exception:
+        pass
+    try:
+        sql = "SELECT DISTINCT g_id FROM project_manager_assignments WHERE g_id IS NOT NULL"
+        params3 = []
+        if only_g_id:
+            sql += " AND g_id=%s"
+            params3.append(int(only_g_id))
+        cur.execute(sql, tuple(params3))
+        for rr in (cur.fetchall() or []):
+            gid = rr.get('g_id')
+            if gid:
+                won_gids.add(int(gid))
+    except Exception:
+        pass
+    if not won_gids:
+        if only_g_id:
+            cur.execute("DELETE FROM won_project_checklists WHERE g_id=%s", (int(only_g_id),))
+            mysql.connection.commit()
+        return
+
+    ph = ",".join(["%s"] * len(won_gids))
+    try:
+        cur.execute(
+            f"""
+            SELECT
+                bc.id,
+                bc.g_id,
+                bc.task_code,
+                bc.task_name,
+                bc.description,
+                bc.status,
+                bc.priority,
+                bc.due_date,
+                bc.progress_pct,
+                bc.assigned_to,
+                bc.attachment_path,
+                bc.created_at,
+                bc.updated_at,
+                bc.stage,
+                bc.department,
+                e.department AS employee_department
+            FROM bid_checklists bc
+            LEFT JOIN employees e ON e.id = bc.assigned_to
+            WHERE bc.team_archive IS NULL
+              AND bc.g_id IN ({ph})
+            """,
+            tuple(won_gids),
+        )
+    except Exception:
+        cur.execute(
+            f"""
+            SELECT
+                bc.id,
+                bc.g_id,
+                bc.task_code,
+                bc.task_name,
+                bc.description,
+                bc.status,
+                bc.priority,
+                bc.due_date,
+                bc.progress_pct,
+                bc.assigned_to,
+                bc.attachment_path,
+                bc.created_at,
+                bc.updated_at,
+                bc.stage,
+                NULL AS department,
+                e.department AS employee_department
+            FROM bid_checklists bc
+            LEFT JOIN employees e ON e.id = bc.assigned_to
+            WHERE bc.g_id IN ({ph})
+            """,
+            tuple(won_gids),
+        )
+    rows = cur.fetchall() or []
+    source_ids = []
+    for r in (rows or []):
+        source_task_id = int(r.get('id') or 0)
+        if not source_task_id:
+            continue
+        dept_key = _derive_won_checklist_department_key(r)
+        if not dept_key:
+            continue
+        source_ids.append(source_task_id)
+        cur.execute(
+            """
+            INSERT INTO won_project_checklists (
+                source_task_id, g_id, department_key, task_code, task_name, description,
+                status, priority, due_date, progress_pct, assigned_to, attachment_path,
+                created_at, updated_at
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON DUPLICATE KEY UPDATE
+                g_id=VALUES(g_id),
+                department_key=VALUES(department_key),
+                task_code=VALUES(task_code),
+                task_name=VALUES(task_name),
+                description=VALUES(description),
+                status=VALUES(status),
+                priority=VALUES(priority),
+                due_date=VALUES(due_date),
+                progress_pct=VALUES(progress_pct),
+                assigned_to=COALESCE(won_project_checklists.assigned_to, VALUES(assigned_to)),
+                attachment_path=VALUES(attachment_path),
+                created_at=VALUES(created_at),
+                updated_at=VALUES(updated_at)
+            """,
+            (
+                source_task_id,
+                int(r.get('g_id') or 0),
+                dept_key,
+                r.get('task_code') or None,
+                r.get('task_name') or 'Task',
+                r.get('description') or None,
+                normalize_task_status(r.get('status') or ''),
+                (r.get('priority') or 'normal'),
+                r.get('due_date'),
+                int(r.get('progress_pct') or 0),
+                r.get('assigned_to'),
+                r.get('attachment_path') or None,
+                r.get('created_at'),
+                r.get('updated_at'),
+            ),
+        )
+        # Auto-default: execution tasks should always have a department-manager owner.
+        if not r.get('assigned_to'):
+            try:
+                _auto_assign_won_project_department_managers(
+                    cur,
+                    g_id=int(r.get('g_id') or 0),
+                    department_key=dept_key,
+                )
+            except Exception:
+                pass
+    if only_g_id:
+        if source_ids:
+            source_ph = ",".join(["%s"] * len(source_ids))
+            cur.execute(
+                f"DELETE FROM won_project_checklists WHERE g_id=%s AND source_task_id NOT IN ({source_ph})",
+                tuple([int(only_g_id), *source_ids]),
+            )
+        else:
+            cur.execute("DELETE FROM won_project_checklists WHERE g_id=%s AND source_task_id IS NOT NULL", (int(only_g_id),))
+    else:
+        # Global cleanup: keep won checklist strictly execution-team scoped for
+        # rows mirrored from bid_checklists (manual project rows have NULL source_task_id).
+        cur.execute(
+            """
+            DELETE FROM won_project_checklists
+            WHERE source_task_id IS NOT NULL
+              AND LOWER(COALESCE(department_key,'')) NOT IN ('engineering_team', 'procurement_team', 'accounts_finance')
+            """
+        )
+    mysql.connection.commit()
+
+
 def _normalize_approval_target(raw: str | None) -> str | None:
     val = (raw or "").strip().lower().replace("_", " ")
     val = " ".join(val.split())
@@ -7798,7 +10885,7 @@ def _normalize_approval_target(raw: str | None) -> str | None:
         return None
     if val in ("team lead", "teamlead") or compact in ("teamlead", "teamleader", "bdtl", "opstl"):
         return "team_lead"
-    if val in ("business manager", "manager") or compact in ("manager", "businessmanager", "designmanager", "operationsmanager", "operationmanager", "sitemanager", "bdmgr", "opsmgr", "opmgr", "projectmanager"):
+    if val in ("business manager", "manager") or compact in ("manager", "businessmanager", "designmanager", "operationsmanager", "operationmanager", "sitemanager", "bdmgr", "opsmgr", "opmgr", "projectmanager", "procurementmanager", "engineeringmanager", "accountsmanager", "financemanager"):
         return "manager"
     if val in ("admin", "it admin", "itadmin", "top admin", "top level admin", "topleveladmin") or compact in ("admin", "itadmin", "topadmin", "topleveladmin"):
         return "admin"
@@ -7827,6 +10914,15 @@ def _department_aliases_for_compact(dept: str | None) -> list[str]:
     if compact in ("accountsfinance", "accountsandfinance", "accountingfinance"):
         return ["accountsfinance", "accountsandfinance", "accountingfinance", "accounting", "finance"]
     return [compact] if compact else []
+
+
+def _departments_compatible(left: str | None, right: str | None) -> bool:
+    """Return True when two department keys should be treated as the same scope."""
+    l_aliases = set(_department_aliases_for_compact(left))
+    r_aliases = set(_department_aliases_for_compact(right))
+    if not l_aliases or not r_aliases:
+        return True
+    return bool(l_aliases & r_aliases)
 
 
 def _approval_target_from_creator(cur, task: dict) -> str:
@@ -7923,17 +11019,6 @@ def _count_pending_approvals_for_task(cur, task_id: int) -> int:
         cur.execute(
             """
             SELECT COUNT(*) AS cnt
-            FROM task_comments tc
-            LEFT JOIN document_approvals da
-              ON da.source_table='task_comments' AND da.source_id=tc.id
-            WHERE tc.task_id=%s AND tc.needs_approval=1 AND da.id IS NULL
-            """,
-            (int(task_id),),
-        )
-        pending += int((cur.fetchone() or {}).get('cnt') or 0)
-        cur.execute(
-            """
-            SELECT COUNT(*) AS cnt
             FROM document_approvals da
             JOIN task_manager_attachments tma
               ON da.source_table='task_manager_attachments' AND da.source_id=tma.id
@@ -7942,9 +11027,31 @@ def _count_pending_approvals_for_task(cur, task_id: int) -> int:
             (int(task_id),),
         )
         pending += int((cur.fetchone() or {}).get('cnt') or 0)
+        # Do not let assignment-routing approvals block task completion status.
+        # Task completion should be based on work/comment/manager attachment approvals.
     except Exception:
         return pending
     return pending
+
+
+def _normalize_due_date_value(raw_due):
+    """Normalize UI date input to DB-friendly YYYY-MM-DD or NULL."""
+    sval = str(raw_due or '').strip()
+    if not sval:
+        return None
+    # Keep date-only values stable for DATE/DATETIME columns.
+    if len(sval) >= 10:
+        token = sval[:10]
+        try:
+            return datetime.strptime(token, "%Y-%m-%d").strftime("%Y-%m-%d")
+        except Exception:
+            pass
+    for fmt in ("%m/%d/%Y", "%m-%d-%Y", "%d/%m/%Y", "%d-%m-%Y"):
+        try:
+            return datetime.strptime(sval, fmt).strftime("%Y-%m-%d")
+        except Exception:
+            continue
+    return None
 
 
 def _update_task_status_from_approval(cur, task_id: int | None, decision_status: str | None) -> None:
@@ -7968,6 +11075,7 @@ def _update_task_status_from_approval(cur, task_id: int | None, decision_status:
             pct_val = 0
         else:
             return
+        # Update bid checklist row.
         cur.execute(
             """
             UPDATE bid_checklists
@@ -7976,6 +11084,19 @@ def _update_task_status_from_approval(cur, task_id: int | None, decision_status:
             """,
             (new_status, pct_val, int(task_id)),
         )
+        # Keep won-project mirror rows in sync for execution team dashboards.
+        try:
+            _ensure_won_project_checklists_table(cur)
+            cur.execute(
+                """
+                UPDATE won_project_checklists
+                SET status=%s, progress_pct=%s, updated_at=CURRENT_TIMESTAMP
+                WHERE id=%s OR source_task_id=%s
+                """,
+                (new_status, pct_val, int(task_id), int(task_id)),
+            )
+        except Exception:
+            pass
     except Exception:
         return
 
@@ -7993,6 +11114,20 @@ def _mark_task_submitted(cur, task_id: int | None) -> None:
             """,
             (int(task_id),),
         )
+        # Keep won-project mirror rows in sync for execution team dashboards.
+        try:
+            _ensure_won_project_checklists_table(cur)
+            cur.execute(
+                """
+                UPDATE won_project_checklists
+                SET status='submitted', progress_pct=75, updated_at=CURRENT_TIMESTAMP
+                WHERE (id=%s OR source_task_id=%s)
+                  AND LOWER(COALESCE(status,'')) NOT IN ('completed','complete','done','finished','closed')
+                """,
+                (int(task_id), int(task_id)),
+            )
+        except Exception:
+            pass
     except Exception:
         return
 
@@ -8209,6 +11344,44 @@ def _notify_approval_request(
             )
         except Exception:
             pass
+
+
+def _enqueue_task_assignment_approval(
+    cur,
+    *,
+    task_id: int,
+    department_key: str | None,
+    title: str = "Task Assignment Pending Approval",
+    message: str = "A new task assignment requires manager approval.",
+) -> None:
+    """Create/update a manager approval queue entry for a task assignment."""
+    try:
+        _ensure_document_approvals_table(cur)
+        dept_key = _normalize_department_key(department_key or '')
+        cur.execute(
+            """
+            INSERT INTO document_approvals (source_table, source_id, status, department_key, decided_by, decided_at, decision_note)
+            VALUES ('task_assignment', %s, 'pending', %s, NULL, NULL, NULL)
+            ON DUPLICATE KEY UPDATE
+                status='pending',
+                department_key=VALUES(department_key),
+                decided_by=NULL,
+                decided_at=NULL,
+                decision_note=NULL,
+                updated_at=CURRENT_TIMESTAMP
+            """,
+            (int(task_id), dept_key),
+        )
+        _notify_approval_request(
+            employee_id=None,
+            department_key=dept_key,
+            approval_target='manager',
+            task_id=int(task_id),
+            title=title,
+            message=message,
+        )
+    except Exception:
+        pass
 
 
 def _collect_approval_items(
@@ -8477,6 +11650,84 @@ def _collect_approval_items(
         pass
 
     try:
+        # Task assignment approvals (PM -> Department Manager handoff)
+        include_task_assignment = True
+        if target_values:
+            manager_targets = {
+                'manager',
+                'business manager',
+                'design manager',
+                'operations manager',
+                'operation manager',
+                'site manager',
+            }
+            include_task_assignment = any(str(v).strip().lower() in manager_targets for v in target_values)
+        if include_task_assignment:
+            cur.execute(
+                """
+                SELECT
+                  da.source_id AS source_id,
+                  'task_assignment' AS source_table,
+                  COALESCE(bc.id, wpc.id) AS task_id,
+                  COALESCE(bc.task_name, wpc.task_name) AS task_name,
+                  COALESCE(bc.priority, wpc.priority) AS task_priority,
+                  COALESCE(gb1.b_name, gb2.b_name, '') AS bid_name,
+                  COALESCE(da.department_key, bc.stage, wpc.department_key, e.department, e2.department) AS department,
+                  'manager' AS approval_target,
+                  da.status AS approval_status,
+                  da.created_at AS uploaded_at,
+                  da.decided_at AS decided_at,
+                  da.decision_note AS decision_note,
+                  COALESCE(u1.email, u2.email, '') AS uploader_email
+                FROM document_approvals da
+                LEFT JOIN bid_checklists bc
+                  ON da.source_table='task_assignment' AND da.source_id=bc.id
+                LEFT JOIN won_project_checklists wpc
+                  ON da.source_table='task_assignment' AND da.source_id=wpc.id
+                LEFT JOIN go_bids gb1 ON gb1.g_id = bc.g_id
+                LEFT JOIN go_bids gb2 ON gb2.g_id = wpc.g_id
+                LEFT JOIN users u1 ON u1.id = bc.created_by
+                LEFT JOIN users u2 ON u2.id = wpc.created_by
+                LEFT JOIN employees e ON e.id = bc.assigned_to
+                LEFT JOIN employees e2 ON e2.id = wpc.assigned_to
+                WHERE 1=1
+                  AND da.source_table='task_assignment'
+                  AND COALESCE(bc.id, wpc.id) IS NOT NULL
+                """
+                + dept_clause +
+                """
+                ORDER BY da.created_at DESC
+                LIMIT %s
+                """,
+                (*dept_params, limit_n),
+            )
+            rows = cur.fetchall() or []
+            for r in rows:
+                st = (r.get('approval_status') or 'pending').strip().lower()
+                items.append({
+                    'source': 'system',
+                    'source_table': 'task_assignment',
+                    'source_id': r.get('source_id'),
+                    'task_id': r.get('task_id'),
+                    'task_name': r.get('task_name'),
+                    'priority': r.get('task_priority'),
+                    'bid_name': r.get('bid_name'),
+                    'department': r.get('department'),
+                    'uploader': r.get('uploader_email') or 'Project Manager',
+                    'filename': 'Task assignment',
+                    'original_filename': 'Task assignment',
+                    'description': 'Department manager approval required before downstream assignment.',
+                    'approval_target': 'manager',
+                    'uploaded_at': (r.get('uploaded_at').strftime('%Y-%m-%d %H:%M') if r.get('uploaded_at') else ''),
+                    'status': st,
+                    'decided_at': (r.get('decided_at').strftime('%Y-%m-%d %H:%M') if r.get('decided_at') else ''),
+                    'decision_note': r.get('decision_note') or '',
+                    'download_url': f"/task/{int(r.get('task_id') or 0)}/details",
+                })
+    except Exception:
+        pass
+
+    try:
         items.sort(key=lambda x: x.get('uploaded_at') or '', reverse=True)
     except Exception:
         pass
@@ -8526,7 +11777,26 @@ def business_manager_approvals():
     denied = _require_business_manager_access(None)
     if denied:
         return denied
-    if not getattr(current_user, 'is_admin', False) and not check_module_access_db('approvals'):
+    role_norm = ((get_user_role() or getattr(current_user, 'role', '') or '').strip().lower().replace('_', ' '))
+    role_compact = role_norm.replace(' ', '')
+    manager_role_compacts = {
+        'manager', 'businessmanager', 'designmanager', 'operationsmanager', 'operationmanager',
+        'sitemanager', 'engineeringmanager', 'procurementmanager', 'accountsmanager',
+        'financemanager', 'accountsfinancemanager', 'projectmanager'
+    }
+    active_dept = _normalize_department_key(session.get('active_department_key') or '')
+    has_assigned_tasks_access = False
+    try:
+        has_assigned_tasks_access = bool(check_module_access_db('assigned_tasks'))
+    except Exception:
+        has_assigned_tasks_access = False
+    if (
+        not getattr(current_user, 'is_admin', False)
+        and not check_module_access_db('approvals')
+        and not has_assigned_tasks_access
+        and role_compact not in manager_role_compacts
+        and active_dept not in ('business', 'design', 'operations', 'engineer', 'engineering_team', 'procurement_team', 'accounts_finance')
+    ):
         return render_template('access_denied.html', message="You don't have access to Approvals."), 403
     cur = mysql.connection.cursor(DictCursor)
     try:
@@ -8566,7 +11836,25 @@ def team_lead_approvals():
     is_team_lead_user = role_target == 'team_lead'
     if not (current_user.is_admin or current_user.is_supervisor or is_top_admin or is_manager_user or is_team_lead_user):
         return "Access Denied - Team Lead access required", 403
-    if not getattr(current_user, 'is_admin', False) and not check_module_access_db('approvals'):
+    role_compact = user_role.replace(' ', '').replace('_', '')
+    manager_or_teamlead_compacts = {
+        'manager', 'teamlead', 'businessmanager', 'designmanager', 'operationsmanager',
+        'operationmanager', 'sitemanager', 'engineeringmanager', 'procurementmanager',
+        'accountsmanager', 'financemanager', 'accountsfinancemanager', 'projectmanager'
+    }
+    active_dept = _normalize_department_key(session.get('active_department_key') or '')
+    has_assigned_tasks_access = False
+    try:
+        has_assigned_tasks_access = bool(check_module_access_db('assigned_tasks'))
+    except Exception:
+        has_assigned_tasks_access = False
+    if (
+        not getattr(current_user, 'is_admin', False)
+        and not check_module_access_db('approvals')
+        and not has_assigned_tasks_access
+        and role_compact not in manager_or_teamlead_compacts
+        and active_dept not in ('business', 'design', 'operations', 'engineer', 'engineering_team', 'procurement_team', 'accounts_finance')
+    ):
         return render_template('access_denied.html', message="You don't have access to Approvals."), 403
 
     def _team_key_from_dept_key(dept_key: str | None) -> str | None:
@@ -8629,7 +11917,7 @@ def approvals_action():
         source_id = int(data.get('source_id') or 0)
     except Exception:
         source_id = 0
-    if action not in ('approve', 'reject', 'revert') or source_table not in ('task_work_files', 'task_manager_attachments', 'task_comments') or not source_id:
+    if action not in ('approve', 'reject', 'revert') or source_table not in ('task_work_files', 'task_manager_attachments', 'task_comments', 'task_assignment') or not source_id:
         return jsonify({'success': False, 'error': 'bad_request', 'message': 'Invalid request'}), 400
 
     role = (get_user_role() or '').strip().lower()
@@ -8701,6 +11989,30 @@ def approvals_action():
                 item_dept = row.get('department')
                 item_target = row.get('approval_target')
                 task_id = row.get('task_id')
+            elif source_table == 'task_assignment':
+                cur.execute(
+                    """
+                    SELECT
+                        COALESCE(da.department_key, bc.stage, wpc.department_key, e.department, e2.department) AS department,
+                        'manager' AS approval_target,
+                        COALESCE(bc.id, wpc.id) AS task_id
+                    FROM document_approvals da
+                    LEFT JOIN bid_checklists bc
+                      ON da.source_table='task_assignment' AND da.source_id=bc.id
+                    LEFT JOIN won_project_checklists wpc
+                      ON da.source_table='task_assignment' AND da.source_id=wpc.id
+                    LEFT JOIN employees e ON e.id = bc.assigned_to
+                    LEFT JOIN employees e2 ON e2.id = wpc.assigned_to
+                    WHERE da.source_id=%s
+                      AND da.source_table='task_assignment'
+                    LIMIT 1
+                    """,
+                    (source_id,),
+                )
+                row = cur.fetchone() or {}
+                item_dept = row.get('department')
+                item_target = 'manager'
+                task_id = row.get('task_id')
             if not (role in ('manager', 'business_manager', 'business manager')):
                 item_dept_norm = _normalize_department_key(item_dept)
                 if item_dept_norm and user_dept and user_dept != item_dept_norm:
@@ -8718,6 +12030,8 @@ def approvals_action():
             elif source_table == 'task_comments':
                 cur.execute("SELECT task_id FROM task_comments WHERE id=%s", (source_id,))
                 task_id = (cur.fetchone() or {}).get('task_id')
+            elif source_table == 'task_assignment':
+                task_id = int(source_id)
 
         if action == 'approve':
             status = 'approved'
@@ -8782,6 +12096,67 @@ def approvals_action():
                 notify_emp_id = row.get('employee_id')
                 fname = (row.get('original_filename') or 'File').strip()
                 notify_msg = f"Manager upload '{fname}' was {status}.{note_tail}"
+            elif source_table == 'task_assignment':
+                cur.execute(
+                    """
+                    SELECT task_id, task_name, assigned_to, employee_email
+                    FROM (
+                      SELECT
+                        bc.id AS task_id,
+                        bc.task_name AS task_name,
+                        bc.assigned_to AS assigned_to,
+                        e.email AS employee_email
+                      FROM bid_checklists bc
+                      LEFT JOIN employees e ON e.id = bc.assigned_to
+                      WHERE bc.id=%s
+                      UNION ALL
+                      SELECT
+                        wpc.id AS task_id,
+                        wpc.task_name AS task_name,
+                        wpc.assigned_to AS assigned_to,
+                        e2.email AS employee_email
+                      FROM won_project_checklists wpc
+                      LEFT JOIN employees e2 ON e2.id = wpc.assigned_to
+                      WHERE wpc.id=%s
+                    ) x
+                    LIMIT 1
+                    """,
+                    (int(source_id), int(source_id)),
+                )
+                row = cur.fetchone() or {}
+                task_id = task_id or row.get('task_id')
+                task_name = (row.get('task_name') or 'Task').strip()
+                notify_msg = f"Task assignment '{task_name}' was {status}.{note_tail}"
+                if row.get('assigned_to'):
+                    notify_emp_id = row.get('assigned_to')
+                try:
+                    creator_id = None
+                    cur.execute(
+                        """
+                        SELECT created_by
+                        FROM bid_checklists
+                        WHERE id=%s
+                        UNION ALL
+                        SELECT created_by
+                        FROM won_project_checklists
+                        WHERE id=%s
+                        LIMIT 1
+                        """,
+                        (int(source_id), int(source_id)),
+                    )
+                    tr = cur.fetchone() or {}
+                    creator_id = tr.get('created_by')
+                    if creator_id:
+                        _create_notification(
+                            recipient_kind="user",
+                            recipient_id=int(creator_id),
+                            title="Task assignment approval updated",
+                            message=notify_msg,
+                            category="approval",
+                            link_url=f"/task/{int(source_id)}/details",
+                        )
+                except Exception:
+                    pass
 
             if notify_emp_id and notify_msg:
                 _create_notification(
@@ -8794,7 +12169,75 @@ def approvals_action():
                 )
         except Exception:
             pass
-        _update_task_status_from_approval(cur, task_id, status)
+        if source_table == 'task_assignment':
+            try:
+                if status == 'approved':
+                    cur.execute(
+                        """
+                        UPDATE bid_checklists
+                        SET status='in_progress',
+                            progress_pct=GREATEST(COALESCE(progress_pct,0), 10),
+                            updated_at=CURRENT_TIMESTAMP
+                        WHERE id=%s
+                        """,
+                        (int(task_id or source_id),),
+                    )
+                    cur.execute(
+                        """
+                        UPDATE won_project_checklists
+                        SET status='in_progress',
+                            progress_pct=GREATEST(COALESCE(progress_pct,0), 10),
+                            updated_at=CURRENT_TIMESTAMP
+                        WHERE id=%s OR source_task_id=%s
+                        """,
+                        (int(task_id or source_id), int(task_id or source_id)),
+                    )
+                elif status == 'rejected':
+                    cur.execute(
+                        """
+                        UPDATE bid_checklists
+                        SET status='rejected',
+                            progress_pct=0,
+                            updated_at=CURRENT_TIMESTAMP
+                        WHERE id=%s
+                        """,
+                        (int(task_id or source_id),),
+                    )
+                    cur.execute(
+                        """
+                        UPDATE won_project_checklists
+                        SET status='rejected',
+                            progress_pct=0,
+                            updated_at=CURRENT_TIMESTAMP
+                        WHERE id=%s OR source_task_id=%s
+                        """,
+                        (int(task_id or source_id), int(task_id or source_id)),
+                    )
+                elif status == 'reverted':
+                    cur.execute(
+                        """
+                        UPDATE bid_checklists
+                        SET status='pending',
+                            progress_pct=0,
+                            updated_at=CURRENT_TIMESTAMP
+                        WHERE id=%s
+                        """,
+                        (int(task_id or source_id),),
+                    )
+                    cur.execute(
+                        """
+                        UPDATE won_project_checklists
+                        SET status='pending',
+                            progress_pct=0,
+                            updated_at=CURRENT_TIMESTAMP
+                        WHERE id=%s OR source_task_id=%s
+                        """,
+                        (int(task_id or source_id), int(task_id or source_id)),
+                    )
+            except Exception:
+                pass
+        else:
+            _update_task_status_from_approval(cur, task_id, status)
         mysql.connection.commit()
         return jsonify({'success': True})
     except Exception as e:
@@ -8823,7 +12266,7 @@ def approvals_escalate():
         source_id = 0
     target_raw = data.get('approval_target')
     approval_target = _normalize_approval_target(target_raw) or ''
-    if source_table not in ('task_work_files', 'task_manager_attachments', 'task_comments') or not source_id:
+    if source_table not in ('task_work_files', 'task_manager_attachments', 'task_comments', 'task_assignment') or not source_id:
         return jsonify({'success': False, 'error': 'bad_request', 'message': 'Invalid request'}), 400
 
     role = (get_user_role() or '').strip().lower()
@@ -8905,6 +12348,26 @@ def approvals_escalate():
                 "UPDATE task_comments SET approval_target=%s, needs_approval=1 WHERE id=%s",
                 (approval_target, source_id),
             )
+        elif source_table == 'task_assignment':
+            cur.execute(
+                """
+                SELECT
+                    COALESCE(da.department_key, bc.stage, e.department) AS department,
+                    'manager' AS approval_target,
+                    bc.id AS task_id
+                FROM document_approvals da
+                JOIN bid_checklists bc
+                  ON da.source_table='task_assignment' AND da.source_id=bc.id
+                LEFT JOIN employees e ON e.id = bc.assigned_to
+                WHERE da.source_id=%s
+                LIMIT 1
+                """,
+                (source_id,),
+            )
+            row = cur.fetchone() or {}
+            item_dept = row.get('department')
+            item_target = row.get('approval_target')
+            task_id = row.get('task_id')
 
         if not is_admin_like:
             item_dept_norm = _normalize_department_key(item_dept)
@@ -10788,6 +14251,8 @@ def dashboard():
     role_key = _normalize_role_key(role_raw)
     if role_key == 'project manager':
         return redirect(url_for('project_manager_dashboard'))
+    elif role_key == 'procurement manager':
+        return redirect(url_for('procurement_manager_dashboard'))
     elif _is_business_manager_user():
         return redirect(url_for('business_manager_team_allocation'))
     return redirect(url_for('manager_dashboard'))
@@ -10884,7 +14349,8 @@ def supervisor_business_dashboard():
     except Exception:
         task_ids = set()
 
-    default_stages = ['analyzer', 'business', 'design', 'operations', 'engineer']
+    default_stages = ['analyzer', 'business', 'design', 'operations', 'engineer', 'engineering_team', 'procurement_team', 'accounts_finance']
+    gated_pipeline_stages = {'engineering_team', 'procurement_team', 'accounts_finance'}
     bids = []
     for row in rows:
         bid_id = row.get('id')
@@ -10895,11 +14361,21 @@ def supervisor_business_dashboard():
             dyn_stages = default_stages.copy()
 
         stage_now = (row.get('current_stage') or 'analyzer').lower()
-        should_include = (
-            stage_now == current_stage
-            or bid_id in task_ids
-            or current_stage in dyn_stages
-        )
+        assigned_depart = (_normalize_department_key(row.get('depart')) or '').strip().lower()
+        if current_stage in gated_pipeline_stages:
+            # For downstream manager dashboards, show only bids that are actually routed
+            # to the stage, or have concrete work items created for that stage.
+            should_include = (
+                stage_now == current_stage
+                or bid_id in task_ids
+                or assigned_depart == current_stage
+            )
+        else:
+            should_include = (
+                stage_now == current_stage
+                or bid_id in task_ids
+                or current_stage in dyn_stages
+            )
         if not should_include:
             continue
 
@@ -11920,6 +15396,8 @@ def manager_dashboard():
     role_norm = role_raw.strip().lower().replace('_', ' ')
     if _normalize_role_key(role_raw) == 'project manager':
         return redirect(url_for('project_manager_dashboard'))
+    if _normalize_role_key(role_raw) == 'procurement manager':
+        return redirect(url_for('procurement_manager_dashboard'))
     if not current_user.is_admin and not check_module_access_db('manager_dashboard'):
         return render_template('access_denied.html', message="You don't have access to the Manager Dashboard."), 403
     # For users with a manager role, send them directly to the BDM overview
@@ -12117,7 +15595,7 @@ def manager_dashboard():
                     'business': 'Business Development',
                     'design': 'Design & Marketing',
                     'operations': 'Operation Team',
-                    'engineer': 'Engineering Team',
+                    'engineer': 'Site Engineer',
                     'handover': 'Submitted',
                 }.get((key or '').lower(), (key or '').title())
 
@@ -12207,15 +15685,15 @@ def manager_dashboard():
                                 for item in checklist:
                                     if not isinstance(item, dict):
                                         continue
-                                    stage = _normalize_stage_key(
+                                    stage = _normalize_bid_timeline_stage_key(
                                         item.get('dept') or item.get('stage') or item.get('department') or item.get('team') or ''
                                     )
                                     if not stage or stage not in meta_buckets:
                                         continue
-                                    st = (item.get('status') or '').strip().lower()
+                                    st = normalize_task_status(item.get('status') or '')
                                     pct = item.get('progress_pct')
                                     if pct is None:
-                                        pct = 100 if st in ('completed', 'submitted') else 50 if st in ('in_progress', 'in progress') else 0
+                                        pct = _status_to_progress_pct(st)
                                     try:
                                         pct = max(0, min(100, int(pct)))
                                     except Exception:
@@ -12260,20 +15738,19 @@ def manager_dashboard():
                             buckets_local = {k: [] for k in default_stages}
                             counts_local = {k: dict(counts_local.get(k, {'total': 0, 'completed': 0})) for k in default_stages}
                             for r in rows_local:
-                                stage = _normalize_stage_key(r.get('stage_source'))
+                                stage = _normalize_bid_timeline_stage_key(r.get('stage_source'))
                                 if not stage or stage not in buckets_local:
                                     continue
                                 pct = r.get('progress_pct')
                                 if pct is None:
-                                    st = (r.get('status') or '').strip().lower()
-                                    pct = 100 if st in ('completed', 'submitted') else 50 if st in ('in_progress', 'in progress') else 0
+                                    pct = _status_to_progress_pct(r.get('status') or '')
                                 try:
                                     pct = max(0, min(100, int(pct)))
                                 except Exception:
                                     pct = 0
                                 buckets_local[stage].append(pct)
                                 counts_local[stage]['total'] += 1
-                                st = (r.get('status') or '').strip().lower()
+                                st = normalize_task_status(r.get('status') or '')
                                 if pct >= 100 or st in ('completed', 'submitted'):
                                     counts_local[stage]['completed'] += 1
                             def _avg(lst):
@@ -12340,64 +15817,22 @@ def manager_dashboard():
                         else:
                             raise
                     rows = cur2.fetchall() or []
-                    role_to_stage = {
-                        'business dev': 'business',
-                        'business development': 'business',
-                        'bdm': 'business',
-                        'bde': 'business',
-                        'design': 'design',
-                        'design team': 'design',
-                        'design & marketing': 'design',
-                        'design and marketing': 'design',
-                        'marketing': 'design',
-                        'operations': 'operations',
-                        'operation': 'operations',
-                        'ops': 'operations',
-                        'operations team': 'operations',
-                        'site manager': 'engineer',
-                        'site engineer': 'engineer',
-                        'engineering': 'engineer',
-                        'engineer': 'engineer',
-                        'engineering team': 'engineer',
-                        'handover': 'handover',
-                        'submitted': 'handover',
-                        'submit': 'handover',
-                        'bid analyzer': 'analyzer',
-                        'analyzer': 'analyzer',
-                    }
                     buckets = {k: [] for k in default_stages}
                     counts = {k: {'total': 0, 'completed': 0} for k in default_stages}
                     for r in rows:
-                        source = (r.get('stage_source') or '').strip().lower()
-                        stage = role_to_stage.get(source)
-                        if not stage and source in buckets:
-                            stage = source
-                        if not stage and source:
-                            if 'design' in source or 'marketing' in source:
-                                stage = 'design'
-                            elif 'business' in source or 'bdm' in source or 'bde' in source:
-                                stage = 'business'
-                            elif 'operation' in source or 'ops' in source:
-                                stage = 'operations'
-                            elif 'engineer' in source or 'site' in source:
-                                stage = 'engineer'
-                            elif 'submit' in source or 'handover' in source or source == 'won':
-                                stage = 'handover'
-                            elif 'analy' in source:
-                                stage = 'analyzer'
+                        stage = _normalize_bid_timeline_stage_key(r.get('stage_source'))
                         if not stage:
                             continue
                         pct = r.get('progress_pct')
                         if pct is None:
-                            st = (r.get('status') or '').strip().lower()
-                            pct = 100 if st in ('completed', 'submitted') else 50 if st in ('in_progress', 'in progress') else 0
+                            pct = _status_to_progress_pct(r.get('status') or '')
                         try:
                             pct = max(0, min(100, int(pct)))
                         except Exception:
                             pct = 0
                         buckets[stage].append(pct)
                         counts[stage]['total'] += 1
-                        st = (r.get('status') or '').strip().lower()
+                        st = normalize_task_status(r.get('status') or '')
                         if pct >= 100 or st in ('completed', 'submitted'):
                             counts[stage]['completed'] += 1
                     def avg(lst):
@@ -12454,49 +15889,23 @@ def manager_dashboard():
                                     (gid,),
                                 )
                                 for row in (cur.fetchall() or []):
-                                    stage = _normalize_stage_key(row.get('stage'))
+                                    stage = _normalize_bid_timeline_stage_key(row.get('stage'))
                                     if not stage or stage not in buckets:
                                         continue
                                     pct = row.get('progress_pct')
                                     if pct is None:
-                                        st = (row.get('status') or '').strip().lower()
-                                        pct = 100 if st in ('completed', 'submitted') else 50 if st in ('in_progress', 'in progress') else 0
+                                        pct = _status_to_progress_pct(row.get('status') or '')
                                     try:
                                         pct = max(0, min(100, int(pct)))
                                     except Exception:
                                         pct = 0
                                     buckets[stage].append(pct)
                                     counts[stage]['total'] += 1
-                                    if pct >= 100 or (row.get('status') or '').strip().lower() in ('completed', 'submitted'):
+                                    if pct >= 100 or normalize_task_status(row.get('status') or '') in ('completed', 'submitted'):
                                         counts[stage]['completed'] += 1
                             except Exception:
                                 pass
-                            # Fallback to assign meta if still empty/zero.
-                            try:
-                                if not any(v for v in buckets.values()):
-                                    cur.execute("SELECT data FROM bid_assign_meta WHERE g_id=%s", (gid,))
-                                    row = cur.fetchone() or {}
-                                    meta = {}
-                                    try:
-                                        meta = json.loads(row.get('data') or "{}")
-                                    except Exception:
-                                        meta = {}
-                                    checklist = meta.get('checklist') if isinstance(meta, dict) else None
-                                    if isinstance(checklist, list) and checklist:
-                                        for item in checklist:
-                                            if not isinstance(item, dict):
-                                                continue
-                                            stage = _normalize_stage_key(item.get('dept') or item.get('stage') or '')
-                                            if not stage or stage not in buckets:
-                                                continue
-                                            st = (item.get('status') or '').strip().lower()
-                                            pct = 100 if st in ('completed', 'submitted') else 50 if st in ('in_progress', 'in progress') else 0
-                                            buckets[stage].append(pct)
-                                            counts[stage]['total'] += 1
-                                            if pct >= 100 or st in ('completed', 'submitted'):
-                                                counts[stage]['completed'] += 1
-                            except Exception:
-                                pass
+                            # No bid_assign_meta fallback here; bid timeline is checklist-driven.
                             def _avg(lst):
                                 return int(round(sum(lst) / len(lst))) if lst else 0
                             stage_progress_map = {k: _avg(v) for k, v in buckets.items()}
@@ -12625,14 +16034,75 @@ def manager_approvals():
         'operationsmanager',
         'operationmanager',
         'sitemanager',
+        'engineeringmanager',
+        'procurementmanager',
+        'accountsmanager',
+        'financemanager',
+        'accountsfinancemanager',
         'bdmgr',
         'opsmgr',
         'projectmanager',
     }
+    access_rows = []
+    has_scoped_manager_role = False
+    try:
+        access_rows = _fetch_user_access_rows(int(current_user.id)) or []
+        has_scoped_manager_role = any((r.get('role') or '').strip().lower() == 'manager' for r in (access_rows or []))
+    except Exception:
+        access_rows = []
+        has_scoped_manager_role = False
+    requested_team = _normalize_department_key((request.args.get('team') or '').strip().lower())
+    active_dept = _normalize_department_key(session.get('active_department_key') or '')
+    scoped_team_keys = {'engineering_team', 'procurement_team', 'accounts_finance', 'business', 'design', 'operations', 'engineer'}
+    has_scoped_team_access = False
+    try:
+        for r in (access_rows or []):
+            r_role = (r.get('role') or '').strip().lower().replace('_', ' ')
+            if r_role not in ('manager', 'project manager'):
+                continue
+            r_dept = _normalize_department_key(r.get('department_key') or '')
+            if not r_dept:
+                has_scoped_team_access = True
+                break
+            if requested_team and r_dept == requested_team:
+                has_scoped_team_access = True
+                break
+            if active_dept and r_dept == active_dept:
+                has_scoped_team_access = True
+                break
+    except Exception:
+        has_scoped_team_access = False
+    if not has_scoped_team_access:
+        has_scoped_team_access = bool(
+            (requested_team in scoped_team_keys and active_dept == requested_team)
+            or (requested_team in scoped_team_keys and role_compact in manager_role_compacts)
+            or (active_dept in scoped_team_keys and role_compact in manager_role_compacts)
+        )
  
+    has_assigned_tasks_access = False
+    try:
+        has_assigned_tasks_access = bool(check_module_access_db('assigned_tasks'))
+    except Exception:
+        has_assigned_tasks_access = False
+    has_department_context = bool((requested_team in scoped_team_keys) or (active_dept in scoped_team_keys))
     is_top_admin_like = bool(current_user.is_admin or current_user.is_supervisor or role_compact in ('itadmin', 'supervisor', 'topleveladmin'))
-    if not getattr(current_user, 'is_admin', False) and not check_module_access_db('approvals'):
-        return render_template('access_denied.html', message="You don't have access to Approvals."), 403
+    if (
+        not getattr(current_user, 'is_admin', False)
+        and not check_module_access_db('approvals')
+        and not has_scoped_manager_role
+        and not has_scoped_team_access
+        and not has_assigned_tasks_access
+        and not has_department_context
+        and role_compact not in manager_role_compacts
+    ):
+        denied = None
+        try:
+            denied = _require_business_manager_access(None)
+        except Exception:
+            denied = None
+        if denied is None:
+            return redirect(url_for('business_manager_approvals', sidebar=sidebar) if sidebar else url_for('business_manager_approvals'))
+        return redirect(url_for('team_lead_approvals', sidebar=sidebar) if sidebar else url_for('team_lead_approvals'))
     if is_top_admin_like:
         # Top Admins should see admin-level approvals (all teams by default).
         team_names = {
@@ -12640,6 +16110,9 @@ def manager_approvals():
             'design': 'Design',
             'operations': 'Operations',
             'engineer': 'Site Engineer',
+            'engineering_team': 'Engineering Team',
+            'procurement_team': 'Procurement Team',
+            'accounts_finance': 'Accounts & Finance',
         }
         team_filter_raw = (request.args.get('team') or '').strip().lower()
         if team_filter_raw in ('', 'all', '*'):
@@ -12671,15 +16144,21 @@ def manager_approvals():
             team_key=team_filter,
             team_label=team_names.get(team_filter, 'All Teams'),
             user=current_user,
-            user_role=getattr(current_user, 'role', 'admin'),
+            user_role=(role_raw or getattr(current_user, 'role', '') or 'manager'),
+            sidebar_mode='manager',
+            active_department_key=(team_filter or active_dept or ''),
+            is_admin=bool(getattr(current_user, 'is_admin', False)),
         )
  
-    if role_compact in manager_role_compacts:
+    if role_compact in manager_role_compacts or has_scoped_manager_role:
         team_names = {
             'business': 'Business Development',
             'design': 'Design',
             'operations': 'Operations',
             'engineer': 'Site Engineer',
+            'engineering_team': 'Engineering Team',
+            'procurement_team': 'Procurement Team',
+            'accounts_finance': 'Accounts & Finance',
         }
         team_filter_raw = (request.args.get('team') or '').strip().lower()
         if team_filter_raw in ('', 'all', '*'):
@@ -12712,7 +16191,10 @@ def manager_approvals():
             team_key=team_filter,
             team_label=team_names.get(team_filter, 'All Teams'),
             user=current_user,
-            user_role=getattr(current_user, 'role', 'manager'),
+            user_role=(role_raw or getattr(current_user, 'role', '') or 'manager'),
+            sidebar_mode='manager',
+            active_department_key=(team_filter or active_dept or ''),
+            is_admin=bool(getattr(current_user, 'is_admin', False)),
         )
 
     denied = None
@@ -12734,10 +16216,32 @@ def manager_assigned_tasks():
     role_raw = (get_user_role() or '').strip() or (getattr(current_user, 'role', '') or '')
     role_norm = role_raw.strip().lower().replace('_', ' ')
     role_compact = role_norm.replace(' ', '')
+    has_scoped_manager_role = False
+    try:
+        access_rows = _fetch_user_access_rows(int(current_user.id))
+        has_scoped_manager_role = any((r.get('role') or '').strip().lower() == 'manager' for r in (access_rows or []))
+    except Exception:
+        has_scoped_manager_role = False
     is_allowed = bool(
         current_user.is_admin
         or current_user.is_supervisor
-        or role_compact in ('manager', 'itadmin', 'topleveladmin', 'supervisor')
+        or has_scoped_manager_role
+        or role_compact in (
+            'manager',
+            'itadmin',
+            'topleveladmin',
+            'supervisor',
+            'businessmanager',
+            'designmanager',
+            'operationmanager',
+            'operationsmanager',
+            'sitemanager',
+            'engineeringmanager',
+            'procurementmanager',
+            'accountsmanager',
+            'financemanager',
+            'accountsfinancemanager',
+        )
     )
     if not is_allowed:
         return render_template('access_denied.html', message="You don't have access to Assigned Tasks."), 403
@@ -12746,7 +16250,10 @@ def manager_assigned_tasks():
         'business': 'Business Development',
         'operations': 'Operations',
         'design': 'Design',
-        'engineer': 'Engineer',
+        'engineer': 'Site Engineer',
+        'engineering_team': 'Engineering Team',
+        'procurement_team': 'Procurement Team',
+        'accounts_finance': 'Accounts & Finance',
     }
 
     team_arg = (request.args.get('team') or '').strip().lower().replace(' ', '_')
@@ -12756,6 +16263,22 @@ def manager_assigned_tasks():
             team_key = _normalize_department_key(session.get('active_department_key')) or team_key
         except Exception:
             pass
+    if team_key not in team_map:
+        role_key = (get_user_role() or '').strip().lower().replace('_', ' ')
+        role_to_team = {
+            'engineering manager': 'engineering_team',
+            'procurement manager': 'procurement_team',
+            'accounts manager': 'accounts_finance',
+            'finance manager': 'accounts_finance',
+            'business manager': 'business',
+            'design manager': 'design',
+            'operation manager': 'operations',
+            'operations manager': 'operations',
+            'site manager': 'engineer',
+            'engineer': 'engineer',
+            'manager': 'business',
+        }
+        team_key = role_to_team.get(role_key, team_key)
     if team_key not in team_map:
         team_key = 'business'
 
@@ -12781,7 +16304,82 @@ def project_manager_dashboard():
         sync_go_bids()
     except Exception:
         pass
+    # Workflow reconciliation: approved projects should belong to a true Project Manager.
+    try:
+        if role_key == 'project manager' and not getattr(current_user, 'is_admin', False):
+            cur_fix = mysql.connection.cursor(DictCursor)
+            _reconcile_approved_projects_for_pm(cur_fix, int(current_user.id))
+            cur_fix.close()
+    except Exception:
+        pass
     items = _load_assigned_projects_for_manager(int(current_user.id))
+    # Attach Accounts estimate approval state to each PM project row.
+    try:
+        cur_est = mysql.connection.cursor(DictCursor)
+        _ensure_project_estimate_approvals_table(cur_est)
+        g_ids = []
+        for it in (items or []):
+            try:
+                gid = int(it.get('g_id') or 0)
+            except Exception:
+                gid = 0
+            if gid:
+                g_ids.append(gid)
+        est_map = {}
+        if g_ids:
+            placeholders = ",".join(["%s"] * len(g_ids))
+            try:
+                cur_est.execute(
+                    f"""
+                    SELECT g_id, estimated_value, currency, status, won_reason, submitted_at, approved_at
+                    FROM project_estimate_approvals
+                    WHERE g_id IN ({placeholders})
+                    """,
+                    tuple(g_ids),
+                )
+            except Exception:
+                # Backward-compatible fallback when won_reason column is absent.
+                cur_est.execute(
+                    f"""
+                    SELECT g_id, estimated_value, currency, status, submitted_at, approved_at
+                    FROM project_estimate_approvals
+                    WHERE g_id IN ({placeholders})
+                    """,
+                    tuple(g_ids),
+                )
+            for rr in (cur_est.fetchall() or []):
+                try:
+                    est_map[int(rr.get('g_id'))] = rr
+                except Exception:
+                    pass
+        for it in (items or []):
+            try:
+                gid = int(it.get('g_id') or 0)
+            except Exception:
+                gid = 0
+            er = est_map.get(gid) or {}
+            it['finance_estimated_value'] = er.get('estimated_value')
+            it['finance_currency'] = 'USD'
+            it['finance_estimate_status'] = (er.get('status') or 'not_submitted')
+            it['finance_won_reason'] = er.get('won_reason') or ''
+            it['finance_submitted_at'] = er.get('submitted_at')
+            it['finance_approved_at'] = er.get('approved_at')
+        # Enforce workflow visibility for Project Manager:
+        # Only projects approved by Accounts & Finance are visible to PM for execution.
+        if role_key == 'project manager' and not getattr(current_user, 'is_admin', False):
+            items = [
+                it for it in (items or [])
+                if (str(it.get('finance_estimate_status') or '').strip().lower() == 'approved')
+            ]
+        cur_est.close()
+    except Exception:
+        for it in (items or []):
+            it['finance_estimated_value'] = None
+            it['finance_currency'] = 'USD'
+            it['finance_estimate_status'] = 'not_submitted'
+            it['finance_won_reason'] = ''
+            it['finance_submitted_at'] = None
+            it['finance_approved_at'] = None
     # Auto-assign won projects to the current Project Manager if they are unassigned.
     try:
         cur = mysql.connection.cursor(DictCursor)
@@ -12885,7 +16483,8 @@ def project_manager_dashboard():
             'today_due_tasks': today_due_tasks,
             'unassigned_tasks': unassigned_tasks,
             'uploaded_files': uploaded_files,
-            'approvals_pending': 0,
+            'approvals_pending': sum(1 for x in (items or []) if (x.get('finance_estimate_status') or '').strip().lower() == 'pending'),
+            'finance_approved': sum(1 for x in (items or []) if (x.get('finance_estimate_status') or '').strip().lower() == 'approved'),
         }
     except Exception:
         kpis = {
@@ -12900,6 +16499,7 @@ def project_manager_dashboard():
             'unassigned_tasks': 0,
             'uploaded_files': 0,
             'approvals_pending': 0,
+            'finance_approved': 0,
         }
     project_timeline_items = _load_project_timeline_items_for_manager(int(current_user.id))
     project_timeline_map = {}
@@ -12961,6 +16561,604 @@ def top_admin_assigned_tasks():
         sidebar_mode='manager',
         assigned_tasks_base_url_override=url_for('top_admin_assigned_tasks'),
     )
+
+
+@app.route('/project-manager/agents')
+@login_required
+def project_manager_agents():
+    if not _pm_agents_access_allowed():
+        return render_template('access_denied.html', message="You don't have access to Project Agents."), 403
+    return render_template(
+        'project_manager_agents.html',
+        title='Project Agents',
+        sidebar_mode='manager',
+        user_role='project_manager',
+    )
+
+
+@app.route('/api/project-manager/agents/bootstrap')
+@login_required
+def project_manager_agents_bootstrap():
+    if not _pm_agents_access_allowed():
+        return jsonify({'success': False, 'error': 'Access denied'}), 403
+    cur = mysql.connection.cursor(DictCursor)
+    try:
+        _ensure_pm_agent_tables(cur)
+        _ensure_default_pm_agent(cur, int(current_user.id))
+        mysql.connection.commit()
+        cur.execute(
+            """
+            SELECT id, name, instructions, trigger_mode, scope_type, llm_provider, llm_model, temperature, is_active, created_at, updated_at
+            FROM pm_agents
+            WHERE manager_user_id=%s
+            ORDER BY updated_at DESC, id DESC
+            """,
+            (int(current_user.id),),
+        )
+        agents = cur.fetchall() or []
+        for a in agents:
+            aid = int(a.get('id') or 0)
+            cur.execute(
+                """
+                SELECT source_key, is_enabled
+                FROM pm_agent_knowledge
+                WHERE agent_id=%s
+                ORDER BY id ASC
+                """,
+                (aid,),
+            )
+            a['knowledge'] = cur.fetchall() or []
+
+        projects_raw = _load_assigned_projects_for_manager(int(current_user.id)) or []
+        projects = []
+        seen = set()
+        for p in projects_raw:
+            try:
+                gid = int(p.get('g_id') or 0)
+            except Exception:
+                gid = 0
+            if not gid or gid in seen:
+                continue
+            seen.add(gid)
+            projects.append({
+                'g_id': gid,
+                'project_code': p.get('ik_project_code') or '',
+                'project_name': p.get('name') or p.get('b_name') or f"Project #{gid}",
+                'company': p.get('company') or '',
+            })
+        return jsonify({
+            'success': True,
+            'agents': agents,
+            'projects': projects,
+            'templates': [
+                {
+                    'name': 'Risk & Delay Agent',
+                    'instructions': 'Monitor checklist execution, highlight overdue risks, and propose immediate next actions.',
+                    'trigger_mode': 'manual',
+                    'scope_type': 'project',
+                    'llm_provider': 'openai',
+                    'llm_model': 'gpt-4o-mini',
+                    'temperature': 0.2,
+                    'knowledge_defaults': ['checklist', 'approvals', 'activity', 'documents'],
+                }
+            ],
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+    finally:
+        try:
+            cur.close()
+        except Exception:
+            pass
+
+
+@app.route('/api/project-manager/agents', methods=['POST'])
+@login_required
+def project_manager_agents_save():
+    if not _pm_agents_access_allowed():
+        return jsonify({'success': False, 'error': 'Access denied'}), 403
+    payload = request.get_json(silent=True) or {}
+    agent_id = payload.get('id')
+    name = str(payload.get('name') or '').strip()
+    instructions = str(payload.get('instructions') or '').strip()
+    trigger_mode = str(payload.get('trigger_mode') or 'manual').strip().lower()
+    scope_type = str(payload.get('scope_type') or 'project').strip().lower()
+    llm_provider = str(payload.get('llm_provider') or 'openai').strip().lower()
+    llm_model = str(payload.get('llm_model') or '').strip()
+    try:
+        temperature = float(payload.get('temperature') if payload.get('temperature') is not None else 0.2)
+    except Exception:
+        temperature = 0.2
+    temperature = max(0.0, min(1.0, temperature))
+    is_active = 1 if bool(payload.get('is_active', True)) else 0
+    knowledge = payload.get('knowledge') or []
+    if not name:
+        return jsonify({'success': False, 'error': 'Agent name is required'}), 400
+    if trigger_mode not in ('manual', 'event', 'schedule'):
+        trigger_mode = 'manual'
+    if scope_type not in ('project', 'department', 'portfolio'):
+        scope_type = 'project'
+    if llm_provider not in ('local_ollama', 'openai', 'rule_based'):
+        llm_provider = 'openai'
+    if llm_provider == 'local_ollama':
+        llm_provider = 'openai'
+    if not llm_model or (llm_provider == 'openai' and llm_model == 'llama3.1:8b'):
+        llm_model = 'gpt-4o-mini' if llm_provider == 'openai' else 'rule'
+    allowed_knowledge = {'checklist', 'approvals', 'activity', 'documents'}
+    clean_knowledge = [str(k).strip().lower() for k in knowledge if str(k).strip().lower() in allowed_knowledge]
+    if not clean_knowledge:
+        clean_knowledge = ['checklist']
+
+    cur = mysql.connection.cursor(DictCursor)
+    try:
+        _ensure_pm_agent_tables(cur)
+        if agent_id:
+            cur.execute(
+                """
+                UPDATE pm_agents
+                SET name=%s, instructions=%s, trigger_mode=%s, scope_type=%s, llm_provider=%s, llm_model=%s, temperature=%s, is_active=%s, updated_at=CURRENT_TIMESTAMP
+                WHERE id=%s AND manager_user_id=%s
+                """,
+                (name, instructions, trigger_mode, scope_type, llm_provider, llm_model, temperature, is_active, int(agent_id), int(current_user.id)),
+            )
+            if cur.rowcount <= 0:
+                return jsonify({'success': False, 'error': 'Agent not found'}), 404
+            saved_id = int(agent_id)
+        else:
+            # Upsert-by-name per manager to avoid duplicate key errors when re-saving defaults.
+            cur.execute(
+                """
+                SELECT id
+                FROM pm_agents
+                WHERE manager_user_id=%s AND name=%s
+                LIMIT 1
+                """,
+                (int(current_user.id), name),
+            )
+            existing = cur.fetchone() or {}
+            existing_id = int(existing.get('id') or 0)
+            if existing_id:
+                cur.execute(
+                    """
+                    UPDATE pm_agents
+                    SET instructions=%s, trigger_mode=%s, scope_type=%s, llm_provider=%s, llm_model=%s, temperature=%s, is_active=%s, updated_at=CURRENT_TIMESTAMP
+                    WHERE id=%s AND manager_user_id=%s
+                    """,
+                    (instructions, trigger_mode, scope_type, llm_provider, llm_model, temperature, is_active, existing_id, int(current_user.id)),
+                )
+                saved_id = existing_id
+            else:
+                cur.execute(
+                    """
+                    INSERT INTO pm_agents (manager_user_id, name, instructions, trigger_mode, scope_type, llm_provider, llm_model, temperature, is_active)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (int(current_user.id), name, instructions, trigger_mode, scope_type, llm_provider, llm_model, temperature, is_active),
+                )
+                saved_id = int(cur.lastrowid or 0)
+        cur.execute("DELETE FROM pm_agent_knowledge WHERE agent_id=%s", (saved_id,))
+        for key in clean_knowledge:
+            cur.execute(
+                """
+                INSERT INTO pm_agent_knowledge (agent_id, source_key, is_enabled)
+                VALUES (%s, %s, 1)
+                """,
+                (saved_id, key),
+            )
+        mysql.connection.commit()
+        return jsonify({'success': True, 'agent_id': saved_id, 'message': 'Agent saved'})
+    except Exception as e:
+        try:
+            mysql.connection.rollback()
+        except Exception:
+            pass
+        return jsonify({'success': False, 'error': str(e)}), 500
+    finally:
+        try:
+            cur.close()
+        except Exception:
+            pass
+
+
+@app.route('/api/project-manager/agents/<int:agent_id>/test', methods=['POST'])
+@login_required
+def project_manager_agents_test(agent_id: int):
+    if not _pm_agents_access_allowed():
+        return jsonify({'success': False, 'error': 'Access denied'}), 403
+    payload = request.get_json(silent=True) or {}
+    g_id = int(payload.get('g_id') or 0)
+    if g_id <= 0:
+        return jsonify({'success': False, 'error': 'Project is required'}), 400
+    cur = mysql.connection.cursor(DictCursor)
+    try:
+        _ensure_pm_agent_tables(cur)
+        cur.execute(
+            """
+            SELECT id, name, instructions, trigger_mode, scope_type, llm_provider, llm_model, temperature, is_active
+            FROM pm_agents
+            WHERE id=%s AND manager_user_id=%s
+            LIMIT 1
+            """,
+            (int(agent_id), int(current_user.id)),
+        )
+        agent = cur.fetchone() or {}
+        if not agent:
+            return jsonify({'success': False, 'error': 'Agent not found'}), 404
+        context = _build_pm_agent_project_context(int(current_user.id), int(g_id))
+        if not context:
+            return jsonify({'success': False, 'error': 'Project not found for this manager'}), 404
+        output = _run_risk_delay_agent(context)
+        cur.execute(
+            """
+            INSERT INTO pm_agent_runs (agent_id, manager_user_id, g_id, run_mode, context_json, output_json)
+            VALUES (%s, %s, %s, 'test', %s, %s)
+            """,
+            (
+                int(agent_id),
+                int(current_user.id),
+                int(g_id),
+                json.dumps(context, default=str),
+                json.dumps(output, default=str),
+            ),
+        )
+        mysql.connection.commit()
+        return jsonify({'success': True, 'output': output})
+    except Exception as e:
+        try:
+            mysql.connection.rollback()
+        except Exception:
+            pass
+        return jsonify({'success': False, 'error': str(e)}), 500
+    finally:
+        try:
+            cur.close()
+        except Exception:
+            pass
+
+
+@app.route('/api/project-manager/agents/<int:agent_id>/history')
+@login_required
+def project_manager_agents_history(agent_id: int):
+    if not _pm_agents_access_allowed():
+        return jsonify({'success': False, 'error': 'Access denied'}), 403
+    g_id = int(request.args.get('g_id') or 0)
+    if g_id <= 0:
+        return jsonify({'success': False, 'error': 'Project is required'}), 400
+    session_id = str(request.args.get('session_id') or '').strip()
+    cur = mysql.connection.cursor(DictCursor)
+    try:
+        _ensure_pm_agent_tables(cur)
+        if not session_id:
+            cur.execute(
+                """
+                SELECT session_id
+                FROM pm_agent_messages
+                WHERE agent_id=%s AND manager_user_id=%s AND g_id=%s
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (int(agent_id), int(current_user.id), int(g_id)),
+            )
+            rr = cur.fetchone() or {}
+            session_id = str(rr.get('session_id') or '').strip()
+        messages = []
+        if session_id:
+            cur.execute(
+                """
+                SELECT role, message_text, created_at
+                FROM pm_agent_messages
+                WHERE session_id=%s AND agent_id=%s AND manager_user_id=%s
+                ORDER BY id ASC
+                LIMIT 80
+                """,
+                (session_id, int(agent_id), int(current_user.id)),
+            )
+            for r in (cur.fetchall() or []):
+                messages.append({
+                    'role': r.get('role') or 'assistant',
+                    'content': r.get('message_text') or '',
+                    'created_at': str(r.get('created_at') or ''),
+                })
+        return jsonify({'success': True, 'session_id': session_id, 'messages': messages})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+    finally:
+        try:
+            cur.close()
+        except Exception:
+            pass
+
+
+@app.route('/api/project-manager/agents/<int:agent_id>/chat/clear', methods=['POST'])
+@login_required
+def project_manager_agents_chat_clear(agent_id: int):
+    if not _pm_agents_access_allowed():
+        return jsonify({'success': False, 'error': 'Access denied'}), 403
+    payload = request.get_json(silent=True) or {}
+    g_id = int(payload.get('g_id') or 0)
+    scope = str(payload.get('scope') or 'session').strip().lower()
+    session_id = str(payload.get('session_id') or '').strip()
+    if g_id <= 0:
+        return jsonify({'success': False, 'error': 'Project is required'}), 400
+    if scope not in ('session', 'project'):
+        scope = 'session'
+
+    cur = mysql.connection.cursor(DictCursor)
+    try:
+        _ensure_pm_agent_tables(cur)
+        cur.execute(
+            """
+            SELECT id
+            FROM pm_agents
+            WHERE id=%s AND manager_user_id=%s
+            LIMIT 1
+            """,
+            (int(agent_id), int(current_user.id)),
+        )
+        if not (cur.fetchone() or {}).get('id'):
+            return jsonify({'success': False, 'error': 'Agent not found'}), 404
+
+        if scope == 'session':
+            if not session_id:
+                return jsonify({'success': False, 'error': 'Session is required for session clear'}), 400
+            cur.execute(
+                """
+                DELETE FROM pm_agent_messages
+                WHERE session_id=%s AND agent_id=%s AND manager_user_id=%s AND g_id=%s
+                """,
+                (session_id, int(agent_id), int(current_user.id), int(g_id)),
+            )
+            deleted = int(cur.rowcount or 0)
+        else:
+            cur.execute(
+                """
+                DELETE FROM pm_agent_messages
+                WHERE agent_id=%s AND manager_user_id=%s AND g_id=%s
+                """,
+                (int(agent_id), int(current_user.id), int(g_id)),
+            )
+            deleted_messages = int(cur.rowcount or 0)
+            cur.execute(
+                """
+                DELETE FROM pm_agent_project_memory
+                WHERE agent_id=%s AND manager_user_id=%s AND g_id=%s
+                """,
+                (int(agent_id), int(current_user.id), int(g_id)),
+            )
+            deleted_memory = int(cur.rowcount or 0)
+            deleted = deleted_messages + deleted_memory
+        mysql.connection.commit()
+        return jsonify({'success': True, 'deleted': deleted, 'scope': scope})
+    except Exception as e:
+        try:
+            mysql.connection.rollback()
+        except Exception:
+            pass
+        return jsonify({'success': False, 'error': str(e)}), 500
+    finally:
+        try:
+            cur.close()
+        except Exception:
+            pass
+
+
+@app.route('/api/project-manager/agents/<int:agent_id>/chat', methods=['POST'])
+@login_required
+def project_manager_agents_chat(agent_id: int):
+    if not _pm_agents_access_allowed():
+        return jsonify({'success': False, 'error': 'Access denied'}), 403
+    payload = request.get_json(silent=True) or {}
+    g_id = int(payload.get('g_id') or 0)
+    message = str(payload.get('message') or '').strip()
+    session_id = str(payload.get('session_id') or '').strip()
+    if g_id <= 0:
+        return jsonify({'success': False, 'error': 'Project is required'}), 400
+    if not message:
+        return jsonify({'success': False, 'error': 'Message is required'}), 400
+    if not session_id:
+        session_id = uuid.uuid4().hex
+
+    cur = mysql.connection.cursor(DictCursor)
+    try:
+        _ensure_pm_agent_tables(cur)
+        cur.execute(
+            """
+            SELECT id, name, instructions, trigger_mode, scope_type, llm_provider, llm_model, temperature, is_active
+            FROM pm_agents
+            WHERE id=%s AND manager_user_id=%s
+            LIMIT 1
+            """,
+            (int(agent_id), int(current_user.id)),
+        )
+        agent = cur.fetchone() or {}
+        if not agent:
+            return jsonify({'success': False, 'error': 'Agent not found'}), 404
+
+        knowledge_keys = _pm_agent_fetch_knowledge_keys(cur, int(agent_id))
+        if not knowledge_keys:
+            knowledge_keys = ['checklist']
+        knowledge_context = _build_pm_agent_knowledge_context(cur, int(current_user.id), int(g_id), knowledge_keys)
+        if not knowledge_context or not (knowledge_context.get('project') or {}).get('g_id'):
+            return jsonify({'success': False, 'error': 'Project not found for this manager'}), 404
+
+        msg_lower = message.lower()
+        if msg_lower.startswith('learn:') or msg_lower.startswith('remember:') or msg_lower.startswith('save note:'):
+            learn_text = message.split(':', 1)[1].strip() if ':' in message else ''
+            if not learn_text:
+                return jsonify({'success': False, 'error': 'Provide text after learn:/remember:'}), 400
+            _pm_agent_save_project_memory(cur, int(agent_id), int(current_user.id), int(g_id), learn_text, 'user')
+            cur.execute(
+                """
+                INSERT INTO pm_agent_messages (session_id, agent_id, manager_user_id, g_id, role, message_text, context_json)
+                VALUES (%s, %s, %s, %s, 'user', %s, NULL)
+                """,
+                (session_id, int(agent_id), int(current_user.id), int(g_id), message),
+            )
+            ack = f"Saved to project memory. I will use this in future answers for project {g_id}."
+            cur.execute(
+                """
+                INSERT INTO pm_agent_messages (session_id, agent_id, manager_user_id, g_id, role, message_text, context_json)
+                VALUES (%s, %s, %s, %s, 'assistant', %s, %s)
+                """,
+                (
+                    session_id,
+                    int(agent_id),
+                    int(current_user.id),
+                    int(g_id),
+                    ack,
+                    json.dumps({'provider_used': 'memory', 'knowledge_keys': knowledge_keys}, default=str),
+                ),
+            )
+            mysql.connection.commit()
+            return jsonify({'success': True, 'session_id': session_id, 'reply': ack, 'provider_used': 'memory'})
+
+        # Prior conversation for continuity.
+        cur.execute(
+            """
+            SELECT role, message_text
+            FROM pm_agent_messages
+            WHERE session_id=%s AND agent_id=%s AND manager_user_id=%s
+            ORDER BY id DESC
+            LIMIT 16
+            """,
+            (session_id, int(agent_id), int(current_user.id)),
+        )
+        prior = list(reversed(cur.fetchall() or []))
+        long_term_memory = _pm_agent_long_term_memory_text(
+            cur,
+            int(agent_id),
+            int(current_user.id),
+            int(g_id),
+            exclude_session_id=session_id,
+        )
+        project_memory = _pm_agent_project_memory_text(
+            cur,
+            int(agent_id),
+            int(current_user.id),
+            int(g_id),
+        )
+
+        context_text = _pm_agent_context_to_text(knowledge_context)
+        system_prompt = (
+            "You are a project execution copilot for a Project Manager.\n"
+            "Hard rules:\n"
+            "1) Use ONLY provided project context and prior chat memory in this project.\n"
+            "2) Never invent task names, dates, assignees, or document contents.\n"
+            "3) If document full text is unavailable, explicitly say only metadata is available, then still answer from checklist/approvals/activity.\n"
+            "4) Prefer exact counts, task names, due dates, assignees, and statuses when available.\n\n"
+            "Response format (always):\n"
+            "- Direct Answer: 1-3 lines.\n"
+            "- Project Evidence: bullet points from context.\n"
+            "- Next Actions: concrete steps PM should take.\n\n"
+            f"Agent instructions:\n{agent.get('instructions') or ''}\n\n"
+            f"Project knowledge context:\n{context_text}\n\n"
+            f"{project_memory}\n\n"
+            f"{long_term_memory}"
+        )
+        llm_messages = [{'role': 'system', 'content': system_prompt}]
+        for r in prior:
+            role = str((r or {}).get('role') or '').strip().lower()
+            if role not in ('user', 'assistant'):
+                continue
+            llm_messages.append({'role': role, 'content': str((r or {}).get('message_text') or '')[:6000]})
+        llm_messages.append({'role': 'user', 'content': message})
+
+        provider = str(agent.get('llm_provider') or 'openai').strip().lower()
+        if provider == 'local_ollama':
+            provider = 'openai'
+        model = str(agent.get('llm_model') or '').strip()
+        if provider == 'openai' and (not model or model == 'llama3.1:8b'):
+            model = (
+                app.config.get('OPENAI_MODEL')
+                or os.getenv('OPENAI_MODEL')
+                or os.getenv('GROQ_MODEL')
+                or 'gpt-4o-mini'
+            )
+        try:
+            temperature = float(agent.get('temperature') if agent.get('temperature') is not None else 0.2)
+        except Exception:
+            temperature = 0.2
+        temperature = max(0.0, min(1.0, temperature))
+
+        assistant_reply = ""
+        provider_used = provider
+        try:
+            if provider == 'openai':
+                assistant_reply = _pm_agent_call_openai(llm_messages, model, temperature)
+            elif provider == 'rule_based':
+                assistant_reply = _pm_agent_chat_fallback_reply(str(agent.get('name') or 'Project Agent'), message, knowledge_context)
+            else:
+                assistant_reply = _pm_agent_call_openai(llm_messages, model, temperature)
+        except Exception as llm_err:
+            if provider in ('openai',):
+                msg = str(llm_err or '').strip()
+                return jsonify({
+                    'success': False,
+                    'error': f"OpenAI provider failed. Check API key/model/network. Details: {msg}",
+                    'provider_used': 'none'
+                }), 503
+            provider_used = 'fallback'
+            assistant_reply = _pm_agent_chat_fallback_reply(str(agent.get('name') or 'Project Agent'), message, knowledge_context)
+        if not assistant_reply:
+            provider_used = 'fallback'
+            assistant_reply = _pm_agent_chat_fallback_reply(str(agent.get('name') or 'Project Agent'), message, knowledge_context)
+
+        auto_learn_markers = ('correct', 'for this project', 'always', 'must', 'important')
+        if any(m in msg_lower for m in auto_learn_markers) and len(message) <= 500:
+            _pm_agent_save_project_memory(cur, int(agent_id), int(current_user.id), int(g_id), message, 'auto_user')
+
+        cur.execute(
+            """
+            INSERT INTO pm_agent_messages (session_id, agent_id, manager_user_id, g_id, role, message_text, context_json)
+            VALUES (%s, %s, %s, %s, 'user', %s, NULL)
+            """,
+            (session_id, int(agent_id), int(current_user.id), int(g_id), message),
+        )
+        cur.execute(
+            """
+            INSERT INTO pm_agent_messages (session_id, agent_id, manager_user_id, g_id, role, message_text, context_json)
+            VALUES (%s, %s, %s, %s, 'assistant', %s, %s)
+            """,
+            (
+                session_id,
+                int(agent_id),
+                int(current_user.id),
+                int(g_id),
+                assistant_reply,
+                json.dumps({'provider_used': provider_used, 'knowledge_keys': knowledge_keys}, default=str),
+            ),
+        )
+        cur.execute(
+            """
+            INSERT INTO pm_agent_runs (agent_id, manager_user_id, g_id, run_mode, context_json, output_json)
+            VALUES (%s, %s, %s, 'chat', %s, %s)
+            """,
+            (
+                int(agent_id),
+                int(current_user.id),
+                int(g_id),
+                json.dumps(knowledge_context, default=str),
+                json.dumps({'assistant': assistant_reply, 'provider_used': provider_used}, default=str),
+            ),
+        )
+        mysql.connection.commit()
+        return jsonify({
+            'success': True,
+            'session_id': session_id,
+            'reply': assistant_reply,
+            'provider_used': provider_used,
+        })
+    except Exception as e:
+        try:
+            mysql.connection.rollback()
+        except Exception:
+            pass
+        return jsonify({'success': False, 'error': str(e)}), 500
+    finally:
+        try:
+            cur.close()
+        except Exception:
+            pass
 
 
 def _render_department_manager_dashboard(restrict_team, template_name, required_role_key):
@@ -13891,7 +18089,7 @@ def business_manager_dashboard():
                 'business': 'Business Development',
                 'design': 'Design & Marketing',
                 'operations': 'Operation Team',
-                'engineer': 'Engineering Team',
+                'engineer': 'Site Engineer',
                 'handover': 'Submitted',
                 'won': 'Won',
                 'closure': 'Closure'
@@ -14247,9 +18445,6 @@ def project_manager_project_timeline_save_stages():
             continue
         seen.add(key)
         normalized.append(key)
-    if not normalized:
-        return jsonify({'ok': False, 'error': 'No stages selected'}), 400
-
     cur = mysql.connection.cursor(DictCursor)
     try:
         _ensure_project_timeline_tables(cur)
@@ -14257,28 +18452,29 @@ def project_manager_project_timeline_save_stages():
         cur.execute("DELETE FROM project_timeline_progress WHERE project_id=%s", (project_id,))
         cur.execute("DELETE FROM project_timeline_current WHERE project_id=%s", (project_id,))
         cur.execute("DELETE FROM project_timeline_stages WHERE project_id=%s", (project_id,))
-        # Insert new stages
+        # Insert selected stages (can be empty if user unchecked all)
         for idx, key in enumerate(normalized):
             stage_name = stage_name_map.get(key, key.replace('_', ' ').title())
             cur.execute(
                 "INSERT INTO project_timeline_stages (project_id, stage_name, stage_order) VALUES (%s,%s,%s)",
                 (project_id, stage_name, idx),
             )
-        # Set current stage to the first
-        cur.execute(
-            "SELECT id FROM project_timeline_stages WHERE project_id=%s ORDER BY stage_order ASC, id ASC LIMIT 1",
-            (project_id,),
-        )
-        row = cur.fetchone() or {}
-        if row.get('id'):
+        # Set current stage only when at least one stage is selected
+        if normalized:
             cur.execute(
-                """
-                INSERT INTO project_timeline_current (project_id, stage_id)
-                VALUES (%s,%s)
-                ON DUPLICATE KEY UPDATE stage_id=VALUES(stage_id)
-                """,
-                (project_id, int(row.get('id'))),
+                "SELECT id FROM project_timeline_stages WHERE project_id=%s ORDER BY stage_order ASC, id ASC LIMIT 1",
+                (project_id,),
             )
+            row = cur.fetchone() or {}
+            if row.get('id'):
+                cur.execute(
+                    """
+                    INSERT INTO project_timeline_current (project_id, stage_id)
+                    VALUES (%s,%s)
+                    ON DUPLICATE KEY UPDATE stage_id=VALUES(stage_id)
+                    """,
+                    (project_id, int(row.get('id'))),
+                )
         mysql.connection.commit()
         return jsonify({'ok': True, 'stages': normalized})
     except Exception as e:
@@ -14345,6 +18541,1088 @@ def api_assign_project_manager():
         except Exception:
             pass
         return jsonify({'ok': False, 'error': 'db', 'message': str(e)}), 500
+    finally:
+        try:
+            cur.close()
+        except Exception:
+            pass
+
+
+def _ensure_procurement_tables(cur):
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS procurement_boq_items (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            g_id INT NOT NULL,
+            project_id INT NULL,
+            item_name VARCHAR(255) NOT NULL,
+            specification TEXT NULL,
+            quantity DECIMAL(15,3) NOT NULL DEFAULT 0,
+            unit VARCHAR(50) NOT NULL DEFAULT 'Nos',
+            required_date DATE NULL,
+            estimated_cost DECIMAL(15,2) NOT NULL DEFAULT 0,
+            procurement_status VARCHAR(64) NOT NULL DEFAULT 'BOQ Created',
+            created_by INT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            INDEX idx_proc_boq_g_id (g_id),
+            INDEX idx_proc_boq_project_id (project_id),
+            INDEX idx_proc_boq_status (procurement_status)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS procurement_vendors (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            vendor_name VARCHAR(255) NOT NULL,
+            contact_person VARCHAR(150) NULL,
+            phone VARCHAR(50) NULL,
+            email VARCHAR(200) NULL,
+            address TEXT NULL,
+            created_by INT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            UNIQUE KEY uniq_proc_vendor_name (vendor_name),
+            INDEX idx_proc_vendor_email (email)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS procurement_rfq_quotes (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            boq_item_id INT NOT NULL,
+            vendor_id INT NOT NULL,
+            quoted_price DECIMAL(15,2) NOT NULL DEFAULT 0,
+            lead_time_days INT NOT NULL DEFAULT 0,
+            warranty_months INT NOT NULL DEFAULT 0,
+            remarks TEXT NULL,
+            status VARCHAR(64) NOT NULL DEFAULT 'Quotation Received',
+            created_by INT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            UNIQUE KEY uniq_proc_rfq_boq_vendor (boq_item_id, vendor_id),
+            INDEX idx_proc_rfq_boq (boq_item_id),
+            INDEX idx_proc_rfq_vendor (vendor_id),
+            INDEX idx_proc_rfq_status (status)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS procurement_purchase_orders (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            po_number VARCHAR(80) NOT NULL,
+            g_id INT NOT NULL,
+            project_id INT NULL,
+            vendor_id INT NOT NULL,
+            po_date DATE NULL,
+            total_amount DECIMAL(15,2) NOT NULL DEFAULT 0,
+            status VARCHAR(64) NOT NULL DEFAULT 'PO Created',
+            created_by INT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            UNIQUE KEY uniq_proc_po_number (po_number),
+            INDEX idx_proc_po_g_id (g_id),
+            INDEX idx_proc_po_project_id (project_id),
+            INDEX idx_proc_po_vendor (vendor_id),
+            INDEX idx_proc_po_status (status)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS procurement_po_items (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            po_id INT NOT NULL,
+            boq_item_id INT NOT NULL,
+            quantity_ordered DECIMAL(15,3) NOT NULL DEFAULT 0,
+            unit_price DECIMAL(15,2) NOT NULL DEFAULT 0,
+            line_total DECIMAL(15,2) NOT NULL DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE KEY uniq_proc_po_boq (po_id, boq_item_id),
+            INDEX idx_proc_po_items_po (po_id),
+            INDEX idx_proc_po_items_boq (boq_item_id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS procurement_deliveries (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            po_id INT NOT NULL,
+            boq_item_id INT NULL,
+            dispatch_date DATE NULL,
+            delivery_date DATE NOT NULL,
+            received_by VARCHAR(150) NULL,
+            quantity_received DECIMAL(15,3) NOT NULL DEFAULT 0,
+            remarks TEXT NULL,
+            created_by INT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            INDEX idx_proc_delivery_po (po_id),
+            INDEX idx_proc_delivery_boq (boq_item_id),
+            INDEX idx_proc_delivery_date (delivery_date)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS procurement_audit_log (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            g_id INT NULL,
+            project_id INT NULL,
+            boq_item_id INT NULL,
+            po_id INT NULL,
+            action VARCHAR(120) NOT NULL,
+            details_json TEXT NULL,
+            created_by INT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            INDEX idx_proc_audit_g (g_id),
+            INDEX idx_proc_audit_project (project_id),
+            INDEX idx_proc_audit_action (action)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+        """
+    )
+
+
+def _procurement_project_id_from_g_id(cur, g_id: int | None) -> int | None:
+    if not g_id:
+        return None
+    try:
+        cur.execute("SELECT w_id FROM win_lost_results WHERE g_id=%s LIMIT 1", (int(g_id),))
+        row = cur.fetchone() or {}
+        if row.get('w_id'):
+            return int(row.get('w_id'))
+    except Exception:
+        return None
+    return None
+
+
+def _log_procurement_action(
+    cur,
+    *,
+    action: str,
+    g_id: int | None = None,
+    project_id: int | None = None,
+    boq_item_id: int | None = None,
+    po_id: int | None = None,
+    details: dict | None = None,
+):
+    try:
+        cur.execute(
+            """
+            INSERT INTO procurement_audit_log
+                (g_id, project_id, boq_item_id, po_id, action, details_json, created_by)
+            VALUES
+                (%s, %s, %s, %s, %s, %s, %s)
+            """,
+            (
+                int(g_id) if g_id else None,
+                int(project_id) if project_id else None,
+                int(boq_item_id) if boq_item_id else None,
+                int(po_id) if po_id else None,
+                action,
+                json.dumps(details or {}, ensure_ascii=False),
+                int(getattr(current_user, 'id', 0)) if getattr(current_user, 'id', None) else None,
+            ),
+        )
+    except Exception:
+        pass
+
+
+def _compute_procurement_comparison(cur, boq_item_id: int) -> list[dict]:
+    cur.execute(
+        """
+        SELECT rq.id, rq.vendor_id, rq.quoted_price, rq.lead_time_days, rq.warranty_months, rq.remarks, rq.status,
+               v.vendor_name
+        FROM procurement_rfq_quotes rq
+        LEFT JOIN procurement_vendors v ON v.id = rq.vendor_id
+        WHERE rq.boq_item_id=%s
+        ORDER BY rq.quoted_price ASC, rq.lead_time_days ASC, rq.warranty_months DESC, rq.id ASC
+        """,
+        (int(boq_item_id),),
+    )
+    rows = cur.fetchall() or []
+    if not rows:
+        return []
+    prices = [float(r.get('quoted_price') or 0) for r in rows if (r.get('quoted_price') or 0) > 0]
+    leads = [int(r.get('lead_time_days') or 0) for r in rows if (r.get('lead_time_days') or 0) > 0]
+    warranties = [int(r.get('warranty_months') or 0) for r in rows if (r.get('warranty_months') or 0) > 0]
+    min_price = min(prices) if prices else 0.0
+    min_lead = min(leads) if leads else 0
+    max_warranty = max(warranties) if warranties else 0
+    out = []
+    for r in rows:
+        price = float(r.get('quoted_price') or 0)
+        lead = int(r.get('lead_time_days') or 0)
+        warranty = int(r.get('warranty_months') or 0)
+        price_score = ((min_price / price) * 100.0) if (price > 0 and min_price > 0) else 0.0
+        lead_score = ((min_lead / lead) * 100.0) if (lead > 0 and min_lead > 0) else 0.0
+        warranty_score = ((warranty / max_warranty) * 100.0) if (max_warranty > 0 and warranty >= 0) else 0.0
+        total_score = (price_score * 0.5) + (lead_score * 0.3) + (warranty_score * 0.2)
+        out.append({
+            'rfq_id': int(r.get('id')),
+            'vendor_id': int(r.get('vendor_id')),
+            'vendor_name': r.get('vendor_name') or f"Vendor #{r.get('vendor_id')}",
+            'quoted_price': round(price, 2),
+            'lead_time_days': lead,
+            'warranty_months': warranty,
+            'remarks': r.get('remarks') or '',
+            'status': r.get('status') or '',
+            'score': round(total_score, 2),
+        })
+    out.sort(key=lambda x: x.get('score', 0), reverse=True)
+    if out:
+        out[0]['recommended'] = True
+    return out
+
+
+def _sync_boq_procurement_status(cur, boq_item_id: int):
+    cur.execute("SELECT id, quantity FROM procurement_boq_items WHERE id=%s LIMIT 1", (int(boq_item_id),))
+    boq = cur.fetchone() or {}
+    if not boq:
+        return
+    target_qty = float(boq.get('quantity') or 0)
+
+    cur.execute("SELECT COUNT(*) AS cnt FROM procurement_rfq_quotes WHERE boq_item_id=%s", (int(boq_item_id),))
+    rfq_count = int((cur.fetchone() or {}).get('cnt') or 0)
+    cur.execute(
+        """
+        SELECT COUNT(*) AS cnt
+        FROM procurement_rfq_quotes
+        WHERE boq_item_id=%s AND LOWER(COALESCE(status,'')) IN ('vendor selected', 'selected')
+        """,
+        (int(boq_item_id),),
+    )
+    selected_count = int((cur.fetchone() or {}).get('cnt') or 0)
+    cur.execute("SELECT COUNT(*) AS cnt FROM procurement_po_items WHERE boq_item_id=%s", (int(boq_item_id),))
+    po_item_count = int((cur.fetchone() or {}).get('cnt') or 0)
+    cur.execute(
+        """
+        SELECT COALESCE(SUM(pd.quantity_received), 0) AS qty
+        FROM procurement_deliveries pd
+        LEFT JOIN procurement_po_items ppi ON ppi.po_id = pd.po_id
+        WHERE (pd.boq_item_id=%s OR ppi.boq_item_id=%s)
+        """,
+        (int(boq_item_id), int(boq_item_id)),
+    )
+    delivered_qty = float((cur.fetchone() or {}).get('qty') or 0)
+
+    status = 'BOQ Created'
+    if rfq_count > 0:
+        status = 'RFQ Sent'
+    if selected_count > 0:
+        status = 'Vendor Selected'
+    if po_item_count > 0:
+        status = 'PO Created'
+    if delivered_qty > 0:
+        status = 'Dispatched'
+    if target_qty > 0 and delivered_qty >= target_qty:
+        status = 'Delivered'
+    cur.execute("UPDATE procurement_boq_items SET procurement_status=%s WHERE id=%s", (status, int(boq_item_id)))
+
+
+def _sync_po_status(cur, po_id: int):
+    cur.execute("SELECT COALESCE(SUM(quantity_ordered),0) AS qty FROM procurement_po_items WHERE po_id=%s", (int(po_id),))
+    ordered_qty = float((cur.fetchone() or {}).get('qty') or 0)
+    cur.execute("SELECT COALESCE(SUM(quantity_received),0) AS qty FROM procurement_deliveries WHERE po_id=%s", (int(po_id),))
+    recv_qty = float((cur.fetchone() or {}).get('qty') or 0)
+    status = 'PO Created'
+    if recv_qty > 0:
+        status = 'Dispatched'
+    if ordered_qty > 0 and recv_qty >= ordered_qty:
+        status = 'Delivered'
+    cur.execute("UPDATE procurement_purchase_orders SET status=%s WHERE id=%s", (status, int(po_id)))
+
+
+def _generate_procurement_po_number(cur, g_id: int) -> str:
+    year = datetime.now(timezone.utc).strftime('%Y')
+    base = f"IKPO-{year}-{int(g_id)}-"
+    cur.execute(
+        "SELECT po_number FROM procurement_purchase_orders WHERE po_number LIKE %s ORDER BY id DESC LIMIT 1",
+        (base + '%',),
+    )
+    row = cur.fetchone() or {}
+    if not row.get('po_number'):
+        return base + '001'
+    tail = str(row.get('po_number')).split('-')[-1]
+    try:
+        nxt = int(tail) + 1
+    except Exception:
+        nxt = 1
+    return f"{base}{nxt:03d}"
+
+
+def _procurement_access_guard_for_g_id(g_id: int, write: bool = False):
+    cur = mysql.connection.cursor(DictCursor)
+    try:
+        _ensure_procurement_tables(cur)
+        project_id = _procurement_project_id_from_g_id(cur, g_id)
+    finally:
+        try:
+            cur.close()
+        except Exception:
+            pass
+
+    def _has_procurement_scope_access() -> bool:
+        try:
+            active_dept_key = (session.get('active_department_key') or '').strip().lower().replace(' ', '_')
+        except Exception:
+            active_dept_key = ''
+        if active_dept_key in ('procurement_team', 'procurement'):
+            return True
+        try:
+            access_rows = _fetch_user_access_rows(int(current_user.id))
+        except Exception:
+            access_rows = []
+        try:
+            return any(
+                ((r.get('role') or '').strip().lower() in ('manager', 'teamlead', 'team_lead', 'member'))
+                and ((r.get('department_key') or '').strip().lower() in ('procurement_team', 'procurement'))
+                for r in (access_rows or [])
+            )
+        except Exception:
+            return False
+
+    def _is_procurement_role() -> bool:
+        role_candidates = set()
+        try:
+            role_candidates.add(((get_user_role() or '') or '').strip().lower().replace('_', ' '))
+        except Exception:
+            pass
+        try:
+            role_candidates.add(((getattr(current_user, 'context_role', '') or '')).strip().lower().replace('_', ' '))
+        except Exception:
+            pass
+        try:
+            role_candidates.add(((getattr(current_user, 'role', '') or '')).strip().lower().replace('_', ' '))
+        except Exception:
+            pass
+        role_candidates = {r for r in role_candidates if r}
+        allowed = {
+            'manager',
+            'project manager',
+            'procurement manager',
+            'engineering manager',
+            'accounts manager',
+            'finance manager',
+            'teamlead',
+            'team lead',
+            'procurement team',
+            'procurement',
+        }
+        return any(r in allowed for r in role_candidates)
+
+    if write:
+        denied = _require_project_timeline_edit_access(project_id=project_id)
+        if denied:
+            if _is_procurement_role() or _has_procurement_scope_access():
+                return None
+        return denied
+    denied = _require_project_timeline_edit_access(project_id=project_id)
+    if denied:
+        if _is_procurement_role() or _has_procurement_scope_access():
+            return None
+        return denied
+    return None
+
+
+@app.route('/api/project/<int:g_id>/procurement/overview', methods=['GET'])
+@login_required
+def api_project_procurement_overview(g_id):
+    denied = _procurement_access_guard_for_g_id(int(g_id), write=False)
+    if denied:
+        return denied
+    cur = mysql.connection.cursor(DictCursor)
+    try:
+        _ensure_procurement_tables(cur)
+        _ensure_product_library_tables(cur)
+        _seed_ikio_application_products(cur)
+        project_id = _procurement_project_id_from_g_id(cur, int(g_id))
+        project_name = ''
+        project_code = ''
+        try:
+            cur.execute(
+                """
+                SELECT COALESCE(NULLIF(TRIM(ik_project_code), ''), '') AS ik_project_code,
+                       COALESCE(NULLIF(TRIM(name), ''), NULLIF(TRIM(b_name), ''), '') AS project_name
+                FROM go_bids
+                WHERE g_id=%s
+                LIMIT 1
+                """,
+                (int(g_id),),
+            )
+            prow = cur.fetchone() or {}
+            project_name = str(prow.get('project_name') or '').strip()
+            project_code = str(prow.get('ik_project_code') or '').strip()
+        except Exception:
+            project_name = ''
+            project_code = ''
+        application_area, recommended_products = _fetch_project_recommended_products(cur, project_name or project_code, limit=12)
+        cur.execute(
+            """
+            SELECT id, vendor_name, contact_person, phone, email, address
+            FROM procurement_vendors
+            ORDER BY vendor_name ASC, id DESC
+            """
+        )
+        vendors = cur.fetchall() or []
+
+        cur.execute(
+            """
+            SELECT id, g_id, project_id, item_name, specification, quantity, unit, required_date, estimated_cost, procurement_status
+            FROM procurement_boq_items
+            WHERE g_id=%s
+            ORDER BY id DESC
+            """,
+            (int(g_id),),
+        )
+        boq_rows = cur.fetchall() or []
+        boq_ids = [int(r.get('id')) for r in boq_rows if r.get('id')]
+        quotes_map = {}
+        compare_map = {}
+        if boq_ids:
+            placeholders = ",".join(["%s"] * len(boq_ids))
+            cur.execute(
+                f"""
+                SELECT rq.id, rq.boq_item_id, rq.vendor_id, rq.quoted_price, rq.lead_time_days, rq.warranty_months, rq.remarks, rq.status,
+                       v.vendor_name
+                FROM procurement_rfq_quotes rq
+                LEFT JOIN procurement_vendors v ON v.id=rq.vendor_id
+                WHERE rq.boq_item_id IN ({placeholders})
+                ORDER BY rq.quoted_price ASC, rq.id DESC
+                """,
+                tuple(boq_ids),
+            )
+            for q in (cur.fetchall() or []):
+                bid = int(q.get('boq_item_id'))
+                quotes_map.setdefault(bid, []).append({
+                    'id': q.get('id'),
+                    'vendor_id': q.get('vendor_id'),
+                    'vendor_name': q.get('vendor_name') or f"Vendor #{q.get('vendor_id')}",
+                    'quoted_price': float(q.get('quoted_price') or 0),
+                    'lead_time_days': int(q.get('lead_time_days') or 0),
+                    'warranty_months': int(q.get('warranty_months') or 0),
+                    'remarks': q.get('remarks') or '',
+                    'status': q.get('status') or '',
+                })
+            for bid in boq_ids:
+                try:
+                    compare_map[bid] = _compute_procurement_comparison(cur, int(bid))
+                except Exception:
+                    compare_map[bid] = []
+
+        cur.execute(
+            """
+            SELECT po.id, po.po_number, po.vendor_id, po.po_date, po.total_amount, po.status, v.vendor_name
+            FROM procurement_purchase_orders po
+            LEFT JOIN procurement_vendors v ON v.id = po.vendor_id
+            WHERE po.g_id=%s
+            ORDER BY po.id DESC
+            """,
+            (int(g_id),),
+        )
+        po_rows = cur.fetchall() or []
+        po_ids = [int(p.get('id')) for p in po_rows if p.get('id')]
+
+        po_items_map = {}
+        if po_ids:
+            placeholders = ",".join(["%s"] * len(po_ids))
+            cur.execute(
+                f"""
+                SELECT ppi.id, ppi.po_id, ppi.boq_item_id, ppi.quantity_ordered, ppi.unit_price, ppi.line_total,
+                       b.item_name, b.unit
+                FROM procurement_po_items ppi
+                LEFT JOIN procurement_boq_items b ON b.id = ppi.boq_item_id
+                WHERE ppi.po_id IN ({placeholders})
+                ORDER BY ppi.id ASC
+                """,
+                tuple(po_ids),
+            )
+            for it in (cur.fetchall() or []):
+                pid = int(it.get('po_id'))
+                po_items_map.setdefault(pid, []).append({
+                    'id': it.get('id'),
+                    'boq_item_id': it.get('boq_item_id'),
+                    'item_name': it.get('item_name') or '',
+                    'unit': it.get('unit') or '',
+                    'quantity_ordered': float(it.get('quantity_ordered') or 0),
+                    'unit_price': float(it.get('unit_price') or 0),
+                    'line_total': float(it.get('line_total') or 0),
+                })
+
+        deliveries = []
+        if po_ids:
+            placeholders = ",".join(["%s"] * len(po_ids))
+            cur.execute(
+                f"""
+                SELECT pd.id, pd.po_id, pd.boq_item_id, pd.dispatch_date, pd.delivery_date, pd.received_by,
+                       pd.quantity_received, pd.remarks, b.item_name, po.po_number
+                FROM procurement_deliveries pd
+                LEFT JOIN procurement_boq_items b ON b.id = pd.boq_item_id
+                LEFT JOIN procurement_purchase_orders po ON po.id = pd.po_id
+                WHERE pd.po_id IN ({placeholders})
+                ORDER BY pd.delivery_date DESC, pd.id DESC
+                """,
+                tuple(po_ids),
+            )
+            for d in (cur.fetchall() or []):
+                deliveries.append({
+                    'id': d.get('id'),
+                    'po_id': d.get('po_id'),
+                    'po_number': d.get('po_number') or '',
+                    'boq_item_id': d.get('boq_item_id'),
+                    'item_name': d.get('item_name') or '',
+                    'dispatch_date': str(d.get('dispatch_date') or ''),
+                    'delivery_date': str(d.get('delivery_date') or ''),
+                    'received_by': d.get('received_by') or '',
+                    'quantity_received': float(d.get('quantity_received') or 0),
+                    'remarks': d.get('remarks') or '',
+                })
+
+        boq_items = []
+        for r in boq_rows:
+            bid = int(r.get('id'))
+            compare = compare_map.get(bid, [])
+            status_lower = (r.get('procurement_status') or '').strip().lower()
+            owner = 'accounts_finance' if status_lower in ('delivered',) else 'procurement_team'
+            if status_lower in ('boq created',):
+                owner = 'engineering_team'
+            boq_items.append({
+                'id': bid,
+                'item_name': r.get('item_name') or '',
+                'specification': r.get('specification') or '',
+                'quantity': float(r.get('quantity') or 0),
+                'unit': r.get('unit') or '',
+                'required_date': str(r.get('required_date') or ''),
+                'estimated_cost': float(r.get('estimated_cost') or 0),
+                'procurement_status': r.get('procurement_status') or 'BOQ Created',
+                'department_owner': owner,
+                'rfq_quotes': quotes_map.get(bid, []),
+                'comparison': compare,
+                'recommended_vendor_id': compare[0].get('vendor_id') if compare else None,
+            })
+
+        purchase_orders = []
+        for po in po_rows:
+            purchase_orders.append({
+                'id': po.get('id'),
+                'po_number': po.get('po_number') or '',
+                'vendor_id': po.get('vendor_id'),
+                'vendor_name': po.get('vendor_name') or '',
+                'po_date': str(po.get('po_date') or ''),
+                'total_amount': float(po.get('total_amount') or 0),
+                'status': po.get('status') or 'PO Created',
+                'department_owner': 'accounts_finance' if (po.get('status') or '').lower() in ('delivered',) else 'procurement_team',
+                'items': po_items_map.get(int(po.get('id')), []),
+            })
+
+        kpis = {
+            'boq_total': len(boq_items),
+            'rfq_sent': len([b for b in boq_items if (b.get('procurement_status') or '').lower() == 'rfq sent']),
+            'vendor_selected': len([b for b in boq_items if (b.get('procurement_status') or '').lower() == 'vendor selected']),
+            'po_created': len([b for b in boq_items if (b.get('procurement_status') or '').lower() == 'po created']),
+            'dispatched': len([b for b in boq_items if (b.get('procurement_status') or '').lower() == 'dispatched']),
+            'delivered': len([b for b in boq_items if (b.get('procurement_status') or '').lower() == 'delivered']),
+        }
+        phases = [
+            {'phase': 'BOQ Created', 'owner': 'engineering_team'},
+            {'phase': 'RFQ Sent', 'owner': 'procurement_team'},
+            {'phase': 'Vendor Selected', 'owner': 'procurement_team'},
+            {'phase': 'PO Created', 'owner': 'accounts_finance'},
+            {'phase': 'Dispatched', 'owner': 'procurement_team'},
+            {'phase': 'Delivered', 'owner': 'accounts_finance'},
+        ]
+        return jsonify({
+            'ok': True,
+            'g_id': int(g_id),
+            'project_id': int(project_id) if project_id else None,
+            'project_overview': {
+                'project_name': project_name,
+                'project_code': project_code,
+                'application_area': application_area,
+            },
+            'recommended_products': recommended_products,
+            'vendors': vendors,
+            'boq_items': boq_items,
+            'purchase_orders': purchase_orders,
+            'deliveries': deliveries,
+            'kpis': kpis,
+            'department_phases': phases,
+        })
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+    finally:
+        try:
+            cur.close()
+        except Exception:
+            pass
+
+
+@app.route('/api/project/<int:g_id>/procurement/boq/create', methods=['POST'])
+@login_required
+def api_procurement_boq_create(g_id):
+    denied = _procurement_access_guard_for_g_id(int(g_id), write=True)
+    if denied:
+        return denied
+    item_name = (request.form.get('item_name') or '').strip()
+    specification = (request.form.get('specification') or '').strip()
+    unit = (request.form.get('unit') or 'Nos').strip() or 'Nos'
+    required_date = (request.form.get('required_date') or '').strip() or None
+    try:
+        qty = float(request.form.get('quantity') or 0)
+    except Exception:
+        qty = 0.0
+    try:
+        estimated_cost = float(request.form.get('estimated_cost') or 0)
+    except Exception:
+        estimated_cost = 0.0
+    if not item_name:
+        return jsonify({'ok': False, 'error': 'item_name_required'}), 400
+    if qty <= 0:
+        return jsonify({'ok': False, 'error': 'quantity_must_be_positive'}), 400
+    cur = mysql.connection.cursor(DictCursor)
+    try:
+        _ensure_procurement_tables(cur)
+        project_id = _procurement_project_id_from_g_id(cur, int(g_id))
+        cur.execute(
+            """
+            INSERT INTO procurement_boq_items
+                (g_id, project_id, item_name, specification, quantity, unit, required_date, estimated_cost, procurement_status, created_by)
+            VALUES
+                (%s, %s, %s, %s, %s, %s, %s, %s, 'BOQ Created', %s)
+            """,
+            (
+                int(g_id),
+                int(project_id) if project_id else None,
+                item_name,
+                specification or None,
+                qty,
+                unit,
+                required_date,
+                estimated_cost,
+                int(current_user.id),
+            ),
+        )
+        boq_id = int(cur.lastrowid or 0)
+        _log_procurement_action(
+            cur,
+            action='boq_created',
+            g_id=int(g_id),
+            project_id=project_id,
+            boq_item_id=boq_id,
+            details={'item_name': item_name, 'quantity': qty, 'unit': unit},
+        )
+        mysql.connection.commit()
+        return jsonify({'ok': True, 'boq_item_id': boq_id})
+    except Exception as e:
+        try:
+            mysql.connection.rollback()
+        except Exception:
+            pass
+        return jsonify({'ok': False, 'error': str(e)}), 500
+    finally:
+        try:
+            cur.close()
+        except Exception:
+            pass
+
+
+@app.route('/api/project/<int:g_id>/procurement/vendor/upsert', methods=['POST'])
+@login_required
+def api_procurement_vendor_upsert(g_id):
+    denied = _procurement_access_guard_for_g_id(int(g_id), write=True)
+    if denied:
+        return denied
+    vendor_name = (request.form.get('vendor_name') or '').strip()
+    contact_person = (request.form.get('contact_person') or '').strip()
+    phone = (request.form.get('phone') or '').strip()
+    email = (request.form.get('email') or '').strip().lower()
+    address = (request.form.get('address') or '').strip()
+    if not vendor_name:
+        return jsonify({'ok': False, 'error': 'vendor_name_required'}), 400
+    cur = mysql.connection.cursor(DictCursor)
+    try:
+        _ensure_procurement_tables(cur)
+        cur.execute("SELECT id FROM procurement_vendors WHERE LOWER(TRIM(vendor_name))=LOWER(TRIM(%s)) LIMIT 1", (vendor_name,))
+        row = cur.fetchone() or {}
+        vendor_id = row.get('id')
+        if vendor_id:
+            cur.execute(
+                """
+                UPDATE procurement_vendors
+                SET contact_person=%s, phone=%s, email=%s, address=%s, updated_at=CURRENT_TIMESTAMP
+                WHERE id=%s
+                """,
+                (contact_person or None, phone or None, email or None, address or None, int(vendor_id)),
+            )
+            action = 'vendor_updated'
+        else:
+            cur.execute(
+                """
+                INSERT INTO procurement_vendors (vendor_name, contact_person, phone, email, address, created_by)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                """,
+                (vendor_name, contact_person or None, phone or None, email or None, address or None, int(current_user.id)),
+            )
+            vendor_id = int(cur.lastrowid or 0)
+            action = 'vendor_created'
+        project_id = _procurement_project_id_from_g_id(cur, int(g_id))
+        _log_procurement_action(
+            cur,
+            action=action,
+            g_id=int(g_id),
+            project_id=project_id,
+            details={'vendor_id': vendor_id, 'vendor_name': vendor_name},
+        )
+        mysql.connection.commit()
+        return jsonify({'ok': True, 'vendor_id': int(vendor_id)})
+    except Exception as e:
+        try:
+            mysql.connection.rollback()
+        except Exception:
+            pass
+        return jsonify({'ok': False, 'error': str(e)}), 500
+    finally:
+        try:
+            cur.close()
+        except Exception:
+            pass
+
+
+@app.route('/api/project/<int:g_id>/procurement/rfq/add', methods=['POST'])
+@login_required
+def api_procurement_rfq_add(g_id):
+    denied = _procurement_access_guard_for_g_id(int(g_id), write=True)
+    if denied:
+        return denied
+    try:
+        boq_item_id = int(request.form.get('boq_item_id') or 0)
+        vendor_id = int(request.form.get('vendor_id') or 0)
+    except Exception:
+        return jsonify({'ok': False, 'error': 'invalid_boq_or_vendor'}), 400
+    try:
+        quoted_price = float(request.form.get('quoted_price') or 0)
+    except Exception:
+        quoted_price = 0.0
+    try:
+        lead_time_days = int(request.form.get('lead_time_days') or 0)
+    except Exception:
+        lead_time_days = 0
+    try:
+        warranty_months = int(request.form.get('warranty_months') or 0)
+    except Exception:
+        warranty_months = 0
+    remarks = (request.form.get('remarks') or '').strip()
+    status = (request.form.get('status') or 'Quotation Received').strip() or 'Quotation Received'
+    if quoted_price <= 0:
+        return jsonify({'ok': False, 'error': 'quoted_price_must_be_positive'}), 400
+    cur = mysql.connection.cursor(DictCursor)
+    try:
+        _ensure_procurement_tables(cur)
+        cur.execute("SELECT id, project_id FROM procurement_boq_items WHERE id=%s AND g_id=%s LIMIT 1", (boq_item_id, int(g_id)))
+        boq_row = cur.fetchone() or {}
+        if not boq_row.get('id'):
+            return jsonify({'ok': False, 'error': 'boq_not_found'}), 404
+        cur.execute("SELECT id FROM procurement_vendors WHERE id=%s LIMIT 1", (vendor_id,))
+        if not (cur.fetchone() or {}).get('id'):
+            return jsonify({'ok': False, 'error': 'vendor_not_found'}), 404
+        cur.execute(
+            """
+            INSERT INTO procurement_rfq_quotes
+                (boq_item_id, vendor_id, quoted_price, lead_time_days, warranty_months, remarks, status, created_by)
+            VALUES
+                (%s, %s, %s, %s, %s, %s, %s, %s)
+            ON DUPLICATE KEY UPDATE
+                quoted_price=VALUES(quoted_price),
+                lead_time_days=VALUES(lead_time_days),
+                warranty_months=VALUES(warranty_months),
+                remarks=VALUES(remarks),
+                status=VALUES(status),
+                updated_at=CURRENT_TIMESTAMP
+            """,
+            (boq_item_id, vendor_id, quoted_price, lead_time_days, warranty_months, remarks or None, status, int(current_user.id)),
+        )
+        _sync_boq_procurement_status(cur, boq_item_id)
+        _log_procurement_action(
+            cur,
+            action='rfq_added',
+            g_id=int(g_id),
+            project_id=int(boq_row.get('project_id')) if boq_row.get('project_id') else None,
+            boq_item_id=boq_item_id,
+            details={'vendor_id': vendor_id, 'quoted_price': quoted_price, 'status': status},
+        )
+        mysql.connection.commit()
+        return jsonify({'ok': True})
+    except Exception as e:
+        try:
+            mysql.connection.rollback()
+        except Exception:
+            pass
+        return jsonify({'ok': False, 'error': str(e)}), 500
+    finally:
+        try:
+            cur.close()
+        except Exception:
+            pass
+
+
+@app.route('/api/project/<int:g_id>/procurement/boq/<int:boq_item_id>/compare', methods=['GET'])
+@login_required
+def api_procurement_compare(g_id, boq_item_id):
+    denied = _procurement_access_guard_for_g_id(int(g_id), write=False)
+    if denied:
+        return denied
+    cur = mysql.connection.cursor(DictCursor)
+    try:
+        _ensure_procurement_tables(cur)
+        cur.execute("SELECT id FROM procurement_boq_items WHERE id=%s AND g_id=%s LIMIT 1", (int(boq_item_id), int(g_id)))
+        if not (cur.fetchone() or {}).get('id'):
+            return jsonify({'ok': False, 'error': 'boq_not_found'}), 404
+        rows = _compute_procurement_comparison(cur, int(boq_item_id))
+        return jsonify({'ok': True, 'comparison': rows})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+    finally:
+        try:
+            cur.close()
+        except Exception:
+            pass
+
+
+@app.route('/api/project/<int:g_id>/procurement/po/create', methods=['POST'])
+@login_required
+def api_procurement_po_create(g_id):
+    denied = _procurement_access_guard_for_g_id(int(g_id), write=True)
+    if denied:
+        return denied
+    vendor_raw = (request.form.get('vendor_id') or '').strip()
+    vendor_id = None
+    if vendor_raw:
+        try:
+            vendor_id = int(vendor_raw)
+            if vendor_id <= 0:
+                return jsonify({'ok': False, 'error': 'invalid_vendor'}), 400
+        except Exception:
+            return jsonify({'ok': False, 'error': 'invalid_vendor'}), 400
+    po_number = (request.form.get('po_number') or '').strip()
+    po_date = (request.form.get('po_date') or '').strip() or None
+    boq_ids_raw = (request.form.get('boq_item_ids') or '').strip()
+    boq_ids = []
+    if boq_ids_raw:
+        for p in re.split(r'[,\s]+', boq_ids_raw):
+            if not p:
+                continue
+            try:
+                boq_ids.append(int(p))
+            except Exception:
+                continue
+    cur = mysql.connection.cursor(DictCursor)
+    try:
+        _ensure_procurement_tables(cur)
+        project_id = _procurement_project_id_from_g_id(cur, int(g_id))
+        # If BOQ ids are omitted, use all BOQ items for this project.
+        if not boq_ids:
+            cur.execute(
+                "SELECT id FROM procurement_boq_items WHERE g_id=%s ORDER BY id ASC",
+                (int(g_id),),
+            )
+            boq_ids = [int(r.get('id')) for r in (cur.fetchall() or []) if r.get('id')]
+
+        # If vendor is omitted, infer from RFQ quotes:
+        # prefer vendor with most "vendor selected" hits, then most total hits.
+        if not vendor_id and boq_ids:
+            placeholders = ",".join(["%s"] * len(boq_ids))
+            cur.execute(
+                f"""
+                SELECT
+                    vendor_id,
+                    SUM(CASE WHEN LOWER(COALESCE(status,'')) IN ('vendor selected', 'selected') THEN 1 ELSE 0 END) AS selected_hits,
+                    COUNT(*) AS total_hits
+                FROM procurement_rfq_quotes
+                WHERE boq_item_id IN ({placeholders})
+                GROUP BY vendor_id
+                ORDER BY selected_hits DESC, total_hits DESC, vendor_id ASC
+                LIMIT 1
+                """,
+                tuple(boq_ids),
+            )
+            rr = cur.fetchone() or {}
+            if rr.get('vendor_id'):
+                vendor_id = int(rr.get('vendor_id'))
+
+        if not vendor_id:
+            return jsonify({'ok': False, 'error': 'vendor_required_or_infer_failed'}), 400
+
+        cur.execute("SELECT id FROM procurement_vendors WHERE id=%s LIMIT 1", (int(vendor_id),))
+        vrow = cur.fetchone() or {}
+        if not vrow.get('id'):
+            return jsonify({'ok': False, 'error': 'vendor_not_found'}), 404
+
+        if not po_number:
+            po_number = _generate_procurement_po_number(cur, int(g_id))
+
+        if not boq_ids:
+            return jsonify({'ok': False, 'error': 'no_boq_items_selected'}), 400
+        total_amount = 0.0
+        line_items = []
+        for boq_id in boq_ids:
+            cur.execute(
+                "SELECT id, quantity FROM procurement_boq_items WHERE id=%s AND g_id=%s LIMIT 1",
+                (int(boq_id), int(g_id)),
+            )
+            b = cur.fetchone() or {}
+            if not b.get('id'):
+                continue
+            cur.execute(
+                """
+                SELECT quoted_price
+                FROM procurement_rfq_quotes
+                WHERE boq_item_id=%s AND vendor_id=%s
+                ORDER BY CASE WHEN LOWER(COALESCE(status,'')) IN ('vendor selected', 'selected') THEN 0 ELSE 1 END, quoted_price ASC, id DESC
+                LIMIT 1
+                """,
+                (int(boq_id), int(vendor_id)),
+            )
+            qr = cur.fetchone() or {}
+            unit_price = float(qr.get('quoted_price') or 0)
+            qty = float(b.get('quantity') or 0)
+            # Fallback when quote is missing: derive from estimated BOQ cost.
+            if unit_price <= 0:
+                try:
+                    cur.execute(
+                        "SELECT estimated_cost FROM procurement_boq_items WHERE id=%s LIMIT 1",
+                        (int(boq_id),),
+                    )
+                    est = float((cur.fetchone() or {}).get('estimated_cost') or 0)
+                except Exception:
+                    est = 0.0
+                if qty > 0 and est > 0:
+                    unit_price = est / qty
+            line_total = round(qty * unit_price, 2)
+            total_amount += line_total
+            line_items.append((int(boq_id), qty, unit_price, line_total))
+        if not line_items:
+            return jsonify({'ok': False, 'error': 'no_valid_line_items'}), 400
+        cur.execute(
+            """
+            INSERT INTO procurement_purchase_orders
+                (po_number, g_id, project_id, vendor_id, po_date, total_amount, status, created_by)
+            VALUES
+                (%s, %s, %s, %s, %s, %s, 'PO Created', %s)
+            """,
+            (po_number, int(g_id), int(project_id) if project_id else None, int(vendor_id), po_date, total_amount, int(current_user.id)),
+        )
+        po_id = int(cur.lastrowid or 0)
+        for boq_id, qty, unit_price, line_total in line_items:
+            cur.execute(
+                "INSERT INTO procurement_po_items (po_id, boq_item_id, quantity_ordered, unit_price, line_total) VALUES (%s, %s, %s, %s, %s)",
+                (po_id, boq_id, qty, unit_price, line_total),
+            )
+            cur.execute(
+                "UPDATE procurement_rfq_quotes SET status='Vendor Selected', updated_at=CURRENT_TIMESTAMP WHERE boq_item_id=%s AND vendor_id=%s",
+                (boq_id, int(vendor_id)),
+            )
+            _sync_boq_procurement_status(cur, boq_id)
+        _sync_po_status(cur, po_id)
+        _log_procurement_action(
+            cur,
+            action='po_created',
+            g_id=int(g_id),
+            project_id=project_id,
+            po_id=po_id,
+            details={'po_number': po_number, 'vendor_id': int(vendor_id), 'line_items': boq_ids, 'total_amount': total_amount},
+        )
+        mysql.connection.commit()
+        return jsonify({'ok': True, 'po_id': po_id, 'po_number': po_number})
+    except Exception as e:
+        try:
+            mysql.connection.rollback()
+        except Exception:
+            pass
+        return jsonify({'ok': False, 'error': str(e)}), 500
+    finally:
+        try:
+            cur.close()
+        except Exception:
+            pass
+
+
+@app.route('/api/project/<int:g_id>/procurement/po/<int:po_id>/delivery', methods=['POST'])
+@login_required
+def api_procurement_add_delivery(g_id, po_id):
+    denied = _procurement_access_guard_for_g_id(int(g_id), write=True)
+    if denied:
+        return denied
+    try:
+        boq_item_id = int(request.form.get('boq_item_id') or 0) if (request.form.get('boq_item_id') or '').strip() else None
+    except Exception:
+        boq_item_id = None
+    dispatch_date = (request.form.get('dispatch_date') or '').strip() or None
+    delivery_date = (request.form.get('delivery_date') or '').strip() or datetime.utcnow().strftime('%Y-%m-%d')
+    received_by = (request.form.get('received_by') or '').strip()
+    remarks = (request.form.get('remarks') or '').strip()
+    try:
+        quantity_received = float(request.form.get('quantity_received') or 0)
+    except Exception:
+        quantity_received = 0.0
+    if quantity_received <= 0:
+        return jsonify({'ok': False, 'error': 'quantity_received_must_be_positive'}), 400
+    cur = mysql.connection.cursor(DictCursor)
+    try:
+        _ensure_procurement_tables(cur)
+        cur.execute("SELECT id, project_id FROM procurement_purchase_orders WHERE id=%s AND g_id=%s LIMIT 1", (int(po_id), int(g_id)))
+        po = cur.fetchone() or {}
+        if not po.get('id'):
+            return jsonify({'ok': False, 'error': 'po_not_found'}), 404
+        if boq_item_id:
+            cur.execute("SELECT id FROM procurement_po_items WHERE po_id=%s AND boq_item_id=%s LIMIT 1", (int(po_id), int(boq_item_id)))
+            if not (cur.fetchone() or {}).get('id'):
+                return jsonify({'ok': False, 'error': 'boq_item_not_in_po'}), 400
+        cur.execute(
+            """
+            INSERT INTO procurement_deliveries
+                (po_id, boq_item_id, dispatch_date, delivery_date, received_by, quantity_received, remarks, created_by)
+            VALUES
+                (%s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            (
+                int(po_id),
+                int(boq_item_id) if boq_item_id else None,
+                dispatch_date,
+                delivery_date,
+                received_by or None,
+                quantity_received,
+                remarks or None,
+                int(current_user.id),
+            ),
+        )
+        if boq_item_id:
+            _sync_boq_procurement_status(cur, int(boq_item_id))
+        else:
+            cur.execute("SELECT boq_item_id FROM procurement_po_items WHERE po_id=%s", (int(po_id),))
+            for rr in (cur.fetchall() or []):
+                if rr.get('boq_item_id'):
+                    _sync_boq_procurement_status(cur, int(rr.get('boq_item_id')))
+        _sync_po_status(cur, int(po_id))
+        _log_procurement_action(
+            cur,
+            action='delivery_added',
+            g_id=int(g_id),
+            project_id=int(po.get('project_id')) if po.get('project_id') else None,
+            po_id=int(po_id),
+            boq_item_id=int(boq_item_id) if boq_item_id else None,
+            details={'quantity_received': quantity_received, 'delivery_date': delivery_date},
+        )
+        mysql.connection.commit()
+        return jsonify({'ok': True})
+    except Exception as e:
+        try:
+            mysql.connection.rollback()
+        except Exception:
+            pass
+        return jsonify({'ok': False, 'error': str(e)}), 500
     finally:
         try:
             cur.close()
@@ -14750,26 +20028,7 @@ def business_manager_update_company():
 
         cur.execute("UPDATE go_bids SET company=%s WHERE g_id=%s", (company_name, g_id))
 
-        # Ensure this bid is ready for parallel work across departments by seeding
-        # default checklists for all department stages (if missing).
-        try:
-            team_stages = ['engineering_team', 'procurement_team', 'accounts_finance']
-            for st in team_stages:
-                cur.execute(
-                    """
-                    SELECT 1
-                    FROM bid_checklists
-                    WHERE g_id = %s AND LOWER(COALESCE(stage,'')) = %s
-                    LIMIT 1
-                    """,
-                    (g_id, st),
-                )
-                exists = cur.fetchone() is not None
-                if not exists:
-                    generate_team_checklist(cur, g_id, st)
-        except Exception:
-            # Best effort only; company update should still succeed even if seeding fails.
-            pass
+        # No auto-seeding: bid tasks are created explicitly by users.
 
         try:
             cur.execute("SELECT b_name FROM go_bids WHERE g_id=%s", (g_id,))
@@ -14894,6 +20153,57 @@ def operation_manager_dashboard():
 @login_required
 def site_manager_dashboard():
     return _render_department_manager_dashboard('engineer', 'site_manager_dashboard.html', 'site_manager')
+
+
+@app.route('/procurement-manager-dashboard')
+@login_required
+def procurement_manager_dashboard():
+    """Procurement manager lands on Procurement workflow dashboard."""
+    return redirect(url_for('team_dashboard', team='procurement_team'))
+
+
+@app.route('/engineering-manager-dashboard')
+@login_required
+def engineering_manager_dashboard():
+    """Engineering scope landing for both Site Engineer and Engineering Team managers."""
+    target_team = 'engineering_team'
+    role_hint = (get_user_role() or '').strip().lower().replace('_', ' ')
+    email_hint = (getattr(current_user, 'email', '') or '').strip().lower()
+
+    # Site Engineer scope must never be redirected into Engineering Team scope.
+    if role_hint in ('site manager', 'site engineer', 'site_engineer', 'engineer') or 'sitemgr@' in email_hint:
+        target_team = 'engineer'
+    else:
+        try:
+            access_rows = _fetch_user_access_rows(int(current_user.id))
+        except Exception:
+            access_rows = []
+        mapped_teams = set()
+        for row in (access_rows or []):
+            if (row.get('role') or '').strip().lower() != 'manager':
+                continue
+            mapped = _team_key_from_access(row.get('department_key'))
+            if mapped in ('engineer', 'engineering_team'):
+                mapped_teams.add(mapped)
+        if 'engineer' in mapped_teams:
+            target_team = 'engineer'
+        elif 'engineering_team' in mapped_teams:
+            target_team = 'engineering_team'
+        else:
+            try:
+                dept_from_session = _normalize_department_key(session.get('active_department_key'))
+            except Exception:
+                dept_from_session = None
+            if dept_from_session in ('engineer', 'engineering_team'):
+                target_team = dept_from_session
+    return redirect(url_for('manager_assigned_tasks', team=target_team))
+
+
+@app.route('/accounts-manager-dashboard')
+@login_required
+def accounts_manager_dashboard():
+    """Accounts/Finance manager lands on approval-first accounts dashboard."""
+    return redirect(url_for('team_dashboard', team='accounts_finance'))
 @app.route('/member/dashboard')
 @login_required
 def employee_dashboard_member():
@@ -14907,7 +20217,7 @@ def employee_dashboard_member():
             return redirect(url_for('top_admin_overview'))
         if role_norm in ('manager', 'supervisor'):
             return redirect(url_for('manager_dashboard'))
-        if role_norm in ('teamlead', 'team lead', 'business dev', 'design', 'operations', 'site engineer', 'engineering'):
+        if role_norm in ('teamlead', 'team lead', 'business dev', 'design', 'operations', 'site engineer', 'engineering', 'procurement', 'procurement team'):
             dept_key = None
             try:
                 dept_key = session.get('active_department_key') or None
@@ -14927,6 +20237,12 @@ def employee_dashboard_member():
                 'engineering': 'engineer',
                 'site_engineer': 'engineer',
                 'site_engineering': 'engineer',
+                'engineering_team': 'engineering_team',
+                'procurement': 'procurement_team',
+                'procurement_team': 'procurement_team',
+                'accounts': 'accounts_finance',
+                'finance': 'accounts_finance',
+                'accounts_finance': 'accounts_finance',
             }
             team_key = team_map.get(dept_key, 'business')
             return redirect(url_for('team_lead_assigned_tasks', team=team_key))
@@ -15080,8 +20396,26 @@ def employee_dashboard_member():
 def team_dashboard(team):
     """Team-specific dashboard for Business Dev, Design, Operations, Site Manager"""
     # Check permissions for team dashboard access
-    user_role = getattr(current_user, 'role', 'member').lower()
-    user_role_norm = user_role.replace('_', ' ')
+    db_role_raw = (getattr(current_user, 'role', 'member') or 'member').strip().lower()
+    db_role_norm = db_role_raw.replace('_', ' ')
+    # Prefer request-scoped role (computed from user_company_access + active context).
+    effective_role_raw = (
+        getattr(current_user, 'context_role', None)
+        or get_user_role()
+        or db_role_raw
+    )
+    effective_role_norm = _normalize_role_key(effective_role_raw)
+    role_labels = {
+        (db_role_norm or '').strip().lower(),
+        (effective_role_norm or '').strip().lower().replace('_', ' '),
+    }
+    role_keys = {
+        (db_role_raw or '').strip().lower(),
+        (effective_role_norm or '').strip().lower().replace(' ', '_'),
+    }
+    user_role = effective_role_norm
+    user_role_norm = (effective_role_norm or '').replace('_', ' ')
+    active_dept_key = (session.get('active_department_key') or '').strip().lower().replace(' ', '_')
     embed_mode = (request.args.get('embed') or '').strip().lower()
     # Embedded manager dashboards can pass flags to control extra columns.
     embed_mode_bool = bool(embed_mode)
@@ -15108,15 +20442,44 @@ def team_dashboard(team):
         'operation_manager': 'operations',
         'operations_manager': 'operations',
         'site_manager': 'engineer',
+        'engineering_manager': 'engineering_team',
+        'engineering manager': 'engineering_team',
+        'accounts_manager': 'accounts_finance',
+        'accounts manager': 'accounts_finance',
+        'finance_manager': 'accounts_finance',
+        'finance manager': 'accounts_finance',
+        'procurement_manager': 'procurement_team',
+        'procurement manager': 'procurement_team',
     }
-    if (not current_user.is_admin and not current_user.is_supervisor) and user_role in dept_manager_team and team != dept_manager_team[user_role]:
-        return render_template('access_denied.html', message="You don't have access to this team dashboard."), 403
+    if not current_user.is_admin and not current_user.is_supervisor:
+        for rk in role_keys:
+            mapped_team = dept_manager_team.get(rk)
+            if mapped_team and team != mapped_team:
+                return render_template('access_denied.html', message="You don't have access to this team dashboard."), 403
     
     # Allow admins and supervisors to access all team dashboards
     if not (current_user.is_admin or current_user.is_supervisor):
         # Check if user has team_management or company_dashboards permission
-        permissions = get_user_module_permissions(user_role, user_id=int(current_user.id))
-        if not (permissions.get('team_management', False) or permissions.get('company_dashboards', False)):
+        permissions = get_user_module_permissions(effective_role_norm, user_id=int(current_user.id))
+        # Procurement managers should be able to open procurement team dashboard even if
+        # generic team_management/company_dashboards toggles are off.
+        has_procurement_scope = False
+        try:
+            access_rows = _fetch_user_access_rows(int(current_user.id))
+            has_procurement_scope = any(
+                ((r.get('role') or '').strip().lower() == 'manager')
+                and ((r.get('department_key') or '').strip().lower() in ('procurement_team', 'procurement'))
+                for r in (access_rows or [])
+            )
+        except Exception:
+            has_procurement_scope = False
+        if active_dept_key in ('procurement_team', 'procurement'):
+            has_procurement_scope = True
+        if not (
+            permissions.get('team_management', False)
+            or permissions.get('company_dashboards', False)
+            or (team == 'procurement_team' and (has_procurement_scope or ('procurement manager' in role_labels)))
+        ):
             return render_template('access_denied.html', message="You don't have access to team dashboards. Please contact your IT Administrator.")
     
     # Additional check: team leads can only access their own team's dashboard
@@ -15124,15 +20487,26 @@ def team_dashboard(team):
         'business': ['business dev', 'business development'],
         'design': ['design'],
         'operations': ['operations'],
-        'engineer': ['site_engineer', 'site engineer', 'site manager', 'engineering']
+        'engineer': ['site_engineer', 'site engineer', 'site manager', 'engineering'],
+        'engineering_team': ['engineering_team', 'engineering team', 'engineering_manager', 'engineering manager'],
+        'accounts_finance': ['accounts_finance', 'accounts finance', 'accounts & finance', 'accounts_manager', 'accounts manager', 'finance_manager', 'finance manager', 'finance', 'accounting'],
+        'procurement_team': ['procurement', 'procurement team', 'procurement_manager', 'procurement manager'],
     }
     
     if not current_user.is_admin and not current_user.is_supervisor:
         allowed_roles = team_role_map.get(team, [])
         allowed_roles_norm = [r.replace('_', ' ') for r in allowed_roles]
-        if user_role_norm not in allowed_roles_norm and user_role_norm not in ['manager', 'top_level_admin', 'top level admin', 'business manager', 'design manager', 'operation manager', 'operations manager', 'site manager']:
+        broad_roles = {
+            'manager', 'top level admin', 'business manager', 'design manager',
+            'operation manager', 'operations manager', 'site manager',
+            'procurement manager', 'engineering manager', 'accounts manager', 'finance manager'
+        }
+        has_allowed_role = any((lbl in allowed_roles_norm) or (lbl in broad_roles) for lbl in role_labels)
+        if team == 'procurement_team' and (has_procurement_scope or active_dept_key in ('procurement_team', 'procurement')):
+            has_allowed_role = True
+        if not has_allowed_role:
             # Check if they have general access via permissions
-            permissions = get_user_module_permissions(user_role, user_id=int(current_user.id))
+            permissions = get_user_module_permissions(effective_role_norm, user_id=int(current_user.id))
             if not permissions.get('company_dashboards', False):
                 return render_template('access_denied.html', message=f"You don't have access to the {team.title()} team dashboard.")
     
@@ -15147,13 +20521,103 @@ def team_dashboard(team):
         'business': 'business',
         'design': 'design', 
         'operations': 'operations',
-        'engineer': 'engineer'
+        'engineer': 'engineer',
+        'engineering_team': 'engineering_team',
+        'accounts_finance': 'accounts_finance',
+        'procurement_team': 'procurement_team',
     }
     
     if team not in team_to_stage:
         return "Invalid team", 404
     
     current_stage = team_to_stage[team]
+
+    # Fast path: accounts dashboard does not need the full bid-stage pipeline.
+    # Load only estimate approval data to keep navigation/actions responsive.
+    if team == 'accounts_finance':
+        role_raw = (get_user_role() or getattr(current_user, 'role', '') or '').strip().lower().replace('_', ' ')
+        can_submit_project_estimate = bool(
+            current_user.is_admin
+            or current_user.is_supervisor
+            or role_raw in ('project manager', 'manager', 'accounts manager', 'finance manager')
+        )
+        can_approve_project_estimate = bool(
+            current_user.is_admin
+            or current_user.is_supervisor
+            or role_raw in ('manager', 'accounts manager', 'finance manager')
+        )
+        estimate_items = []
+        finance_portfolio_items = []
+        finance_portfolio_totals = []
+        finance_metrics_by_gid = {}
+        try:
+            cur = mysql.connection.cursor(DictCursor)
+            company_sql_clause, company_params = _company_filter_for_go_bids(cur)
+            estimate_items = _load_accounts_finance_estimate_items(cur, company_sql_clause, company_params)
+            finance_portfolio_items, finance_portfolio_totals = _load_accounts_finance_portfolio_items(cur, estimate_items)
+            finance_metrics_by_gid = {int(r.get('g_id') or 0): r for r in (finance_portfolio_items or []) if int(r.get('g_id') or 0) > 0}
+            cur.close()
+        except Exception:
+            estimate_items = []
+            finance_portfolio_items = []
+            finance_portfolio_totals = []
+            finance_metrics_by_gid = {}
+
+        stage_display_names = {
+            'business': 'Business Development',
+            'design': 'Design Team',
+            'operations': 'Operations Team',
+            'engineer': 'Site Engineer',
+            'engineering_team': 'Engineering Team',
+            'procurement_team': 'Procurement Team',
+            'accounts_finance': 'Accounts & Finance Team',
+        }
+        team_display_name = stage_display_names.get(team, team.title())
+
+        def get_next_stage(stage_name):
+            # Keep bid lifecycle and won-project execution lifecycle separate.
+            # Bid lifecycle: analyzer -> business -> design -> operations -> site_engineer -> handover
+            # Won-project lifecycle: engineering_team -> procurement_team -> accounts_finance -> handover
+            key = (stage_name or '').strip().lower()
+            if key == 'engineer':
+                # Backward compatibility for legacy stage key
+                key = 'site_engineer'
+            bid_stage_flow = {
+                'analyzer': 'business',
+                'business': 'design',
+                'design': 'operations',
+                'operations': 'site_engineer',
+                'site_engineer': 'handover',
+            }
+            execution_stage_flow = {
+                'engineering_team': 'procurement_team',
+                'procurement_team': 'accounts_finance',
+                'accounts_finance': 'handover',
+            }
+            return execution_stage_flow.get(key) or bid_stage_flow.get(key)
+
+        return render_template(
+            'team_dashboard.html',
+            bids=[],
+            team=team,
+            team_display_name=team_display_name,
+            current_stage=current_stage,
+            total_bids=len(estimate_items),
+            completed_bids=sum(1 for i in (estimate_items or []) if (i.get('status') or '').lower() == 'approved'),
+            user=current_user,
+            get_next_stage=get_next_stage,
+            embed_mode=embed_mode,
+            show_team_column=show_team_column,
+            is_supervisor=False,
+            teamlead_assign_bids=[],
+            estimate_items=estimate_items,
+            finance_metrics_by_gid=finance_metrics_by_gid,
+            finance_portfolio_items=finance_portfolio_items,
+            finance_portfolio_totals=finance_portfolio_totals,
+            can_submit_project_estimate=can_submit_project_estimate,
+            can_approve_project_estimate=can_approve_project_estimate,
+        )
+
     # Ensure seed tasks exist so all bids appear on this team dashboard
     ensure_tasks_for_team(current_stage)
     cur = mysql.connection.cursor(DictCursor)
@@ -15163,6 +20627,11 @@ def team_dashboard(team):
     company_sql_clause, company_params = _company_filter_for_go_bids(cur)
 
     # Fetch all bids for this company scope; filtering by team is done in Python
+    # and procurement/project widgets can use explicit won/approval flags.
+    try:
+        _ensure_project_estimate_approvals_table(cur)
+    except Exception:
+        pass
     try:
         cur.execute("""
         SELECT gb.g_id AS id,
@@ -15170,23 +20639,29 @@ def team_dashboard(team):
                gb.company, 
                gb.due_date,
                gb.created_at AS created_at,
-               COALESCE(gb.scoring, 0) AS progress,
-               LOWER(COALESCE(gb.state, 'analyzer')) AS current_stage,
-               ba.person_name,
-               ba.assignee_email AS person_email,
-               ba.depart,
-               wps.pr_completion_status AS work_status,
-               wbr.closure_status AS project_status,
-               wbr.work_progress_status AS work_progress_status,
-               wlr.result AS wl_result,
-               gb.summary,
-               COALESCE(gb.submission_status, 'Work Progress') AS submission_status,
-               COALESCE(gb.submission_reason, '') AS submission_reason
+                COALESCE(gb.scoring, 0) AS progress,
+                LOWER(COALESCE(gb.state, 'analyzer')) AS current_stage,
+                ba.person_name,
+                ba.assignee_email AS person_email,
+                ba.depart,
+                bi.scope AS incoming_scope,
+                bi.type AS incoming_type,
+                wps.pr_completion_status AS work_status,
+                wbr.closure_status AS project_status,
+                wbr.work_progress_status AS work_progress_status,
+                wlr.result AS wl_result,
+                wlr.status AS wl_status,
+                gb.summary,
+                COALESCE(gb.submission_status, 'Work Progress') AS submission_status,
+                COALESCE(gb.submission_reason, '') AS submission_reason,
+                COALESCE(pea.status, '') AS finance_approval_status
         FROM go_bids gb
         LEFT JOIN bid_assign ba ON ba.g_id = gb.g_id
+        LEFT JOIN bid_incoming bi ON bi.id = gb.id
         LEFT JOIN win_lost_results wlr ON wlr.a_id = ba.a_id OR wlr.g_id = gb.g_id
         LEFT JOIN won_bids_result wbr ON wbr.w_id = wlr.w_id
         LEFT JOIN work_progress_status wps ON wps.won_id = wbr.won_id
+        LEFT JOIN project_estimate_approvals pea ON pea.g_id = gb.g_id
         WHERE 1=1
         """ + company_sql_clause + """
         ORDER BY gb.due_date ASC
@@ -15206,18 +20681,24 @@ def team_dashboard(team):
                        ba.person_name,
                        ba.assignee_email AS person_email,
                        ba.depart,
+                       bi.scope AS incoming_scope,
+                       bi.type AS incoming_type,
                        wps.pr_completion_status AS work_status,
                        wbr.closure_status AS project_status,
                        wbr.work_progress_status AS work_progress_status,
                        wlr.result AS wl_result,
+                       wlr.status AS wl_status,
                        gb.summary,
                        COALESCE(gb.submission_status, 'Work Progress') AS submission_status,
-                       COALESCE(gb.submission_reason, '') AS submission_reason
+                       COALESCE(gb.submission_reason, '') AS submission_reason,
+                       COALESCE(pea.status, '') AS finance_approval_status
                 FROM go_bids gb
                 LEFT JOIN bid_assign ba ON ba.g_id = gb.g_id
+                LEFT JOIN bid_incoming bi ON bi.id = gb.id
                 LEFT JOIN win_lost_results wlr ON wlr.a_id = ba.a_id OR wlr.g_id = gb.g_id
                 LEFT JOIN won_bids_result wbr ON wbr.w_id = wlr.w_id
                 LEFT JOIN work_progress_status wps ON wps.won_id = wbr.won_id
+                LEFT JOIN project_estimate_approvals pea ON pea.g_id = gb.g_id
                 WHERE 1=1
                 """ + company_sql_clause + """
                 ORDER BY gb.due_date ASC
@@ -15235,6 +20716,33 @@ def team_dashboard(team):
         _seen_pairs.add(_key)
         _unique_rows.append(_r)
     rows = _unique_rows
+
+    # Attach IK project code so team dashboard dropdowns can display code instead of numeric id.
+    try:
+        _ensure_bid_assign_meta_table()
+        _ensure_bid_incoming_project_code_column(cur)
+        for r in rows:
+            try:
+                gid = int(r.get('id') or 0)
+            except Exception:
+                gid = 0
+            if not gid:
+                r['ik_project_code'] = ''
+                continue
+            scope_text = (r.get('incoming_scope') or '').strip()
+            type_text = (r.get('incoming_type') or r.get('type') or '').strip()
+            try:
+                code = _ensure_ik_project_code(cur, gid, {}, scope_text, type_text) or ''
+            except Exception:
+                code = ''
+            r['ik_project_code'] = code
+        try:
+            mysql.connection.commit()
+        except Exception:
+            mysql.connection.rollback()
+    except Exception:
+        for r in rows:
+            r['ik_project_code'] = r.get('ik_project_code') or ''
 
     # Add task-level completion date + priority (based on nearest task due date for this stage)
     try:
@@ -15310,30 +20818,8 @@ def team_dashboard(team):
 
     # Ensure dynamic stage tables exist and load per-bid configuration
     try:
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS bid_stage_exclusions (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                g_id INT NOT NULL,
-                stage VARCHAR(50) NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE KEY uniq_bid_stage (g_id, stage)
-            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-            """
-        )
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS bid_custom_stages (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                g_id INT NOT NULL,
-                stage VARCHAR(50) NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE KEY uniq_custom_stage (g_id, stage)
-            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-            """
-        )
+        _ensure_bid_stage_tables(cur)
     except Exception:
-        # If creation fails (e.g., no rights), continue ??? downstream selects may still work
         pass
 
     cur.execute("SELECT g_id, stage FROM bid_stage_exclusions")
@@ -15355,7 +20841,8 @@ def team_dashboard(team):
     except Exception:
         task_ids = set()
 
-    default_stages = ['analyzer', 'business', 'design', 'operations', 'engineer']
+    default_stages = ['analyzer', 'business', 'design', 'operations', 'engineer', 'engineering_team', 'procurement_team', 'accounts_finance']
+    gated_pipeline_stages = {'engineering_team', 'procurement_team', 'accounts_finance'}
     bids = []
     for row in rows:
         bid_id = row.get('id')
@@ -15367,11 +20854,33 @@ def team_dashboard(team):
             dyn_stages = default_stages.copy()
 
         stage_now = (row.get('current_stage') or 'analyzer').lower()
-        should_include = (
-            stage_now == current_stage
-            or bid_id in task_ids
-            or current_stage in dyn_stages
+        assigned_depart = (_normalize_department_key(row.get('depart')) or '').strip().lower()
+        is_won_project = _is_won_bid_status(
+            row.get('wl_result'),
+            row.get('wl_status'),
+            row.get('submission_status'),
+            row.get('project_status'),
+            row.get('work_progress_status'),
         )
+        finance_status = (row.get('finance_approval_status') or '').strip().lower()
+        is_finance_approved = (finance_status == 'approved')
+        # Procurement workflow selector must show project-phase inputs only.
+        include_for_proc_project_scope = bool(is_won_project and is_finance_approved)
+        if current_stage in gated_pipeline_stages:
+            # For downstream manager dashboards, show only bids that are actually routed
+            # to the stage, or have concrete work items created for that stage.
+            should_include = (
+                stage_now == current_stage
+                or bid_id in task_ids
+                or assigned_depart == current_stage
+                or (current_stage == 'procurement_team' and include_for_proc_project_scope)
+            )
+        else:
+            should_include = (
+                stage_now == current_stage
+                or bid_id in task_ids
+                or current_stage in dyn_stages
+            )
         if not should_include:
             continue
 
@@ -15382,6 +20891,9 @@ def team_dashboard(team):
         row['work_progress_pct'] = stage_progress_pct(stage_key)
         row['project_status'], row['work_status'] = status_texts(stage_key)
         row['dyn_stages'] = dyn_stages
+        row['is_won_project'] = bool(is_won_project)
+        row['is_finance_approved'] = bool(is_finance_approved)
+        row['project_ready'] = bool(include_for_proc_project_scope)
         bids.append(row)
 
     # Compute stats from filtered bids
@@ -15393,18 +20905,7 @@ def team_dashboard(team):
     assigned_map = {}
     try:
         if bid_ids:
-            # Ensure mapping table exists
-            cur.execute(
-                """
-                CREATE TABLE IF NOT EXISTS bid_assignment_members (
-                    id INT AUTO_INCREMENT PRIMARY KEY,
-                    g_id INT NOT NULL,
-                    employee_id INT NOT NULL,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    UNIQUE KEY uniq_g_emp (g_id, employee_id)
-                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-                """
-            )
+            _ensure_bid_assignment_members_table(cur)
             placeholders = ','.join(['%s'] * len(bid_ids))
             # In manager-embedded mode, don't restrict by department so we can show cross-team assignees.
             sql = f"""
@@ -15422,8 +20923,11 @@ def team_dashboard(team):
             """
             params = list(bid_ids)
             if not show_team_column:
-                sql += " AND e.department = %s"
-                params.append(team)
+                if team == 'procurement_team':
+                    sql += " AND LOWER(COALESCE(e.department, '')) IN ('procurement_team', 'procurement')"
+                else:
+                    sql += " AND e.department = %s"
+                    params.append(team)
             sql += " ORDER BY e.name"
             cur.execute(sql, tuple(params))
             rows = cur.fetchall()
@@ -15471,31 +20975,7 @@ def team_dashboard(team):
     rfp_files_map = {}
     try:
         if bid_ids:
-            # Ensure uploaded_rfp_files table exists
-            cur.execute(
-                """
-                CREATE TABLE IF NOT EXISTS uploaded_rfp_files (
-                    id INT AUTO_INCREMENT PRIMARY KEY,
-                    bid_id INT,
-                    g_id INT,
-                    filename VARCHAR(500) NOT NULL,
-                    file_path VARCHAR(1000) NOT NULL,
-                    file_size BIGINT,
-                    uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    uploaded_by INT,
-                    INDEX idx_bid_id (bid_id),
-                    INDEX idx_g_id (g_id)
-                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-                """
-            )
-            # Check if g_id column exists, if not add it
-            try:
-                cur.execute("SHOW COLUMNS FROM uploaded_rfp_files LIKE 'g_id'")
-                if not cur.fetchone():
-                    cur.execute("ALTER TABLE uploaded_rfp_files ADD COLUMN g_id INT, ADD INDEX idx_g_id (g_id)")
-                    mysql.connection.commit()
-            except Exception:
-                pass
+            _ensure_uploaded_rfp_files_schema(cur)
             
             placeholders = ','.join(['%s'] * len(bid_ids))
             # Try to query with g_id first, fallback to bid_id if g_id doesn't exist in results
@@ -15639,9 +21119,13 @@ def team_dashboard(team):
     # Map stage names for display
     stage_display_names = {
         'business': 'Business Development',
-        'design': 'Design Team', 
+        'design': 'Design Team',
         'operations': 'Operations Team',
-        'engineer': 'Site Engineer'
+        'site_engineer': 'Site Engineer',
+        'engineer': 'Site Engineer',  # legacy key
+        'procurement_team': 'Procurement Team',
+        'engineering_team': 'Engineering Team',
+        'accounts_finance': 'Accounts & Finance Team',
     }
     
     team_display_name = stage_display_names.get(team, team.title())
@@ -15654,17 +21138,29 @@ def team_dashboard(team):
     
     # Define next stage mapping for template
     def get_next_stage(current_stage):
-        stage_flow = {
+        key = (current_stage or '').strip().lower()
+        if key == 'engineer':
+            key = 'site_engineer'
+        bid_stage_flow = {
             'analyzer': 'business',
             'business': 'design',
             'design': 'operations',
-            'operations': 'engineer',
-            'engineer': 'handover'
+            'operations': 'site_engineer',
+            'site_engineer': 'handover',
         }
-        return stage_flow.get(current_stage, None)
+        execution_stage_flow = {
+            'engineering_team': 'procurement_team',
+            'procurement_team': 'accounts_finance',
+            'accounts_finance': 'handover',
+        }
+        return execution_stage_flow.get(key) or bid_stage_flow.get(key)
     
     # Check if supervisor is accessing business dashboard
     is_supervisor_access = (team == 'business' and (current_user.is_admin or current_user.is_supervisor))
+
+    estimate_items = []
+    can_submit_project_estimate = False
+    can_approve_project_estimate = False
     
     return render_template('team_dashboard.html', 
                          bids=bids, 
@@ -15678,7 +21174,321 @@ def team_dashboard(team):
                          embed_mode=embed_mode,
                          show_team_column=show_team_column,
                          is_supervisor=is_supervisor_access,
-                         teamlead_assign_bids=teamlead_assign_bids)
+                         teamlead_assign_bids=teamlead_assign_bids,
+                         estimate_items=estimate_items,
+                         can_submit_project_estimate=can_submit_project_estimate,
+                         can_approve_project_estimate=can_approve_project_estimate)
+
+@app.route('/project-estimate/submit', methods=['POST'])
+@login_required
+@csrf_protect
+def project_estimate_submit():
+    wants_json = (request.headers.get('X-Requested-With') == 'XMLHttpRequest') or ('application/json' in (request.headers.get('Accept') or '').lower())
+    def _respond(ok: bool, message: str, http_code: int = 200):
+        if wants_json:
+            payload = {
+                'success': bool(ok),
+                'message': message,
+                'g_id': int(g_id or 0),
+                'status': 'pending' if ok else '',
+                'estimated_value': float(estimated_value) if ok else None,
+                'currency': 'USD',
+                'submitted_by_email': (getattr(current_user, 'email', '') or ''),
+                'submitted_at': datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S') if ok else '',
+                'won_reason': won_reason or '',
+            }
+            return jsonify(payload), int(http_code)
+        if ok:
+            flash(message, 'success')
+        else:
+            flash(message, 'error')
+        return redirect(request.referrer or url_for('team_dashboard', team='accounts_finance'))
+
+    g_id = request.form.get('g_id', type=int)
+    raw_value = (request.form.get('estimated_value') or '').strip().replace(',', '')
+    currency = 'USD'
+    won_reason = (request.form.get('won_reason') or '').strip()
+    estimated_value = -1.0
+    expected_total_cost = None
+    if not g_id:
+        return _respond(False, 'Project id is required.', 400)
+    if raw_value:
+        try:
+            estimated_value = float(raw_value)
+        except Exception:
+            estimated_value = -1
+        if estimated_value <= 0:
+            return _respond(False, 'Estimated value must be greater than 0.', 400)
+
+    cur = mysql.connection.cursor(DictCursor)
+    try:
+        _ensure_project_estimate_approvals_table(cur)
+        # Ensure target project exists and is won
+        cur.execute(
+            """
+            SELECT gb.g_id, gb.b_name, wlr.result, wlr.status
+            FROM go_bids gb
+            LEFT JOIN win_lost_results wlr ON wlr.g_id = gb.g_id
+            WHERE gb.g_id=%s
+            LIMIT 1
+            """,
+            (int(g_id),),
+        )
+        row = cur.fetchone() or {}
+        if not row.get('g_id'):
+            cur.close()
+            return _respond(False, 'Project not found.', 404)
+        if not _is_won_bid_status(row.get('result'), row.get('status')):
+            cur.close()
+            return _respond(False, 'Estimated value can be submitted only for won projects.', 400)
+
+        cur.execute(
+            """
+            SELECT estimated_value, expected_total_cost, currency, status
+            FROM project_estimate_approvals
+            WHERE g_id=%s
+            LIMIT 1
+            """,
+            (int(g_id),),
+        )
+        existing = cur.fetchone() or {}
+        existing_status = (existing.get('status') or '').strip().lower()
+        if existing_status == 'approved':
+            cur.close()
+            return _respond(False, 'This estimate is already approved. Manager must reopen before resubmission.', 409)
+
+        # For rejected resubmission, allow re-submit without forcing user to re-enter budget.
+        if estimated_value <= 0:
+            try:
+                estimated_value = float(existing.get('estimated_value') or 0)
+            except Exception:
+                estimated_value = 0
+        if estimated_value <= 0:
+            cur.close()
+            return _respond(False, 'Estimated value must be greater than 0.', 400)
+        expected_total_cost = existing.get('expected_total_cost')
+        if expected_total_cost is None:
+            expected_total_cost = float(estimated_value)
+        currency = 'USD'
+        if not won_reason:
+            won_reason = (existing.get('won_reason') or '').strip()
+
+        cur.execute(
+            """
+            INSERT INTO project_estimate_approvals (
+                g_id, estimated_value, expected_total_cost, currency, status,
+                submitted_by_user_id, submitted_at, approved_by_user_id, approved_at, won_reason, approval_note
+            )
+            VALUES (%s, %s, %s, %s, 'pending', %s, NOW(), NULL, NULL, %s, NULL)
+            ON DUPLICATE KEY UPDATE
+                estimated_value=VALUES(estimated_value),
+                expected_total_cost=COALESCE(expected_total_cost, VALUES(expected_total_cost), VALUES(estimated_value)),
+                currency=VALUES(currency),
+                status='pending',
+                submitted_by_user_id=VALUES(submitted_by_user_id),
+                submitted_at=NOW(),
+                approved_by_user_id=NULL,
+                approved_at=NULL,
+                won_reason=VALUES(won_reason),
+                approval_note=NULL,
+                updated_at=CURRENT_TIMESTAMP
+            """,
+            (int(g_id), float(estimated_value), float(expected_total_cost), 'USD', int(current_user.id), won_reason or None),
+        )
+        mysql.connection.commit()
+
+        try:
+            recipients = []
+            try:
+                cur.execute(
+                    """
+                    SELECT DISTINCT u.id
+                    FROM user_company_access uca
+                    JOIN users u ON u.id = uca.user_id
+                    WHERE LOWER(COALESCE(uca.role,''))='manager'
+                      AND LOWER(COALESCE(uca.department_key,'')) IN ('accounts_finance','accounts','finance','accounting')
+                      AND COALESCE(uca.is_active, TRUE)=TRUE
+                    """
+                )
+                recipients = [f"user:{int(r.get('id'))}" for r in (cur.fetchall() or []) if r.get('id')]
+            except Exception:
+                recipients = []
+            _notify_custom_recipients(
+                recipients,
+                task_id=None,
+                title='Project Estimate Submitted',
+                message=f"Estimated value submitted for project #{int(g_id)}. Approval required.",
+                category='approval',
+            )
+        except Exception:
+            pass
+
+        return _respond(True, 'Estimated value submitted for Accounts & Finance approval.', 200)
+    except Exception as e:
+        try:
+            mysql.connection.rollback()
+        except Exception:
+            pass
+        return _respond(False, f'Failed to submit estimate: {str(e)}', 500)
+    finally:
+        try:
+            cur.close()
+        except Exception:
+            pass
+    return _respond(False, 'Failed to submit estimate.', 500)
+
+
+@app.route('/project-estimate/decision', methods=['POST'])
+@login_required
+@csrf_protect
+def project_estimate_decision():
+    wants_json = (request.headers.get('X-Requested-With') == 'XMLHttpRequest') or ('application/json' in (request.headers.get('Accept') or '').lower())
+    def _respond(ok: bool, message: str, http_code: int = 200):
+        if wants_json:
+            payload = {
+                'success': bool(ok),
+                'message': message,
+                'g_id': int(g_id or 0),
+                'decision': (decision or '').strip().lower(),
+                'approval_note': (note or '').strip(),
+            }
+            return jsonify(payload), int(http_code)
+        if ok:
+            flash(message, 'success')
+        else:
+            flash(message, 'error')
+        return redirect(request.referrer or url_for('team_dashboard', team='accounts_finance'))
+
+    g_id = request.form.get('g_id', type=int)
+    decision = (request.form.get('decision') or '').strip().lower()
+    note = (request.form.get('approval_note') or '').strip()
+    if decision not in ('approved', 'rejected'):
+        return _respond(False, 'Invalid estimate decision.', 400)
+    role_raw = (get_user_role() or getattr(current_user, 'role', '') or '').strip().lower().replace('_', ' ')
+    if not (current_user.is_admin or current_user.is_supervisor or role_raw in ('manager', 'accounts manager', 'finance manager')):
+        return _respond(False, 'Only Accounts/Finance manager can approve or reject this value.', 403)
+
+    cur = mysql.connection.cursor(DictCursor)
+    try:
+        _ensure_project_estimate_approvals_table(cur)
+        cur.execute(
+            """
+            UPDATE project_estimate_approvals
+            SET status=%s,
+                approved_by_user_id=%s,
+                approved_at=NOW(),
+                approval_note=%s,
+                updated_at=CURRENT_TIMESTAMP
+            WHERE g_id=%s
+            """,
+            (decision, int(current_user.id), note or None, int(g_id or 0)),
+        )
+        if int(cur.rowcount or 0) <= 0:
+            mysql.connection.rollback()
+            cur.close()
+            return _respond(False, 'No estimate record found for this project.', 404)
+        mysql.connection.commit()
+        # Ensure approved project is visible in Project Manager dashboard:
+        # if no PM assignment exists yet, auto-assign to an active project manager user.
+        if decision == 'approved':
+            try:
+                _ensure_project_manager_assignments_table(cur)
+                cur.execute("SELECT w_id FROM win_lost_results WHERE g_id=%s LIMIT 1", (int(g_id),))
+                wr = cur.fetchone() or {}
+                w_id = wr.get('w_id')
+                if w_id:
+                    cur.execute(
+                        """
+                        SELECT pma.id AS pma_id, pma.manager_user_id, u.role
+                        FROM project_manager_assignments pma
+                        LEFT JOIN users u ON u.id = pma.manager_user_id
+                        WHERE pma.project_id=%s
+                        LIMIT 1
+                        """,
+                        (int(w_id),),
+                    )
+                    arow = cur.fetchone() or {}
+                    existing_id = arow.get('pma_id')
+                    existing_pm_id = arow.get('manager_user_id')
+                    existing_role = arow.get('role')
+                    # Reassign if missing OR currently assigned to a non-project-manager role.
+                    if (not existing_id) or (not _is_project_manager_role_value(existing_role)):
+                        pm = _pick_project_manager_user(cur, None)
+                        if pm and pm.get('id'):
+                            if existing_id:
+                                cur.execute(
+                                    """
+                                    UPDATE project_manager_assignments
+                                    SET manager_user_id=%s, g_id=%s, assigned_by_user_id=%s, assigned_at=NOW()
+                                    WHERE id=%s
+                                    """,
+                                    (int(pm.get('id')), int(g_id), int(getattr(current_user, 'id', 0)), int(existing_id)),
+                                )
+                            else:
+                                cur.execute(
+                                    """
+                                    INSERT INTO project_manager_assignments (project_id, g_id, manager_user_id, assigned_by_user_id)
+                                    VALUES (%s, %s, %s, %s)
+                                    """,
+                                    (int(w_id), int(g_id), int(pm.get('id')), int(getattr(current_user, 'id', 0))),
+                                )
+                            mysql.connection.commit()
+            except Exception:
+                try:
+                    mysql.connection.rollback()
+                except Exception:
+                    pass
+        try:
+            recipients = []
+            cur.execute(
+                """
+                SELECT submitted_by_user_id
+                FROM project_estimate_approvals
+                WHERE g_id=%s
+                LIMIT 1
+                """,
+                (int(g_id),),
+            )
+            row = cur.fetchone() or {}
+            if row.get('submitted_by_user_id'):
+                recipients.append(f"user:{int(row.get('submitted_by_user_id'))}")
+            try:
+                cur.execute(
+                    """
+                    SELECT manager_user_id
+                    FROM project_manager_assignments
+                    WHERE g_id=%s
+                    """,
+                    (int(g_id),),
+                )
+                for rr in (cur.fetchall() or []):
+                    if rr.get('manager_user_id'):
+                        recipients.append(f"user:{int(rr.get('manager_user_id'))}")
+            except Exception:
+                pass
+            _notify_custom_recipients(
+                recipients,
+                task_id=None,
+                title='Project Estimate Decision',
+                message=f"Estimated value for project #{int(g_id)} was {decision}.",
+                category='approval',
+            )
+        except Exception:
+            pass
+        return _respond(True, f'Estimated value {decision}.')
+    except Exception as e:
+        try:
+            mysql.connection.rollback()
+        except Exception:
+            pass
+        return _respond(False, f'Failed to update estimate approval: {str(e)}', 500)
+    finally:
+        try:
+            cur.close()
+        except Exception:
+            pass
+    return _respond(True, f'Estimated value {decision}.')
+
 
 main_stats = {
     'total_bids': 350, 'live_bids': 75, 'bids_won': 120, 'projects_completed': 95,
@@ -15721,24 +21531,7 @@ def supervisor_assign_stage():
         # Update go_bids state
         cur.execute("UPDATE go_bids SET state=%s WHERE g_id=%s", (new_stage, g_id))
 
-        # Ensure tasks exist for all departments so they can work in parallel on this bid.
-        try:
-            team_stages = ['engineering_team', 'procurement_team', 'accounts_finance']
-            for st in team_stages:
-                cur.execute(
-                    """
-                    SELECT 1
-                    FROM bid_checklists
-                    WHERE g_id = %s AND LOWER(COALESCE(stage,'')) = %s
-                    LIMIT 1
-                    """,
-                    (g_id, st),
-                )
-                exists = cur.fetchone() is not None
-                if not exists:
-                    generate_team_checklist(cur, g_id, st)
-        except Exception:
-            pass
+        # No auto-seeding: bid tasks are created explicitly by users.
         
         # Update or create bid_assign entry
         cur.execute("SELECT a_id FROM bid_assign WHERE g_id=%s", (g_id,))
@@ -15808,24 +21601,7 @@ def supervisor_update_company():
             company_name = (request.form.get('company_name') or '').strip()
         cur.execute("UPDATE go_bids SET company=%s WHERE g_id=%s", (company_name, g_id))
 
-        # Best-effort: seed default checklist tasks for all departments so they can work in parallel.
-        try:
-            team_stages = ['engineering_team', 'procurement_team', 'accounts_finance']
-            for st in team_stages:
-                cur.execute(
-                    """
-                    SELECT 1
-                    FROM bid_checklists
-                    WHERE g_id = %s AND LOWER(COALESCE(stage,'')) = %s
-                    LIMIT 1
-                    """,
-                    (g_id, st),
-                )
-                exists = cur.fetchone() is not None
-                if not exists:
-                    generate_team_checklist(cur, g_id, st)
-        except Exception:
-            pass
+        # No auto-seeding: bid tasks are created explicitly by users.
 
         mysql.connection.commit()
         flash('Company updated.', 'success')
@@ -16171,6 +21947,40 @@ def bid_analyzer():
     except Exception:
         cur.execute("SELECT * FROM bid_incoming ORDER BY id DESC")
     bid_incoming_data = cur.fetchall()
+    # Backfill g_id from go_bids when bid_incoming does not carry it.
+    try:
+        bid_ids_for_gid = []
+        for bid in (bid_incoming_data or []):
+            try:
+                b_id = int(bid.get('id') or bid.get('b_id') or 0)
+            except Exception:
+                b_id = 0
+            if b_id:
+                bid_ids_for_gid.append(b_id)
+        if bid_ids_for_gid:
+            ph = ",".join(["%s"] * len(bid_ids_for_gid))
+            cur.execute(
+                f"SELECT id, g_id FROM go_bids WHERE id IN ({ph})",
+                tuple(bid_ids_for_gid),
+            )
+            id_to_gid = {}
+            for row in (cur.fetchall() or []):
+                try:
+                    inc_id = int(row.get('id') or 0)
+                    gid = int(row.get('g_id') or 0)
+                except Exception:
+                    inc_id, gid = 0, 0
+                if inc_id and gid:
+                    id_to_gid[inc_id] = gid
+            for bid in (bid_incoming_data or []):
+                try:
+                    b_id = int(bid.get('id') or bid.get('b_id') or 0)
+                except Exception:
+                    b_id = 0
+                if b_id and id_to_gid.get(b_id):
+                    bid['g_id'] = id_to_gid[b_id]
+    except Exception:
+        pass
     
     # Calculate bid stats from bid_incoming table
     has_bid_status = False
@@ -16318,7 +22128,119 @@ def bid_analyzer():
             mysql.connection.rollback()
     except Exception:
         pass
-    
+
+    # Bid task counts from bid_checklists (bid phase only).
+    bid_task_count_map = {}
+    try:
+        g_ids_for_tasks = []
+        for bid in (bid_incoming_data or []):
+            try:
+                gid = int(bid.get('g_id') or bid.get('gid') or bid.get('go_id') or 0)
+            except Exception:
+                gid = 0
+            if gid:
+                g_ids_for_tasks.append(gid)
+        g_ids_for_tasks = sorted(set(g_ids_for_tasks))
+        if g_ids_for_tasks:
+            ph = ",".join(["%s"] * len(g_ids_for_tasks))
+            try:
+                cur.execute(
+                    f"""
+                    SELECT g_id, COUNT(*) AS c
+                    FROM bid_checklists
+                    WHERE g_id IN ({ph})
+                      AND LOWER(COALESCE(stage,'')) IN ('business','business_dev','business_development','design','marketing','operations','operation','ops','engineer','engineering','site_engineer','site engineer','site manager')
+                      AND team_archive IS NULL
+                    GROUP BY g_id
+                    """,
+                    tuple(g_ids_for_tasks),
+                )
+            except Exception as qe:
+                if "Unknown column 'team_archive'" in str(qe):
+                    cur.execute(
+                        f"""
+                        SELECT g_id, COUNT(*) AS c
+                        FROM bid_checklists
+                        WHERE g_id IN ({ph})
+                          AND LOWER(COALESCE(stage,'')) IN ('business','business_dev','business_development','design','marketing','operations','operation','ops','engineer','engineering','site_engineer','site engineer','site manager')
+                        GROUP BY g_id
+                        """,
+                        tuple(g_ids_for_tasks),
+                    )
+                else:
+                    raise
+            for row in (cur.fetchall() or []):
+                try:
+                    gid = int(row.get('g_id') or 0)
+                    bid_task_count_map[gid] = int(row.get('c') or 0)
+                except Exception:
+                    pass
+        for bid in (bid_incoming_data or []):
+            try:
+                gid = int(bid.get('g_id') or bid.get('gid') or bid.get('go_id') or 0)
+            except Exception:
+                gid = 0
+            bid['bid_task_count'] = int(bid_task_count_map.get(gid, 0))
+    except Exception:
+        for bid in (bid_incoming_data or []):
+            bid['bid_task_count'] = 0
+
+    # Separate won projects table (projects = won bids only).
+    won_projects_data = []
+    for bid in (bid_incoming_data or []):
+        try:
+            results_l = (bid.get('results') or '').strip().lower()
+            decision_l = (bid.get('decision') or '').strip().lower()
+            is_won = ('won' in results_l or 'award' in results_l) and ('lost' not in results_l)
+            if not is_won and decision_l == 'won':
+                is_won = True
+            if is_won:
+                won_projects_data.append(bid)
+        except Exception:
+            pass
+
+    # Won/project task counts from won_project_checklists (project phase only).
+    try:
+        _sync_won_project_checklists(cur)
+    except Exception:
+        pass
+    try:
+        won_gids = []
+        for prj in (won_projects_data or []):
+            try:
+                gid = int(prj.get('g_id') or prj.get('gid') or prj.get('go_id') or 0)
+            except Exception:
+                gid = 0
+            if gid:
+                won_gids.append(gid)
+        won_gids = sorted(set(won_gids))
+        won_task_count_map = {}
+        if won_gids:
+            ph = ",".join(["%s"] * len(won_gids))
+            cur.execute(
+                f"""
+                SELECT g_id, COUNT(*) AS c
+                FROM won_project_checklists
+                WHERE g_id IN ({ph})
+                GROUP BY g_id
+                """,
+                tuple(won_gids),
+            )
+            for row in (cur.fetchall() or []):
+                try:
+                    won_task_count_map[int(row.get('g_id') or 0)] = int(row.get('c') or 0)
+                except Exception:
+                    pass
+        for prj in (won_projects_data or []):
+            try:
+                gid = int(prj.get('g_id') or prj.get('gid') or prj.get('go_id') or 0)
+            except Exception:
+                gid = 0
+            prj['project_task_count'] = int(won_task_count_map.get(gid, 0))
+    except Exception:
+        for prj in (won_projects_data or []):
+            prj['project_task_count'] = 0
+
     cur.close()
 
     return render_template('bid_analyzer_landing.html', bid_cards={
@@ -16328,7 +22250,7 @@ def bid_analyzer():
         'bids_submitted': bids_submitted,
         'bids_won': bids_won,
         'bids_lost': bids_lost
-    }, bid_incoming_data=bid_incoming_data)
+    }, bid_incoming_data=bid_incoming_data, won_projects_data=won_projects_data)
 
 
 @app.route('/bid-analyzer/open')
@@ -16887,6 +22809,16 @@ def bid_timeline():
             max_total=None,
             include_closed=True,
         )
+        go_rows = [
+            rr for rr in (go_rows or [])
+            if not _is_won_bid_status(
+                rr.get('submission_reason'),
+                rr.get('submission_status'),
+                rr.get('bid_status'),
+                rr.get('results'),
+                rr.get('state'),
+            )
+        ]
         if filter_selected_depts and go_rows:
             try:
                 g_ids = [int(r.get('g_id')) for r in go_rows if r.get('g_id')]
@@ -17036,7 +22968,7 @@ def bid_timeline():
             'business': 'Business Development',
             'design': 'Design & Marketing',
             'operations': 'Operation Team',
-            'engineer': 'Engineering Team',
+            'engineer': 'Site Engineer',
             'handover': 'Submitted'
         }
         try:
@@ -17354,9 +23286,34 @@ def bid_analyzer_update_result():
     payload = request.get_json(silent=True) or {}
     bid_id = payload.get('bid_id')
     bid_result = _normalize_bid_result(payload.get('results', ''))
+    won_reason = (payload.get('won_reason') or '').strip()
+    raw_estimated_value = str(payload.get('estimated_value') or '').strip().replace(',', '')
+    raw_expected_total_cost = str(payload.get('expected_total_cost') or '').strip().replace(',', '')
+    currency = 'USD'
 
     if not bid_id:
         return jsonify({'success': False, 'error': 'Missing bid_id'}), 400
+    estimated_value = None
+    expected_total_cost = None
+    if _is_won_bid_status(bid_result):
+        if not won_reason:
+            return jsonify({'success': False, 'error': 'Won reason is required'}), 400
+        try:
+            estimated_value = float(raw_estimated_value)
+        except Exception:
+            estimated_value = None
+        if estimated_value is None or estimated_value <= 0:
+            return jsonify({'success': False, 'error': 'Estimated value must be greater than 0 for won bids'}), 400
+        # Optional in payload: if missing, default planned total cost to budget for neutral initial P/L.
+        if raw_expected_total_cost:
+            try:
+                expected_total_cost = float(raw_expected_total_cost)
+            except Exception:
+                expected_total_cost = None
+            if expected_total_cost is None or expected_total_cost <= 0:
+                return jsonify({'success': False, 'error': 'Expected total cost must be greater than 0'}), 400
+        else:
+            expected_total_cost = float(estimated_value)
 
     cur = mysql.connection.cursor()
     try:
@@ -17376,9 +23333,19 @@ def bid_analyzer_update_result():
                     g_id, _ = _ensure_go_bid_from_incoming(int(bid_id))
                 except Exception:
                     g_id = None
+                if not g_id:
+                    try:
+                        cur2 = mysql.connection.cursor(DictCursor)
+                        cur2.execute("SELECT g_id FROM go_bids WHERE id=%s ORDER BY g_id DESC LIMIT 1", (int(bid_id),))
+                        row2 = cur2.fetchone() or {}
+                        g_id = row2.get('g_id')
+                        cur2.close()
+                    except Exception:
+                        g_id = None
                 if g_id:
                     cur2 = mysql.connection.cursor(DictCursor)
                     try:
+                        _ensure_project_estimate_approvals_table(cur2)
                         _ensure_project_manager_assignments_table(cur2)
                         cur2.execute("SELECT w_id FROM win_lost_results WHERE g_id=%s LIMIT 1", (int(g_id),))
                         row = cur2.fetchone() or {}
@@ -17402,8 +23369,7 @@ def bid_analyzer_update_result():
                                 )
                                 pm = cur2.fetchone()
                                 if not pm:
-                                    pm_list = _fetch_project_manager_users(cur2, None) or []
-                                    pm = pm_list[0] if pm_list else None
+                                    pm = _pick_project_manager_user(cur2, None)
                                 if pm:
                                     cur2.execute(
                                         """
@@ -17412,7 +23378,89 @@ def bid_analyzer_update_result():
                                         """,
                                         (int(w_id), int(g_id), int(pm.get('id')), int(getattr(current_user, 'id', 0))),
                                     )
-                                    mysql.connection.commit()
+                        # Create/update pending estimate approval for Accounts & Finance.
+                        # This allows PM execution only after manager approval.
+                        cur2.execute(
+                            """
+                            INSERT INTO project_estimate_approvals (
+                                g_id, estimated_value, expected_total_cost, currency, status,
+                                submitted_by_user_id, submitted_at, approved_by_user_id, approved_at,
+                                won_reason, approval_note
+                            )
+                            VALUES (%s, %s, %s, %s, 'pending', %s, NOW(), NULL, NULL, %s, NULL)
+                            ON DUPLICATE KEY UPDATE
+                                estimated_value=CASE
+                                    WHEN LOWER(COALESCE(status,''))='approved' THEN estimated_value
+                                    ELSE VALUES(estimated_value)
+                                END,
+                                expected_total_cost=CASE
+                                    WHEN LOWER(COALESCE(status,''))='approved' THEN expected_total_cost
+                                    ELSE VALUES(expected_total_cost)
+                                END,
+                                currency='USD',
+                                status=CASE
+                                    WHEN LOWER(COALESCE(status,''))='approved' THEN status
+                                    ELSE 'pending'
+                                END,
+                                submitted_by_user_id=CASE
+                                    WHEN LOWER(COALESCE(status,''))='approved' THEN submitted_by_user_id
+                                    ELSE VALUES(submitted_by_user_id)
+                                END,
+                                submitted_at=CASE
+                                    WHEN LOWER(COALESCE(status,''))='approved' THEN submitted_at
+                                    ELSE NOW()
+                                END,
+                                approved_by_user_id=CASE
+                                    WHEN LOWER(COALESCE(status,''))='approved' THEN approved_by_user_id
+                                    ELSE NULL
+                                END,
+                                approved_at=CASE
+                                    WHEN LOWER(COALESCE(status,''))='approved' THEN approved_at
+                                    ELSE NULL
+                                END,
+                                won_reason=CASE
+                                    WHEN LOWER(COALESCE(status,''))='approved' THEN won_reason
+                                    ELSE VALUES(won_reason)
+                                END,
+                                approval_note=CASE
+                                    WHEN LOWER(COALESCE(status,''))='approved' THEN approval_note
+                                    ELSE NULL
+                                END,
+                                updated_at=CURRENT_TIMESTAMP
+                            """,
+                            (
+                                int(g_id),
+                                float(estimated_value or 0),
+                                float(expected_total_cost or 0),
+                                'USD',
+                                int(getattr(current_user, 'id', 0) or 0),
+                                won_reason,
+                            ),
+                        )
+                        mysql.connection.commit()
+                        # Notify Accounts/Finance managers that approval is required.
+                        try:
+                            recipients = []
+                            cur2.execute(
+                                """
+                                SELECT DISTINCT u.id
+                                FROM user_company_access uca
+                                JOIN users u ON u.id = uca.user_id
+                                WHERE LOWER(COALESCE(uca.role,''))='manager'
+                                  AND LOWER(COALESCE(uca.department_key,'')) IN ('accounts_finance','accounts','finance','accounting')
+                                  AND COALESCE(uca.is_active, TRUE)=TRUE
+                                """
+                            )
+                            recipients = [f"user:{int(r.get('id'))}" for r in (cur2.fetchall() or []) if r.get('id')]
+                            _notify_custom_recipients(
+                                recipients,
+                                task_id=None,
+                                title='Estimate Approval Required',
+                                message=f"Won bid #{int(g_id)} requires estimated value approval.",
+                                category='approval',
+                            )
+                        except Exception:
+                            pass
                     finally:
                         try:
                             cur2.close()
@@ -17485,7 +23533,8 @@ def team_employees(team):
         'business': 'business',
         'design': 'design', 
         'operations': 'operations',
-        'engineer': 'engineer'
+        'engineer': 'engineer',
+        'procurement_team': 'procurement_team',
     }
     
     if team not in team_to_stage:
@@ -17494,13 +23543,25 @@ def team_employees(team):
     cur = mysql.connection.cursor(DictCursor)
     
     # Get employees for this team
-    cur.execute("""
-        SELECT e.*, u.email as team_lead_email
-        FROM employees e
-        LEFT JOIN users u ON e.team_lead_id = u.id
-        WHERE e.department = %s AND e.is_active = TRUE
-        ORDER BY e.name
-    """, (team,))
+    if team == 'procurement_team':
+        cur.execute(
+            """
+            SELECT e.*, u.email as team_lead_email
+            FROM employees e
+            LEFT JOIN users u ON e.team_lead_id = u.id
+            WHERE LOWER(COALESCE(e.department, '')) IN ('procurement_team', 'procurement')
+              AND e.is_active = TRUE
+            ORDER BY e.name
+            """
+        )
+    else:
+        cur.execute("""
+            SELECT e.*, u.email as team_lead_email
+            FROM employees e
+            LEFT JOIN users u ON e.team_lead_id = u.id
+            WHERE e.department = %s AND e.is_active = TRUE
+            ORDER BY e.name
+        """, (team,))
     employees = cur.fetchall()
     
     # Get team leads. Map team -> acceptable user roles, and for non-admins
@@ -18326,8 +24387,15 @@ def assign_task_self(task_id):
     """Allow managers/team leads to self-assign a task based on their user email."""
     cur = mysql.connection.cursor(DictCursor)
     try:
-        cur.execute("SELECT * FROM bid_checklists WHERE id=%s", (task_id,))
+        task_table = 'won_project_checklists'
+        cur.execute("SELECT * FROM won_project_checklists WHERE id=%s", (task_id,))
         task = cur.fetchone()
+        if task and not task.get('stage') and task.get('department_key'):
+            task['stage'] = task.get('department_key')
+        if not task:
+            task_table = 'bid_checklists'
+            cur.execute("SELECT * FROM bid_checklists WHERE id=%s", (task_id,))
+            task = cur.fetchone()
         if not task:
             return jsonify({'error': 'Task not found'}), 404
 
@@ -18371,7 +24439,7 @@ def assign_task_self(task_id):
             emp_id = cur.lastrowid
 
         cur.execute(
-            "UPDATE bid_checklists SET assigned_to=%s, updated_at=CURRENT_TIMESTAMP WHERE id=%s",
+            f"UPDATE {task_table} SET assigned_to=%s, updated_at=CURRENT_TIMESTAMP WHERE id=%s",
             (int(emp_id), int(task_id)),
         )
         mysql.connection.commit()
@@ -18395,9 +24463,16 @@ def update_task(task_id):
     """Update task fields (name, description, status, due_date, priority, assigned_to)."""
     try:
         cur = mysql.connection.cursor(DictCursor)
-        # Fetch existing task
-        cur.execute("SELECT * FROM bid_checklists WHERE id=%s", (task_id,))
+        # Fetch existing task (prefer won project checklist, fallback bid checklist)
+        task_table = 'won_project_checklists'
+        cur.execute("SELECT * FROM won_project_checklists WHERE id=%s", (task_id,))
         task = cur.fetchone()
+        if task and not task.get('stage') and task.get('department_key'):
+            task['stage'] = task.get('department_key')
+        if not task:
+            task_table = 'bid_checklists'
+            cur.execute("SELECT * FROM bid_checklists WHERE id=%s", (task_id,))
+            task = cur.fetchone()
         if not task:
             cur.close()
             return jsonify({'error': 'Task not found'}), 404
@@ -18419,6 +24494,10 @@ def update_task(task_id):
             fields.append('task_name=%s'); values.append(m.get('task_name').strip())
         if 'description' in m:
             fields.append('description=%s'); values.append(m.get('description').strip())
+        status_updated = False
+        progress_updated = False
+        due_date_updated = False
+        due_date_value = None
         if 'status' in m:
             # Normalize to canonical values so dashboards/counts stay correct
             sv = (m.get('status') or '').strip()
@@ -18428,15 +24507,26 @@ def update_task(task_id):
                 sv = 'completed'
             elif s in ('in progress', 'inprogress', 'working', 'wip', 'started'):
                 sv = 'in_progress'
+            elif s in ('submitted', 'submit', 'submission'):
+                sv = 'submitted'
             elif s in ('pending', 'not started', 'notstarted', 'new', ''):
                 sv = 'pending'
             else:
                 sv = 'pending'
             fields.append('status=%s'); values.append(sv)
+            status_updated = True
+            # Keep progress aligned when status changes (unless explicit progress_pct is provided).
+            if 'progress_pct' not in m:
+                implied_progress = 100 if sv == 'completed' else 75 if sv == 'submitted' else 50 if sv == 'in_progress' else 0
+                fields.append('progress_pct=%s'); values.append(implied_progress)
+                progress_updated = True
         if 'due_date' in m:
-            fields.append('due_date=%s'); values.append(m.get('due_date'))
+            due_date_updated = True
+            due_date_value = _normalize_due_date_value(m.get('due_date'))
+            fields.append('due_date=%s'); values.append(due_date_value)
         if 'priority' in m:
             fields.append('priority=%s'); values.append(m.get('priority').strip())
+        at = None
         if 'assigned_to' in m:
             # Only managers/admins/supervisors can reassign tasks
             role_norm = ((get_user_role() or '') or '').strip().lower().replace('_', ' ')
@@ -18453,6 +24543,13 @@ def update_task(task_id):
 
             raw = (m.get('assigned_to') or '').strip()
             if not raw:
+                role_compact = role_norm.replace(' ', '')
+                is_pm_actor = role_compact == 'projectmanager' and not (
+                    getattr(current_user, 'is_admin', False) or role_norm in {'supervisor', 'top level admin', 'topleveladmin', 'itadmin'}
+                )
+                if is_pm_actor:
+                    cur.close()
+                    return jsonify({'error': 'Project Manager assignment must go to department manager'}), 403
                 at = None
             else:
                 try:
@@ -18469,8 +24566,30 @@ def update_task(task_id):
                 cur.close()
                 return jsonify({'error': 'Assignee not found or inactive'}), 400
             task_stage = _normalize_department_key(task.get('stage') or '')
+            try:
+                role_norm = ((get_user_role() or '') or '').strip().lower().replace('_', ' ')
+            except Exception:
+                role_norm = ''
+            role_compact = role_norm.replace(' ', '')
+            is_pm_actor = role_compact == 'projectmanager' and not (
+                getattr(current_user, 'is_admin', False) or role_norm in {'supervisor', 'top level admin', 'topleveladmin', 'itadmin'}
+            )
+            if is_pm_actor:
+                try:
+                    active_cid = session.get('active_company_id')
+                except Exception:
+                    active_cid = None
+                mgr_assignment = _resolve_department_manager_assignment(
+                    cur,
+                    task_stage or '',
+                    company_id=(int(active_cid) if active_cid else None),
+                )
+                allowed_emp_id = int(mgr_assignment.get('employee_id') or 0) if mgr_assignment else 0
+                if not allowed_emp_id or int(at) != int(allowed_emp_id):
+                    cur.close()
+                    return jsonify({'error': 'Project Manager can assign only to the department manager'}), 403
             emp_dept = _normalize_department_key(emp.get('department') or '')
-            if task_stage in ('business', 'design', 'operations', 'engineer', 'engineering_team', 'procurement_team', 'accounts_finance') and emp_dept and emp_dept != task_stage:
+            if task_stage in ('business', 'design', 'operations', 'engineer', 'engineering_team', 'procurement_team', 'accounts_finance') and emp_dept and not _departments_compatible(emp_dept, task_stage):
                 cur.close()
                 return jsonify({'error': 'Assignee must be in the same department as the task'}), 400
 
@@ -18482,16 +24601,55 @@ def update_task(task_id):
             except Exception:
                 pp = 0
             fields.append('progress_pct=%s'); values.append(pp)
+            progress_updated = True
         if not fields:
             cur.close()
             return jsonify({'error': 'No fields to update'}), 400
         set_clause = ', '.join(fields) + ', updated_at = CURRENT_TIMESTAMP'
         values.append(task_id)
-        cur.execute(f"UPDATE bid_checklists SET {set_clause} WHERE id=%s", tuple(values))
-        try:
-            _recalc_bid_team_progress(cur, int(task.get('g_id') or 0))
-        except Exception:
-            pass
+        cur.execute(f"UPDATE {task_table} SET {set_clause} WHERE id=%s", tuple(values))
+        # Keep bid_checklists and won_project_checklists synchronized for shared task identity.
+        # This ensures PM/manager edits are visible across dashboards even when rows are mirrored.
+        sync_fields = []
+        sync_values = []
+        if 'task_name' in m:
+            sync_fields.append('task_name=%s'); sync_values.append(m.get('task_name').strip())
+        if 'description' in m:
+            sync_fields.append('description=%s'); sync_values.append(m.get('description').strip())
+        if 'status' in m:
+            sync_fields.append('status=%s'); sync_values.append(sv)
+        if 'due_date' in m:
+            sync_fields.append('due_date=%s'); sync_values.append(due_date_value if due_date_updated else _normalize_due_date_value(m.get('due_date')))
+        if 'priority' in m:
+            sync_fields.append('priority=%s'); sync_values.append(m.get('priority').strip())
+        if at is not None or ('assigned_to' in m and at is None):
+            sync_fields.append('assigned_to=%s'); sync_values.append(at)
+        if 'progress_pct' in m:
+            sync_fields.append('progress_pct=%s'); sync_values.append(pp)
+        elif status_updated and not progress_updated:
+            implied_progress = 100 if sv == 'completed' else 75 if sv == 'submitted' else 50 if sv == 'in_progress' else 0
+            sync_fields.append('progress_pct=%s'); sync_values.append(implied_progress)
+        if sync_fields:
+            sync_set = ', '.join(sync_fields) + ', updated_at=CURRENT_TIMESTAMP'
+            if task_table == 'won_project_checklists':
+                # Update mirrored bid row (source task) when present.
+                source_task_id = task.get('source_task_id')
+                if source_task_id:
+                    cur.execute(
+                        f"UPDATE bid_checklists SET {sync_set} WHERE id=%s",
+                        tuple([*sync_values, int(source_task_id)]),
+                    )
+            else:
+                # Update mirrored won rows that reference this bid task.
+                cur.execute(
+                    f"UPDATE won_project_checklists SET {sync_set} WHERE source_task_id=%s",
+                    tuple([*sync_values, int(task_id)]),
+                )
+        if task_table == 'bid_checklists':
+            try:
+                _recalc_bid_team_progress(cur, int(task.get('g_id') or 0))
+            except Exception:
+                pass
         mysql.connection.commit()
         cur.close()
         log_write('task_update_fields', f"task_id={task_id}")
@@ -18515,10 +24673,12 @@ def assign_task_team_lead_api(task_id):
         role_norm = ((get_user_role() or '') or '').strip().lower().replace('_', ' ')
         manager_roles = {
             'itadmin', 'supervisor', 'top level admin', 'topleveladmin',
-            'manager', 'project manager', 'project_manager',
+            'manager',
             'business manager', 'design manager', 'operation manager', 'operations manager', 'site manager',
             'engineering manager', 'procurement manager', 'accounts manager', 'finance manager',
         }
+        if role_norm.replace(' ', '') == 'projectmanager' and not getattr(current_user, 'is_admin', False):
+            return jsonify({'success': False, 'error': 'Project Manager can only assign tasks to department managers'}), 403
         if role_norm not in manager_roles and not getattr(current_user, 'is_admin', False):
             return jsonify({'success': False, 'error': 'Forbidden'}), 403
 
@@ -18622,7 +24782,7 @@ def assign_task_team_lead_api(task_id):
         if not lead_dept and dept_key:
             lead_dept = dept_key
 
-        if task_stage and lead_dept and lead_dept != task_stage:
+        if task_stage and lead_dept and not _departments_compatible(lead_dept, task_stage):
             cur.close()
             return jsonify({'success': False, 'error': 'Team lead must be in the same department as the task'}), 400
 
@@ -18651,13 +24811,181 @@ def assign_task_team_lead_api(task_id):
             cur.close()
         return jsonify({'success': False, 'error': str(e)}), 500
 
+
+@app.route('/api/task/<int:task_id>/assign-department-manager', methods=['POST'])
+@login_required
+def assign_task_department_manager_api(task_id):
+    """Assign task to department manager (PM -> manager handoff)."""
+    try:
+        is_flask_user = hasattr(current_user, 'is_authenticated') and current_user.is_authenticated
+        if not is_flask_user:
+            return jsonify({'ok': False, 'error': 'forbidden'}), 403
+
+        role_norm = ((get_user_role() or '') or '').strip().lower().replace('_', ' ')
+        allowed_roles = {
+            'itadmin', 'supervisor', 'top level admin', 'topleveladmin',
+            'manager', 'project manager', 'project_manager',
+            'business manager', 'design manager', 'operation manager', 'operations manager', 'site manager',
+            'engineering manager', 'procurement manager', 'accounts manager', 'finance manager',
+        }
+        if role_norm not in allowed_roles and not getattr(current_user, 'is_admin', False):
+            return jsonify({'ok': False, 'error': 'forbidden'}), 403
+
+        data = request.get_json(silent=True) or {}
+        manager_email = (data.get('manager_email') or '').strip().lower()
+        manager_user_id = data.get('manager_user_id')
+
+        cur = mysql.connection.cursor(DictCursor)
+        task_table = 'won_project_checklists'
+        cur.execute("SELECT id, g_id, department_key AS stage FROM won_project_checklists WHERE id=%s LIMIT 1", (int(task_id),))
+        task = cur.fetchone() or {}
+        if not task:
+            task_table = 'bid_checklists'
+            cur.execute("SELECT id, g_id, stage FROM bid_checklists WHERE id=%s LIMIT 1", (int(task_id),))
+            task = cur.fetchone() or {}
+        if not task:
+            cur.close()
+            return jsonify({'ok': False, 'error': 'task_not_found'}), 404
+
+        stage_key = _normalize_department_key(task.get('stage') or '')
+        if stage_key not in ('engineering_team', 'procurement_team', 'accounts_finance'):
+            cur.close()
+            return jsonify({'ok': False, 'error': 'invalid_task_stage'}), 400
+
+        try:
+            active_cid = session.get('active_company_id')
+        except Exception:
+            active_cid = None
+
+        resolved = None
+        if manager_user_id or manager_email:
+            user_row = None
+            if manager_user_id:
+                try:
+                    cur.execute("SELECT id, email, full_name FROM users WHERE id=%s LIMIT 1", (int(manager_user_id),))
+                    user_row = cur.fetchone() or None
+                except Exception:
+                    user_row = None
+            if not user_row and manager_email:
+                cur.execute("SELECT id, email, full_name FROM users WHERE LOWER(email)=LOWER(%s) LIMIT 1", (manager_email,))
+                user_row = cur.fetchone() or None
+
+            if user_row:
+                resolved = {
+                    'department_key': stage_key,
+                    'user_id': int(user_row.get('id') or 0) or None,
+                    'email': (user_row.get('email') or '').strip(),
+                    'name': (user_row.get('full_name') or user_row.get('email') or '').strip(),
+                    'employee_id': 0,
+                }
+                try:
+                    role_ok = False
+                    dept_ok = False
+                    if resolved.get('user_id'):
+                        params = [int(resolved.get('user_id'))]
+                        company_clause = ""
+                        if active_cid:
+                            company_clause = " AND company_id=%s"
+                            params.append(int(active_cid))
+                        cur.execute(
+                            f"""
+                            SELECT department_key, role
+                            FROM user_company_access
+                            WHERE user_id=%s
+                              AND COALESCE(is_active, TRUE)=TRUE
+                              {company_clause}
+                            ORDER BY id DESC
+                            """,
+                            tuple(params),
+                        )
+                        rows = cur.fetchall() or []
+                        for rr in rows:
+                            rr_dept = _normalize_department_key(rr.get('department_key') or '')
+                            rr_role = (rr.get('role') or '').strip().lower().replace('_', ' ')
+                            if rr_role == 'manager':
+                                role_ok = True
+                            if rr_dept == stage_key:
+                                dept_ok = True
+                    if not (role_ok and dept_ok):
+                        cur.close()
+                        return jsonify({'ok': False, 'error': 'selected_user_is_not_department_manager'}), 400
+                except Exception:
+                    pass
+
+                resolved['employee_id'] = _ensure_manager_employee(
+                    cur,
+                    email=resolved.get('email') or '',
+                    dept=stage_key,
+                    name=resolved.get('name') or '',
+                ) or 0
+
+        if not resolved or not resolved.get('employee_id'):
+            resolved = _resolve_department_manager_assignment(
+                cur,
+                stage_key,
+                company_id=(int(active_cid) if active_cid else None),
+            )
+        if not resolved or not resolved.get('employee_id'):
+            cur.close()
+            return jsonify({'ok': False, 'error': 'department_manager_not_configured'}), 400
+
+        cur.execute(
+            f"UPDATE {task_table} SET assigned_to=%s, updated_at=CURRENT_TIMESTAMP WHERE id=%s",
+            (int(resolved.get('employee_id')), int(task_id)),
+        )
+        try:
+            _enqueue_task_assignment_approval(
+                cur,
+                task_id=int(task_id),
+                department_key=stage_key,
+                title="Task Assignment Pending Approval",
+                message="Task reassigned by Project Manager and awaits department manager approval.",
+            )
+        except Exception:
+            pass
+        mysql.connection.commit()
+        cur.close()
+
+        try:
+            recipients = []
+            if resolved.get('user_id'):
+                recipients.append(f"user:{int(resolved.get('user_id'))}")
+            elif resolved.get('email'):
+                recipients.append(str(resolved.get('email')))
+            _notify_custom_recipients(
+                recipients,
+                task_id=int(task_id),
+                title="Task Assigned",
+                message="A project task has been assigned to you.",
+                category="info",
+            )
+        except Exception:
+            pass
+
+        return jsonify({'ok': True, 'employee_id': int(resolved.get('employee_id'))})
+    except Exception as e:
+        try:
+            mysql.connection.rollback()
+        except Exception:
+            pass
+        try:
+            cur.close()
+        except Exception:
+            pass
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
 @app.route('/task/<int:task_id>/delete', methods=['POST'])
 def delete_task(task_id):
     """Delete a task if authorized."""
     try:
         cur = mysql.connection.cursor(DictCursor)
-        cur.execute("SELECT assigned_to, g_id FROM bid_checklists WHERE id=%s", (task_id,))
+        task_table = 'won_project_checklists'
+        cur.execute("SELECT assigned_to, g_id FROM won_project_checklists WHERE id=%s", (task_id,))
         row = cur.fetchone()
+        if not row:
+            task_table = 'bid_checklists'
+            cur.execute("SELECT assigned_to, g_id FROM bid_checklists WHERE id=%s", (task_id,))
+            row = cur.fetchone()
         if not row:
             cur.close()
             return jsonify({'error': 'Task not found'}), 404
@@ -18710,6 +25038,13 @@ def delete_task(task_id):
                 )
             except Exception:
                 pass
+        try:
+            cur.execute(
+                "DELETE FROM document_approvals WHERE source_table='task_assignment' AND source_id=%s",
+                (int(task_id),),
+            )
+        except Exception:
+            pass
 
         try:
             cur.execute("DELETE FROM task_time_logs WHERE task_id=%s", (task_id,))
@@ -18732,15 +25067,12 @@ def delete_task(task_id):
         except Exception:
             pass
 
-        cur.execute("DELETE FROM bid_checklists WHERE id=%s", (task_id,))
-        try:
-            _recalc_bid_team_progress(cur, int(row.get('g_id') or 0))
-        except Exception:
-            pass
-        try:
-            _recalc_bid_team_progress(cur, int(g_id))
-        except Exception:
-            pass
+        cur.execute(f"DELETE FROM {task_table} WHERE id=%s", (task_id,))
+        if task_table == 'bid_checklists':
+            try:
+                _recalc_bid_team_progress(cur, int(row.get('g_id') or 0))
+            except Exception:
+                pass
         mysql.connection.commit()
         cur.close()
         log_write('task_delete', f"task_id={task_id}")
@@ -18758,9 +25090,14 @@ def task_upload_work(task_id):
     try:
         cur = mysql.connection.cursor(DictCursor)
         
-        # Get task info
-        cur.execute("SELECT * FROM bid_checklists WHERE id = %s", (task_id,))
+        # Get task info (won checklist first, then bid checklist)
+        cur.execute("SELECT * FROM won_project_checklists WHERE id = %s", (task_id,))
         task = cur.fetchone()
+        if task and not task.get('stage') and task.get('department_key'):
+            task['stage'] = task.get('department_key')
+        if not task:
+            cur.execute("SELECT * FROM bid_checklists WHERE id = %s", (task_id,))
+            task = cur.fetchone()
         
         if not task:
             cur.close()
@@ -18966,7 +25303,7 @@ def task_upload_work(task_id):
                 'task_id': task_id,
                 'event': 'upload',
                 'g_id': task.get('g_id'),
-                'stage': task.get('stage'),
+                'stage': task.get('stage') or task.get('department_key'),
             })
         except Exception:
             pass
@@ -18991,9 +25328,14 @@ def task_add_comment(task_id):
     try:
         cur = mysql.connection.cursor(DictCursor)
         
-        # Get task info
-        cur.execute("SELECT * FROM bid_checklists WHERE id = %s", (task_id,))
+        # Get task info (won checklist first, then bid checklist)
+        cur.execute("SELECT * FROM won_project_checklists WHERE id = %s", (task_id,))
         task = cur.fetchone()
+        if task and not task.get('stage') and task.get('department_key'):
+            task['stage'] = task.get('department_key')
+        if not task:
+            cur.execute("SELECT * FROM bid_checklists WHERE id = %s", (task_id,))
+            task = cur.fetchone()
         
         if not task:
             cur.close()
@@ -19696,27 +26038,37 @@ def create_project_stage_task(g_id):
                 cur.close()
                 return jsonify({'error': 'Not authorized'}), 403
 
-        # Assign to all bid members if any, otherwise leave unassigned.
-        assignee_ids = []
-        try:
-            cur.execute(
-                """
-                CREATE TABLE IF NOT EXISTS bid_assignment_members (
-                    id INT AUTO_INCREMENT PRIMARY KEY,
-                    g_id INT NOT NULL,
-                    employee_id INT NOT NULL,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    UNIQUE KEY uniq_g_emp (g_id, employee_id)
-                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-                """
-            )
-            cur.execute("SELECT employee_id FROM bid_assignment_members WHERE g_id=%s", (int(g_id),))
-            assignee_ids = [int(r[0]) for r in (cur.fetchall() or []) if r and r[0] is not None]
-        except Exception:
-            assignee_ids = []
+        # Workflow guard: PM can start stage tasking only after Accounts estimate is approved.
+        # Admin/Supervisor can bypass this guard.
+        role_norm = ((get_user_role() or '') or '').strip().lower().replace('_', ' ')
+        if not (getattr(current_user, 'is_admin', False) or getattr(current_user, 'is_supervisor', False)):
+            try:
+                _ensure_project_estimate_approvals_table(cur)
+                cur.execute(
+                    "SELECT status FROM project_estimate_approvals WHERE g_id=%s LIMIT 1",
+                    (int(g_id),),
+                )
+                est_row = cur.fetchone() or {}
+                est_status = (est_row.get('status') or '').strip().lower()
+                if est_status != 'approved':
+                    cur.close()
+                    return jsonify({'error': 'Project estimated value must be approved by Accounts & Finance before task execution starts.'}), 400
+            except Exception:
+                pass
 
-        if not assignee_ids:
-            assignee_ids = [None]
+        # PM flow: always assign directly to the target department manager.
+        try:
+            active_cid = session.get('active_company_id')
+        except Exception:
+            active_cid = None
+        manager_assignment = _resolve_department_manager_assignment(
+            cur,
+            stage_name,
+            company_id=(int(active_cid) if active_cid else None),
+        )
+        if not manager_assignment or not manager_assignment.get('employee_id'):
+            cur.close()
+            return jsonify({'error': 'Department manager is not configured for this stage'}), 400
 
         # Optional attachment
         if file_obj and getattr(file_obj, 'filename', None):
@@ -19728,36 +26080,61 @@ def create_project_stage_task(g_id):
             except Exception:
                 saved_path = None
 
-        prefix, next_num = _next_task_code_number(cur, stage_name)
-        for aid in assignee_ids:
-            task_code = f"{prefix}-{next_num:03d}" if prefix and next_num else None
-            cur.execute(
-                """
-                INSERT INTO bid_checklists (
-                    g_id, task_code, task_name, description, assigned_to,
-                    priority, due_date, progress_pct, stage, created_by, attachment_path
-                )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                """,
-                (
-                    int(g_id),
-                    task_code,
-                    task_name,
-                    description,
-                    aid,
-                    priority,
-                    due_date if due_date else None,
-                    0,
-                    stage_name,
-                    int(current_user.id),
-                    saved_path,
-                ),
+        _ensure_won_project_checklists_table(cur)
+        prefix, next_num = _next_won_task_code_number(cur, stage_name)
+        task_code = f"{prefix}-{next_num:03d}" if prefix and next_num else None
+        cur.execute(
+            """
+            INSERT INTO won_project_checklists (
+                source_task_id, g_id, department_key, task_code, task_name, description, status,
+                priority, due_date, progress_pct, assigned_to, attachment_path, created_at, updated_at
             )
-            if prefix and next_num:
-                next_num += 1
+            VALUES (%s, %s, %s, %s, %s, %s, 'pending', %s, %s, %s, %s, %s, NOW(), NOW())
+            """,
+            (
+                None,
+                int(g_id),
+                stage_name,
+                task_code,
+                task_name,
+                description,
+                priority,
+                due_date if due_date else None,
+                0,
+                int(manager_assignment.get('employee_id')),
+                saved_path,
+            ),
+        )
+        created_task_id = int(cur.lastrowid or 0)
+        try:
+            if created_task_id:
+                _enqueue_task_assignment_approval(
+                    cur,
+                    task_id=int(created_task_id),
+                    department_key=stage_name,
+                    title="Task Assignment Pending Approval",
+                    message=f"New task '{task_name}' requires department manager approval.",
+                )
+        except Exception:
+            pass
 
         mysql.connection.commit()
         cur.close()
+        try:
+            recipients = []
+            if manager_assignment.get('user_id'):
+                recipients.append(f"user:{int(manager_assignment.get('user_id'))}")
+            elif manager_assignment.get('email'):
+                recipients.append(str(manager_assignment.get('email')))
+            _notify_custom_recipients(
+                recipients,
+                task_id=created_task_id or None,
+                title="New Task Assigned",
+                message=f"{task_name} has been assigned to your department by Project Manager.",
+                category="info",
+            )
+        except Exception:
+            pass
         log_write('create_project_stage_task', f"Created stage task '{task_name}' for project {g_id}")
         return jsonify({'ok': True})
     except Exception as e:
@@ -19785,95 +26162,144 @@ def api_project_tasks(g_id):
             _ensure_task_manager_attachments_table(cur)
         except Exception:
             pass
-        cur.execute(
+        tasks = []
+        try:
+            _auto_assign_won_project_department_managers(cur, g_id=int(g_id))
+            mysql.connection.commit()
+        except Exception:
+            try:
+                mysql.connection.rollback()
+            except Exception:
+                pass
+        try:
+            cur.execute(
+                """
+                SELECT
+                    wpc.id AS id,
+                    wpc.source_task_id,
+                    wpc.g_id,
+                    wpc.task_code,
+                    wpc.task_name,
+                    wpc.description,
+                    wpc.department_key AS stage,
+                    wpc.status,
+                    wpc.priority,
+                    wpc.due_date,
+                    wpc.progress_pct,
+                    wpc.assigned_to,
+                    wpc.created_at,
+                    e.name AS assigned_employee_name,
+                    e.email AS employee_email,
+                    e.department
+                FROM won_project_checklists wpc
+                LEFT JOIN employees e ON wpc.assigned_to = e.id
+                WHERE wpc.g_id=%s
+                ORDER BY wpc.created_at DESC, wpc.id DESC
+                """,
+                (int(g_id),),
+            )
+            tasks = cur.fetchall() or []
+        except Exception:
+            tasks = []
+        if not tasks:
+            base_sql = """
+                SELECT bc.id, bc.g_id, bc.task_code, bc.task_name, bc.description, bc.stage, bc.status, bc.priority,
+                       bc.due_date, bc.progress_pct, bc.assigned_to, bc.created_at,
+                       e.name AS assigned_employee_name, e.email AS employee_email, e.department
+                FROM bid_checklists bc
+                LEFT JOIN employees e ON bc.assigned_to = e.id
+                WHERE g_id=%s {team_filter}
+                ORDER BY created_at DESC, id DESC
             """
-            SELECT bc.id, bc.g_id, bc.task_code, bc.task_name, bc.description, bc.stage, bc.status, bc.priority,
-                   bc.due_date, bc.progress_pct, bc.assigned_to, bc.created_at,
-                   e.name AS assigned_employee_name, e.email AS employee_email, e.department,
-                   (
-                       SELECT COUNT(*)
-                       FROM document_approvals da
-                       JOIN task_work_files twf
-                         ON da.source_table='task_work_files' AND da.source_id=twf.id
-                       WHERE twf.task_id = bc.id AND da.status='pending'
-                   ) +
-                   (
-                       SELECT COUNT(*)
-                       FROM document_approvals da
-                       JOIN task_comments tc
-                         ON da.source_table='task_comments' AND da.source_id=tc.id
-                       WHERE tc.task_id = bc.id AND da.status='pending'
-                   ) +
-                   (
-                       SELECT COUNT(*)
-                       FROM task_comments tc
-                       LEFT JOIN document_approvals da
-                         ON da.source_table='task_comments' AND da.source_id=tc.id
-                       WHERE tc.task_id = bc.id AND tc.needs_approval=1 AND da.id IS NULL
-                   ) +
-                   (
-                       SELECT COUNT(*)
-                       FROM document_approvals da
-                       JOIN task_manager_attachments tma
-                         ON da.source_table='task_manager_attachments' AND da.source_id=tma.id
-                       WHERE tma.task_id = bc.id AND da.status='pending'
-                   ) AS pending_approvals,
-                   (
-                       SELECT COUNT(*)
-                       FROM document_approvals da
-                       JOIN task_work_files twf
-                         ON da.source_table='task_work_files' AND da.source_id=twf.id
-                       WHERE twf.task_id = bc.id AND da.status='review'
-                   ) +
-                   (
-                       SELECT COUNT(*)
-                       FROM document_approvals da
-                       JOIN task_comments tc
-                         ON da.source_table='task_comments' AND da.source_id=tc.id
-                       WHERE tc.task_id = bc.id AND da.status='review'
-                   ) +
-                   (
-                       SELECT COUNT(*)
-                       FROM document_approvals da
-                       JOIN task_manager_attachments tma
-                         ON da.source_table='task_manager_attachments' AND da.source_id=tma.id
-                       WHERE tma.task_id = bc.id AND da.status='review'
-                   ) AS review_items,
-                   (
-                       SELECT COUNT(*)
-                       FROM document_approvals da
-                       JOIN task_work_files twf
-                         ON da.source_table='task_work_files' AND da.source_id=twf.id
-                       WHERE twf.task_id = bc.id AND da.status='approved'
-                   ) +
-                   (
-                       SELECT COUNT(*)
-                       FROM document_approvals da
-                       JOIN task_comments tc
-                         ON da.source_table='task_comments' AND da.source_id=tc.id
-                       WHERE tc.task_id = bc.id AND da.status='approved'
-                   ) +
-                   (
-                       SELECT COUNT(*)
-                       FROM document_approvals da
-                       JOIN task_manager_attachments tma
-                         ON da.source_table='task_manager_attachments' AND da.source_id=tma.id
-                       WHERE tma.task_id = bc.id AND da.status='approved'
-                   ) AS approved_items
-            FROM bid_checklists bc
-            LEFT JOIN employees e ON bc.assigned_to = e.id
-            WHERE g_id=%s AND team_archive IS NULL
-            ORDER BY created_at DESC, id DESC
-            """,
-            (int(g_id),),
-        )
-        tasks = cur.fetchall() or []
+            try:
+                cur.execute(base_sql.format(team_filter="AND team_archive IS NULL"), (int(g_id),))
+            except Exception as qe:
+                if "Unknown column 'team_archive'" in str(qe):
+                    cur.execute(base_sql.format(team_filter=""), (int(g_id),))
+                else:
+                    raise
+            tasks = cur.fetchall() or []
         task_ids = [t.get('id') for t in tasks if t.get('id')]
         comments_map = {}
         employee_files_map = {}
         manager_files_map = {}
+        pending_counts = {}
+        review_counts = {}
+        approved_counts = {}
         if task_ids:
             placeholders = ",".join(["%s"] * len(task_ids))
+            try:
+                cur.execute(
+                    f"""
+                    SELECT twf.task_id AS task_id,
+                           SUM(CASE WHEN da.status='pending' THEN 1 ELSE 0 END) AS pending_cnt,
+                           SUM(CASE WHEN da.status='review' THEN 1 ELSE 0 END) AS review_cnt,
+                           SUM(CASE WHEN da.status='approved' THEN 1 ELSE 0 END) AS approved_cnt
+                    FROM task_work_files twf
+                    LEFT JOIN document_approvals da
+                      ON da.source_table='task_work_files' AND da.source_id=twf.id
+                    WHERE twf.task_id IN ({placeholders})
+                    GROUP BY twf.task_id
+                    """,
+                    tuple(task_ids),
+                )
+                for r in (cur.fetchall() or []):
+                    tid = r.get('task_id')
+                    if not tid:
+                        continue
+                    pending_counts[tid] = int(r.get('pending_cnt') or 0)
+                    review_counts[tid] = int(r.get('review_cnt') or 0)
+                    approved_counts[tid] = int(r.get('approved_cnt') or 0)
+            except Exception:
+                pass
+            try:
+                cur.execute(
+                    f"""
+                    SELECT tc.task_id AS task_id,
+                           SUM(CASE WHEN da.status='pending' THEN 1 ELSE 0 END) AS pending_cnt,
+                           SUM(CASE WHEN da.status='review' THEN 1 ELSE 0 END) AS review_cnt,
+                           SUM(CASE WHEN da.status='approved' THEN 1 ELSE 0 END) AS approved_cnt
+                    FROM task_comments tc
+                    LEFT JOIN document_approvals da
+                      ON da.source_table='task_comments' AND da.source_id=tc.id
+                    WHERE tc.task_id IN ({placeholders})
+                    GROUP BY tc.task_id
+                    """,
+                    tuple(task_ids),
+                )
+                for r in (cur.fetchall() or []):
+                    tid = r.get('task_id')
+                    if not tid:
+                        continue
+                    pending_counts[tid] = int(pending_counts.get(tid, 0)) + int(r.get('pending_cnt') or 0)
+                    review_counts[tid] = int(review_counts.get(tid, 0)) + int(r.get('review_cnt') or 0)
+                    approved_counts[tid] = int(approved_counts.get(tid, 0)) + int(r.get('approved_cnt') or 0)
+            except Exception:
+                pass
+            try:
+                cur.execute(
+                    f"""
+                    SELECT tma.task_id AS task_id,
+                           SUM(CASE WHEN da.status='pending' THEN 1 ELSE 0 END) AS pending_cnt,
+                           SUM(CASE WHEN da.status='review' THEN 1 ELSE 0 END) AS review_cnt,
+                           SUM(CASE WHEN da.status='approved' THEN 1 ELSE 0 END) AS approved_cnt
+                    FROM task_manager_attachments tma
+                    LEFT JOIN document_approvals da
+                      ON da.source_table='task_manager_attachments' AND da.source_id=tma.id
+                    WHERE tma.task_id IN ({placeholders})
+                    GROUP BY tma.task_id
+                    """,
+                    tuple(task_ids),
+                )
+                for r in (cur.fetchall() or []):
+                    tid = r.get('task_id')
+                    if not tid:
+                        continue
+                    pending_counts[tid] = int(pending_counts.get(tid, 0)) + int(r.get('pending_cnt') or 0)
+                    review_counts[tid] = int(review_counts.get(tid, 0)) + int(r.get('review_cnt') or 0)
+                    approved_counts[tid] = int(approved_counts.get(tid, 0)) + int(r.get('approved_cnt') or 0)
+            except Exception:
+                pass
             try:
                 cur.execute(f"""
                     SELECT tc.*, e.name as employee_name, u.email as user_email, da.status as approval_status, da.decision_note as decision_note
@@ -19978,9 +26404,9 @@ def api_project_tasks(g_id):
             mysql.connection.rollback()
         for t in tasks:
             tid = t.get('id')
-            t['pending_approvals'] = int(t.get('pending_approvals') or 0)
-            t['review_items'] = int(t.get('review_items') or 0)
-            t['approved_items'] = int(t.get('approved_items') or 0)
+            t['pending_approvals'] = int(pending_counts.get(tid, t.get('pending_approvals') or 0) or 0)
+            t['review_items'] = int(review_counts.get(tid, t.get('review_items') or 0) or 0)
+            t['approved_items'] = int(approved_counts.get(tid, t.get('approved_items') or 0) or 0)
             t['employee_comments'] = comments_map.get(tid, [])
             t['employee_files'] = employee_files_map.get(tid, [])
             t['manager_files'] = manager_files_map.get(tid, [])
@@ -21283,12 +27709,45 @@ def api_employee_bid_tasks(g_id):
         # - Employee session users (session['employee_id'])
         is_flask_user = hasattr(current_user, 'is_authenticated') and current_user.is_authenticated
         employee_id = session.get('employee_id')
+        requested_employee_id = request.args.get('employee_id', type=int)
 
         emp = None
-        if is_flask_user:
+        if is_flask_user and requested_employee_id:
+            role_norm = ((get_user_role() or getattr(current_user, 'role', '') or '')).strip().lower().replace('_', ' ')
+            can_view_other_employee = bool(
+                getattr(current_user, 'is_admin', False)
+                or getattr(current_user, 'is_supervisor', False)
+                or role_norm in (
+                    'manager',
+                    'project manager',
+                    'business manager',
+                    'design manager',
+                    'operation manager',
+                    'operations manager',
+                    'site manager',
+                    'engineering manager',
+                    'procurement manager',
+                    'accounts manager',
+                    'finance manager',
+                    'teamlead',
+                    'team lead',
+                    'top level admin',
+                    'topleveladmin',
+                )
+            )
+            if can_view_other_employee:
+                try:
+                    cur.execute(
+                        "SELECT id, name, email, department FROM employees WHERE id=%s AND is_active=TRUE LIMIT 1",
+                        (int(requested_employee_id),),
+                    )
+                    emp = cur.fetchone()
+                except Exception:
+                    emp = None
+        if is_flask_user and not emp:
             try:
                 cur.execute(
-                    "SELECT id, name, email FROM employees WHERE LOWER(email)=LOWER(%s) AND is_active=TRUE LIMIT 1",
+                    "SELECT id, name, email, department FROM employees WHERE LOWER(email)=LOWER(%s) AND is_active=TRUE LIMIT 1",
                     (current_user.email,),
                 )
                 emp = cur.fetchone()
@@ -21297,7 +27756,7 @@ def api_employee_bid_tasks(g_id):
         else:
             if employee_id:
                 try:
-                    cur.execute("SELECT id, name, email FROM employees WHERE id=%s AND is_active=TRUE LIMIT 1", (employee_id,))
+                    cur.execute("SELECT id, name, email, department FROM employees WHERE id=%s AND is_active=TRUE LIMIT 1", (employee_id,))
                     emp = cur.fetchone()
                 except Exception:
                     emp = None
@@ -21305,103 +27764,215 @@ def api_employee_bid_tasks(g_id):
         if not emp:
             return jsonify({'ok': False, 'error': 'employee_not_found', 'tasks': []}), 403
 
-        cur.execute(
-            """
-            SELECT
-                bc.id,
-                bc.task_code,
-                bc.task_name,
-                COALESCE(bc.description,'') AS description,
-                COALESCE(bc.status,'pending') AS status,
-                bc.due_date,
-                bc.created_at,
-                COALESCE(bc.priority,'medium') AS priority,
-                (
-                    SELECT COUNT(*)
-                    FROM document_approvals da
-                    JOIN task_work_files twf
-                      ON da.source_table='task_work_files' AND da.source_id=twf.id
-                    WHERE twf.task_id = bc.id AND da.status='pending'
-                ) +
-                (
-                    SELECT COUNT(*)
-                    FROM document_approvals da
-                    JOIN task_comments tc
-                      ON da.source_table='task_comments' AND da.source_id=tc.id
-                    WHERE tc.task_id = bc.id AND da.status='pending'
-                ) +
-                (
-                    SELECT COUNT(*)
-                    FROM task_comments tc
-                    LEFT JOIN document_approvals da
-                      ON da.source_table='task_comments' AND da.source_id=tc.id
-                    WHERE tc.task_id = bc.id AND tc.needs_approval=1 AND da.id IS NULL
-                ) +
-                (
-                    SELECT COUNT(*)
-                    FROM document_approvals da
-                    JOIN task_manager_attachments tma
-                      ON da.source_table='task_manager_attachments' AND da.source_id=tma.id
-                    WHERE tma.task_id = bc.id AND da.status='pending'
-                ) AS pending_approvals,
-                (
-                    SELECT COUNT(*)
-                    FROM document_approvals da
-                    JOIN task_work_files twf
-                      ON da.source_table='task_work_files' AND da.source_id=twf.id
-                    WHERE twf.task_id = bc.id AND da.status='review'
-                ) +
-                (
-                    SELECT COUNT(*)
-                    FROM document_approvals da
-                    JOIN task_comments tc
-                      ON da.source_table='task_comments' AND da.source_id=tc.id
-                    WHERE tc.task_id = bc.id AND da.status='review'
-                ) +
-                (
-                    SELECT COUNT(*)
-                    FROM document_approvals da
-                    JOIN task_manager_attachments tma
-                      ON da.source_table='task_manager_attachments' AND da.source_id=tma.id
-                    WHERE tma.task_id = bc.id AND da.status='review'
-                ) AS review_items,
-                (
-                    SELECT COUNT(*)
-                    FROM document_approvals da
-                    JOIN task_work_files twf
-                      ON da.source_table='task_work_files' AND da.source_id=twf.id
-                    WHERE twf.task_id = bc.id AND da.status='approved'
-                ) +
-                (
-                    SELECT COUNT(*)
-                    FROM document_approvals da
-                    JOIN task_comments tc
-                      ON da.source_table='task_comments' AND da.source_id=tc.id
-                    WHERE tc.task_id = bc.id AND da.status='approved'
-                ) +
-                (
-                    SELECT COUNT(*)
-                    FROM document_approvals da
-                    JOIN task_manager_attachments tma
-                      ON da.source_table='task_manager_attachments' AND da.source_id=tma.id
-                    WHERE tma.task_id = bc.id AND da.status='approved'
-                ) AS approved_items
-            FROM bid_checklists bc
-            WHERE bc.g_id = %s AND bc.assigned_to = %s
-            ORDER BY COALESCE(bc.due_date, bc.created_at) ASC, bc.id ASC
-            """,
-            (g_id, emp.get('id')),
-        )
-        rows = cur.fetchall() or []
+        emp_dept_norm = _normalize_department_key(emp.get('department') or '')
+        won_scope_key = 'engineering_team' if emp_dept_norm == 'engineer' else emp_dept_norm
+        use_won_scope = won_scope_key in ('engineering_team', 'procurement_team', 'accounts_finance')
+
+        if use_won_scope:
+            dept_aliases_map = {
+                'engineering_team': ('engineering_team', 'engineering team'),
+                'procurement_team': ('procurement_team', 'procurement'),
+                'accounts_finance': ('accounts_finance', 'accounts finance', 'accounts', 'finance', 'accounting'),
+            }
+            aliases = dept_aliases_map.get(won_scope_key, (won_scope_key,))
+            aliases_ph = ','.join(['%s'] * len(aliases))
+            cur.execute(
+                f"""
+                SELECT
+                    COALESCE(wpc.source_task_id, wpc.id) AS id,
+                    wpc.id AS checklist_id,
+                    wpc.source_task_id,
+                    wpc.task_code,
+                    wpc.task_name,
+                    COALESCE(wpc.description,'') AS description,
+                    COALESCE(wpc.status,'pending') AS status,
+                    wpc.due_date,
+                    wpc.created_at,
+                    COALESCE(wpc.priority,'medium') AS priority,
+                    wpc.department_key AS stage,
+                    wpc.department_key AS department,
+                    0 AS pending_approvals,
+                    0 AS review_items,
+                    0 AS approved_items
+                FROM won_project_checklists wpc
+                WHERE wpc.g_id = %s
+                  AND wpc.assigned_to = %s
+                  AND LOWER(COALESCE(wpc.department_key,'')) IN ({aliases_ph})
+                ORDER BY COALESCE(wpc.due_date, wpc.created_at) ASC, wpc.id ASC
+                """,
+                tuple([g_id, emp.get('id'), *aliases]),
+            )
+            rows = cur.fetchall() or []
+        else:
+            cur.execute(
+                """
+                SELECT
+                    bc.id,
+                    bc.id AS checklist_id,
+                    NULL AS source_task_id,
+                    bc.task_code,
+                    bc.task_name,
+                    COALESCE(bc.description,'') AS description,
+                    COALESCE(bc.status,'pending') AS status,
+                    bc.due_date,
+                    bc.created_at,
+                    COALESCE(bc.priority,'medium') AS priority,
+                    bc.stage AS stage,
+                    bc.stage AS department,
+                    (
+                        SELECT COUNT(*)
+                        FROM document_approvals da
+                        JOIN task_work_files twf
+                          ON da.source_table='task_work_files' AND da.source_id=twf.id
+                        WHERE twf.task_id = bc.id AND da.status='pending'
+                    ) +
+                    (
+                        SELECT COUNT(*)
+                        FROM document_approvals da
+                        JOIN task_comments tc
+                          ON da.source_table='task_comments' AND da.source_id=tc.id
+                        WHERE tc.task_id = bc.id AND da.status='pending'
+                    ) +
+                    (
+                        SELECT COUNT(*)
+                        FROM document_approvals da
+                        JOIN task_manager_attachments tma
+                          ON da.source_table='task_manager_attachments' AND da.source_id=tma.id
+                        WHERE tma.task_id = bc.id AND da.status='pending'
+                    ) AS pending_approvals,
+                    (
+                        SELECT COUNT(*)
+                        FROM document_approvals da
+                        JOIN task_work_files twf
+                          ON da.source_table='task_work_files' AND da.source_id=twf.id
+                        WHERE twf.task_id = bc.id AND da.status='review'
+                    ) +
+                    (
+                        SELECT COUNT(*)
+                        FROM document_approvals da
+                        JOIN task_comments tc
+                          ON da.source_table='task_comments' AND da.source_id=tc.id
+                        WHERE tc.task_id = bc.id AND da.status='review'
+                    ) +
+                    (
+                        SELECT COUNT(*)
+                        FROM document_approvals da
+                        JOIN task_manager_attachments tma
+                          ON da.source_table='task_manager_attachments' AND da.source_id=tma.id
+                        WHERE tma.task_id = bc.id AND da.status='review'
+                    ) AS review_items,
+                    (
+                        SELECT COUNT(*)
+                        FROM document_approvals da
+                        JOIN task_work_files twf
+                          ON da.source_table='task_work_files' AND da.source_id=twf.id
+                        WHERE twf.task_id = bc.id AND da.status='approved'
+                    ) +
+                    (
+                        SELECT COUNT(*)
+                        FROM document_approvals da
+                        JOIN task_comments tc
+                          ON da.source_table='task_comments' AND da.source_id=tc.id
+                        WHERE tc.task_id = bc.id AND da.status='approved'
+                    ) +
+                    (
+                        SELECT COUNT(*)
+                        FROM document_approvals da
+                        JOIN task_manager_attachments tma
+                          ON da.source_table='task_manager_attachments' AND da.source_id=tma.id
+                        WHERE tma.task_id = bc.id AND da.status='approved'
+                    ) AS approved_items
+                FROM bid_checklists bc
+                WHERE bc.g_id = %s AND bc.assigned_to = %s
+                ORDER BY COALESCE(bc.due_date, bc.created_at) ASC, bc.id ASC
+                """,
+                (g_id, emp.get('id')),
+            )
+            rows = cur.fetchall() or []
         task_ids = [r.get('id') for r in rows if r.get('id')]
         comments_map = {}
         employee_files_map = {}
         manager_files_map = {}
+        pending_counts = {}
+        review_counts = {}
+        approved_counts = {}
         if task_ids:
             try:
                 placeholders = ",".join(["%s"] * len(task_ids))
             except Exception:
                 placeholders = ""
+            try:
+                cur.execute(
+                    f"""
+                    SELECT twf.task_id AS task_id,
+                           SUM(CASE WHEN da.status='pending' THEN 1 ELSE 0 END) AS pending_cnt,
+                           SUM(CASE WHEN da.status='review' THEN 1 ELSE 0 END) AS review_cnt,
+                           SUM(CASE WHEN da.status='approved' THEN 1 ELSE 0 END) AS approved_cnt
+                    FROM task_work_files twf
+                    LEFT JOIN document_approvals da
+                      ON da.source_table='task_work_files' AND da.source_id=twf.id
+                    WHERE twf.task_id IN ({placeholders})
+                    GROUP BY twf.task_id
+                    """,
+                    tuple(task_ids),
+                )
+                for rr in (cur.fetchall() or []):
+                    tid = rr.get('task_id')
+                    if not tid:
+                        continue
+                    pending_counts[tid] = int(rr.get('pending_cnt') or 0)
+                    review_counts[tid] = int(rr.get('review_cnt') or 0)
+                    approved_counts[tid] = int(rr.get('approved_cnt') or 0)
+            except Exception:
+                pass
+            try:
+                cur.execute(
+                    f"""
+                    SELECT tc.task_id AS task_id,
+                           SUM(CASE WHEN da.status='pending' THEN 1 ELSE 0 END) AS pending_cnt,
+                           SUM(CASE WHEN da.status='review' THEN 1 ELSE 0 END) AS review_cnt,
+                           SUM(CASE WHEN da.status='approved' THEN 1 ELSE 0 END) AS approved_cnt
+                    FROM task_comments tc
+                    LEFT JOIN document_approvals da
+                      ON da.source_table='task_comments' AND da.source_id=tc.id
+                    WHERE tc.task_id IN ({placeholders})
+                    GROUP BY tc.task_id
+                    """,
+                    tuple(task_ids),
+                )
+                for rr in (cur.fetchall() or []):
+                    tid = rr.get('task_id')
+                    if not tid:
+                        continue
+                    pending_counts[tid] = int(pending_counts.get(tid, 0)) + int(rr.get('pending_cnt') or 0)
+                    review_counts[tid] = int(review_counts.get(tid, 0)) + int(rr.get('review_cnt') or 0)
+                    approved_counts[tid] = int(approved_counts.get(tid, 0)) + int(rr.get('approved_cnt') or 0)
+            except Exception:
+                pass
+            try:
+                cur.execute(
+                    f"""
+                    SELECT tma.task_id AS task_id,
+                           SUM(CASE WHEN da.status='pending' THEN 1 ELSE 0 END) AS pending_cnt,
+                           SUM(CASE WHEN da.status='review' THEN 1 ELSE 0 END) AS review_cnt,
+                           SUM(CASE WHEN da.status='approved' THEN 1 ELSE 0 END) AS approved_cnt
+                    FROM task_manager_attachments tma
+                    LEFT JOIN document_approvals da
+                      ON da.source_table='task_manager_attachments' AND da.source_id=tma.id
+                    WHERE tma.task_id IN ({placeholders})
+                    GROUP BY tma.task_id
+                    """,
+                    tuple(task_ids),
+                )
+                for rr in (cur.fetchall() or []):
+                    tid = rr.get('task_id')
+                    if not tid:
+                        continue
+                    pending_counts[tid] = int(pending_counts.get(tid, 0)) + int(rr.get('pending_cnt') or 0)
+                    review_counts[tid] = int(review_counts.get(tid, 0)) + int(rr.get('review_cnt') or 0)
+                    approved_counts[tid] = int(approved_counts.get(tid, 0)) + int(rr.get('approved_cnt') or 0)
+            except Exception:
+                pass
             try:
                 cur.execute(f"""
                     SELECT tc.*, e.name as employee_name, u.email as user_email, da.status as approval_status, da.decision_note as decision_note
@@ -21491,6 +28062,7 @@ def api_employee_bid_tasks(g_id):
                 manager_files_map = {}
 
         tasks = []
+        rows_to_complete = []
         for r in rows:
             dd = r.get('due_date')
             try:
@@ -21502,22 +28074,84 @@ def api_employee_bid_tasks(g_id):
                 created_str = ca.strftime('%Y-%m-%d %H:%M') if ca else ''
             except Exception:
                 created_str = str(ca) if ca else ''
+            tid = r.get('id')
+            pending_local = int(pending_counts.get(tid, r.get('pending_approvals') or 0) or 0)
+            review_local = int(review_counts.get(tid, r.get('review_items') or 0) or 0)
+            approved_local = int(approved_counts.get(tid, r.get('approved_items') or 0) or 0)
+            base_status = normalize_task_status(r.get('status') or 'pending')
+            derived_status = base_status
+            if approved_local > 0 and pending_local <= 0 and review_local <= 0 and base_status in ('pending', 'in_progress', 'submitted'):
+                derived_status = 'completed'
+                rows_to_complete.append({
+                    'task_id': tid,
+                    'checklist_id': r.get('checklist_id'),
+                    'source_task_id': r.get('source_task_id'),
+                })
             tasks.append({
                 'id': r.get('id'),
                 'task_code': r.get('task_code') or '',
                 'task_name': r.get('task_name') or 'Task',
                 'description': r.get('description') or '',
-                'status': (r.get('status') or 'pending').lower(),
+                'status': derived_status,
                 'due_date': due_str,
                 'assigned_at': created_str,
-                'pending_approvals': int(r.get('pending_approvals') or 0),
-                'review_items': int(r.get('review_items') or 0),
-                'approved_items': int(r.get('approved_items') or 0),
+                'pending_approvals': pending_local,
+                'review_items': review_local,
+                'approved_items': approved_local,
                 'priority': (r.get('priority') or 'medium').lower(),
                 'employee_comments': comments_map.get(r.get('id'), []),
                 'employee_files': employee_files_map.get(r.get('id'), []),
                 'manager_files': manager_files_map.get(r.get('id'), []),
             })
+        # Persist auto-healed completion status so all dashboards stay consistent.
+        if rows_to_complete:
+            for rr in rows_to_complete:
+                try:
+                    if use_won_scope:
+                        cur.execute(
+                            """
+                            UPDATE won_project_checklists
+                            SET status='completed', progress_pct=100, updated_at=CURRENT_TIMESTAMP
+                            WHERE id=%s
+                            """,
+                            (int(rr.get('checklist_id') or rr.get('task_id') or 0),),
+                        )
+                        src_id = int(rr.get('source_task_id') or 0)
+                        if src_id > 0:
+                            cur.execute(
+                                """
+                                UPDATE bid_checklists
+                                SET status='completed', progress_pct=100, updated_at=CURRENT_TIMESTAMP
+                                WHERE id=%s
+                                """,
+                                (src_id,),
+                            )
+                    else:
+                        cur.execute(
+                            """
+                            UPDATE bid_checklists
+                            SET status='completed', progress_pct=100, updated_at=CURRENT_TIMESTAMP
+                            WHERE id=%s
+                            """,
+                            (int(rr.get('task_id') or 0),),
+                        )
+                        cur.execute(
+                            """
+                            UPDATE won_project_checklists
+                            SET status='completed', progress_pct=100, updated_at=CURRENT_TIMESTAMP
+                            WHERE source_task_id=%s
+                            """,
+                            (int(rr.get('task_id') or 0),),
+                        )
+                except Exception:
+                    continue
+            try:
+                mysql.connection.commit()
+            except Exception:
+                try:
+                    mysql.connection.rollback()
+                except Exception:
+                    pass
         return jsonify({'ok': True, 'tasks': tasks})
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e), 'tasks': []}), 500
@@ -21688,7 +28322,8 @@ def api_team_employees(team):
     Supports both Flask-Login users and session-based employees.
     """
     team = (team or '').strip()
-    if not team:
+    team_key = _normalize_department_key(team) or team.strip().lower().replace(' ', '_')
+    if not team_key:
         return jsonify({'employees': []})
 
     cur = mysql.connection.cursor(DictCursor)
@@ -21708,8 +28343,8 @@ def api_team_employees(team):
             emp = cur.fetchone()
             if not emp:
                 return jsonify({'employees': []}), 403
-            emp_dept = (emp.get('department') or '').strip().lower()
-            if emp_dept and emp_dept != team.lower():
+            emp_dept = _normalize_department_key(emp.get('department') or '') or (emp.get('department') or '').strip().lower().replace(' ', '_')
+            if emp_dept and emp_dept != team_key:
                 return jsonify({'employees': []}), 403
 
         # Return minimal fields (safe to expose to employees)
@@ -21717,7 +28352,18 @@ def api_team_employees(team):
         # IMPORTANT: For Flask-Login users, scope the roster by ACTIVE company context
         # (prevents cross-company assignments like Sunsprint employees showing under IKIO context).
         extra_clause = ""
-        params = [team]
+        team_aliases = {
+            'business': ('business', 'business dev', 'business development'),
+            'design': ('design', 'marketing'),
+            'operations': ('operations', 'operation', 'ops'),
+            'engineer': ('engineer', 'engineering', 'site_engineer', 'site engineer', 'site manager'),
+            'engineering_team': ('engineering_team', 'engineering team'),
+            'procurement_team': ('procurement_team', 'procurement team', 'procurement'),
+            'accounts_finance': ('accounts_finance', 'accounts & finance', 'accounts finance', 'accounting', 'finance', 'accounts'),
+        }
+        aliases = tuple(dict.fromkeys([a.strip().lower() for a in team_aliases.get(team_key, (team_key,)) if a]))
+        aliases_ph = ",".join(["%s"] * len(aliases))
+        params = [*aliases]
         if is_flask_user:
             try:
                 active_cid = session.get('active_company_id')
@@ -21747,8 +28393,17 @@ def api_team_employees(team):
             SELECT id, name, email, department
             FROM employees
             WHERE is_active = TRUE
-              AND LOWER(COALESCE(department,'')) = LOWER(%s)
-              AND LOWER(COALESCE(email,'')) NOT IN (SELECT LOWER(email) FROM users)
+              AND LOWER(COALESCE(department,'')) IN ({aliases_ph})
+              AND NOT EXISTS (
+                    SELECT 1
+                    FROM users u
+                    WHERE LOWER(COALESCE(u.email,'')) = LOWER(COALESCE(employees.email,''))
+                      AND LOWER(REPLACE(REPLACE(COALESCE(u.role,''),'_',''),' ','')) IN (
+                            'manager','businessmanager','designmanager','operationsmanager','operationmanager',
+                            'sitemanager','engineeringmanager','procurementmanager','accountsmanager','financemanager',
+                            'projectmanager','teamlead','teamleader','itadmin','supervisor','topleveladmin'
+                      )
+                )
               {extra_clause}
             ORDER BY name
             """,
@@ -22294,6 +28949,172 @@ def _ensure_manager_employee(cur, email: str, dept: str | None = None, name: str
         return int(cur.lastrowid or 0) or None
     except Exception:
         return None
+
+
+def _resolve_department_manager_assignment(cur, dept_key: str, company_id: int | None = None) -> dict | None:
+    """Resolve department manager + employee mapping for direct PM assignment."""
+    dept = _normalize_department_key(dept_key or '')
+    if dept not in ('engineering_team', 'procurement_team', 'accounts_finance'):
+        return None
+
+    dept_aliases = {
+        'engineering_team': ('engineering_team', 'engineering team'),
+        'procurement_team': ('procurement_team', 'procurement team'),
+        'accounts_finance': ('accounts_finance', 'accounts & finance', 'accounts finance', 'accounting', 'finance'),
+    }
+    role_aliases = {
+        'engineering_team': ('engineering manager', 'engineering_team', 'engineering team', 'manager'),
+        'procurement_team': ('procurement manager', 'procurement_team', 'procurement team', 'manager'),
+        'accounts_finance': ('accounts manager', 'finance manager', 'accounts_finance', 'accounts & finance', 'manager'),
+    }
+    employee_dept_aliases = {
+        'engineering_team': ('engineering_team', 'engineering team'),
+        'procurement_team': ('procurement_team', 'procurement team'),
+        'accounts_finance': ('accounts_finance', 'accounts & finance', 'accounts finance', 'accounting', 'finance'),
+    }
+
+    row = None
+    try:
+        dept_vals = tuple(v.lower() for v in dept_aliases.get(dept, (dept,)))
+        role_vals = tuple(v.lower() for v in role_aliases.get(dept, ('manager',)))
+        dept_ph = ','.join(['%s'] * len(dept_vals))
+        role_ph = ','.join(['%s'] * len(role_vals))
+        params = [*role_vals, *dept_vals]
+        company_clause = ""
+        if company_id:
+            company_clause = " AND uca.company_id = %s"
+            params.append(int(company_id))
+        cur.execute(
+            f"""
+            SELECT
+                u.id AS user_id,
+                u.email AS user_email,
+                COALESCE(e.id, 0) AS employee_id,
+                COALESCE(e.name, u.full_name, u.email) AS manager_name
+            FROM user_company_access uca
+            JOIN users u ON u.id = uca.user_id
+            LEFT JOIN employees e
+              ON LOWER(COALESCE(e.email,'')) = LOWER(COALESCE(u.email,''))
+             AND COALESCE(e.is_active, TRUE)=TRUE
+            WHERE LOWER(COALESCE(uca.role,'')) IN ({role_ph})
+              AND LOWER(COALESCE(uca.department_key,'')) IN ({dept_ph})
+              AND COALESCE(uca.is_active, TRUE)=TRUE
+              {company_clause}
+            ORDER BY CASE WHEN LOWER(COALESCE(uca.role,''))='manager' THEN 2 ELSE 1 END, uca.id ASC
+            LIMIT 1
+            """,
+            tuple(params),
+        )
+        row = cur.fetchone() or None
+    except Exception:
+        row = None
+
+    if not row:
+        try:
+            emp_depts = tuple(v.lower() for v in employee_dept_aliases.get(dept, (dept,)))
+            role_vals = tuple(v.lower() for v in role_aliases.get(dept, ('manager',)))
+            emp_ph = ','.join(['%s'] * len(emp_depts))
+            role_ph = ','.join(['%s'] * len(role_vals))
+            cur.execute(
+                f"""
+                SELECT
+                    u.id AS user_id,
+                    u.email AS user_email,
+                    COALESCE(e.id, 0) AS employee_id,
+                    COALESCE(e.name, u.full_name, u.email) AS manager_name
+                FROM users u
+                LEFT JOIN employees e
+                  ON LOWER(COALESCE(e.email,'')) = LOWER(COALESCE(u.email,''))
+                 AND COALESCE(e.is_active, TRUE)=TRUE
+                 AND LOWER(COALESCE(e.department,'')) IN ({emp_ph})
+                WHERE LOWER(REPLACE(REPLACE(COALESCE(u.role,''),'_',' '),'-',' ')) IN ({role_ph})
+                ORDER BY u.id ASC
+                LIMIT 1
+                """,
+                tuple([*emp_depts, *role_vals]),
+            )
+            row = cur.fetchone() or None
+        except Exception:
+            row = None
+
+    if not row:
+        return None
+
+    employee_id = int(row.get('employee_id') or 0)
+    if not employee_id:
+        employee_id = _ensure_manager_employee(
+            cur,
+            email=(row.get('user_email') or '').strip(),
+            dept=dept,
+            name=(row.get('manager_name') or '').strip(),
+        ) or 0
+    if not employee_id:
+        return None
+
+    return {
+        'department_key': dept,
+        'user_id': int(row.get('user_id') or 0) or None,
+        'email': (row.get('user_email') or '').strip(),
+        'employee_id': int(employee_id),
+        'name': (row.get('manager_name') or '').strip(),
+    }
+
+
+def _auto_assign_won_project_department_managers(
+    cur,
+    *,
+    g_id: int | None = None,
+    department_key: str | None = None,
+) -> int:
+    """
+    Backfill won-project tasks that are currently unassigned by assigning the
+    respective department manager. Returns number of rows updated.
+    """
+    where = ["assigned_to IS NULL"]
+    params = []
+    if g_id:
+        where.append("g_id=%s")
+        params.append(int(g_id))
+    dept_norm = _normalize_department_key(department_key or "")
+    if dept_norm:
+        where.append("LOWER(COALESCE(department_key,''))=%s")
+        params.append(dept_norm)
+
+    cur.execute(
+        f"""
+        SELECT id, department_key
+        FROM won_project_checklists
+        WHERE {" AND ".join(where)}
+        """,
+        tuple(params),
+    )
+    rows = cur.fetchall() or []
+    if not rows:
+        return 0
+
+    manager_cache: dict[str, dict | None] = {}
+    updates = 0
+    for row in rows:
+        dept = _normalize_department_key(row.get("department_key") or "")
+        if dept not in ("engineering_team", "procurement_team", "accounts_finance"):
+            continue
+        if dept not in manager_cache:
+            manager_cache[dept] = _resolve_department_manager_assignment(cur, dept)
+        resolved = manager_cache.get(dept) or {}
+        emp_id = int(resolved.get("employee_id") or 0)
+        if emp_id <= 0:
+            continue
+        cur.execute(
+            """
+            UPDATE won_project_checklists
+            SET assigned_to=COALESCE(assigned_to, %s), updated_at=CURRENT_TIMESTAMP
+            WHERE id=%s
+            """,
+            (emp_id, int(row.get("id") or 0)),
+        )
+        if int(cur.rowcount or 0) > 0:
+            updates += 1
+    return updates
 
 
 @app.route('/api/team/<team>/assign-team-lead', methods=['POST'])
@@ -23365,14 +30186,168 @@ def api_get_assign_detail(g_id):
     _ensure_bid_assign_meta_table()
     cur = mysql.connection.cursor(DictCursor)
     try:
-        cur.execute("SELECT data FROM bid_assign_meta WHERE g_id=%s", (g_id,))
-        row = cur.fetchone()
-        if not row or not row.get('data'):
-            return jsonify({'ok': True, 'data': {}})
+        requested_id = int(g_id)
+        # Resolve both representations:
+        # - GO id (go_bids.g_id)
+        # - Bid incoming id (go_bids.id)
+        resolved_g_ids = {requested_id}
+        resolved_bid_ids = {requested_id}
         try:
-            data = json.loads(row.get('data') or "{}")
+            cur.execute("SELECT g_id, id FROM go_bids WHERE g_id=%s OR id=%s LIMIT 10", (requested_id, requested_id))
+            for gr in (cur.fetchall() or []):
+                try:
+                    if gr.get('g_id'):
+                        resolved_g_ids.add(int(gr.get('g_id')))
+                except Exception:
+                    pass
+                try:
+                    if gr.get('id'):
+                        resolved_bid_ids.add(int(gr.get('id')))
+                except Exception:
+                    pass
         except Exception:
+            pass
+
+        cur.execute("SELECT data FROM bid_assign_meta WHERE g_id=%s", (requested_id,))
+        row = cur.fetchone()
+        data = {}
+        if row and row.get('data'):
+            try:
+                data = json.loads(row.get('data') or "{}")
+            except Exception:
+                data = {}
+        if not isinstance(data, dict):
             data = {}
+
+        # If data is empty for requested key, try any resolved GO g_id.
+        if (not data) and resolved_g_ids:
+            for gid_candidate in sorted(resolved_g_ids):
+                try:
+                    cur.execute("SELECT data FROM bid_assign_meta WHERE g_id=%s", (int(gid_candidate),))
+                    alt = cur.fetchone() or {}
+                    if alt.get('data'):
+                        data = json.loads(alt.get('data') or "{}")
+                        if isinstance(data, dict) and data:
+                            break
+                except Exception:
+                    continue
+            if not isinstance(data, dict):
+                data = {}
+
+        def _merge_doc(files_acc: list, item: dict):
+            if not isinstance(item, dict):
+                return
+            name = (item.get('name') or item.get('filename') or '').strip()
+            url = (item.get('url') or item.get('download_url') or '').strip()
+            if not name and not url:
+                return
+            if not name:
+                name = os.path.basename(url) or 'Document'
+            normalized = {
+                'name': name,
+                'filename': name,
+                'url': url,
+                'download_url': url,
+                'size': int(item.get('size') or 0),
+                'type': (item.get('type') or ''),
+                'uploaded_at': item.get('uploaded_at') or '',
+                'source': item.get('source') or 'meta',
+            }
+            key = (normalized.get('name', '').lower(), normalized.get('url', '').lower())
+            seen = data.setdefault('_uploaded_files_seen', set())
+            if key in seen:
+                return
+            seen.add(key)
+            files_acc.append(normalized)
+
+        merged_files = []
+        for f in (data.get('uploaded_files') or []):
+            _merge_doc(merged_files, f if isinstance(f, dict) else {})
+
+        # Include files physically present in bid_documents/<g_id> (legacy + direct upload path).
+        try:
+            for gid_candidate in sorted(resolved_g_ids):
+                folder = os.path.join(app.root_path, 'static', 'bid_documents', str(int(gid_candidate)))
+                if not os.path.isdir(folder):
+                    continue
+                for entry in sorted(os.listdir(folder)):
+                    path = os.path.join(folder, entry)
+                    if not os.path.isfile(path):
+                        continue
+                    try:
+                        size = int(os.path.getsize(path) or 0)
+                    except Exception:
+                        size = 0
+                    _merge_doc(merged_files, {
+                        'name': entry,
+                        'size': size,
+                        'type': '',
+                        'url': url_for('static', filename=f'bid_documents/{int(gid_candidate)}/{entry}'),
+                        'uploaded_at': '',
+                        'source': 'disk',
+                    })
+        except Exception:
+            pass
+
+        # Include OneDrive folder links discovered by scanner.
+        try:
+            if _table_exists(cur, 'onedrive_folder_state'):
+                # Also include requested id directly because caller may pass bid_incoming_id.
+                if resolved_bid_ids:
+                    bid_ids = sorted({int(x) for x in resolved_bid_ids if int(x) > 0})
+                    placeholders = ",".join(["%s"] * len(bid_ids))
+                    cur.execute(
+                        f"""
+                        SELECT folder_path, folder_label, last_scan_at, created_at
+                        FROM onedrive_folder_state
+                        WHERE bid_incoming_id IN ({placeholders})
+                        ORDER BY last_scan_at DESC, id DESC
+                        """,
+                        tuple(bid_ids),
+                    )
+                    for od in (cur.fetchall() or []):
+                        folder_path = (od.get('folder_path') or '').strip()
+                        if not folder_path:
+                            continue
+                        # If scanner stored a local filesystem folder path, surface file entries directly.
+                        try:
+                            if os.path.isdir(folder_path):
+                                for root, _, files in os.walk(folder_path):
+                                    for fname in files:
+                                        fpath = os.path.join(root, fname)
+                                        rel_name = os.path.relpath(fpath, folder_path)
+                                        try:
+                                            fsize = int(os.path.getsize(fpath) or 0)
+                                        except Exception:
+                                            fsize = 0
+                                        _merge_doc(merged_files, {
+                                            'name': rel_name.replace('\\', '/'),
+                                            'size': fsize,
+                                            'type': '',
+                                            'url': '',
+                                            'uploaded_at': od.get('last_scan_at') or od.get('created_at') or '',
+                                            'source': 'onedrive',
+                                        })
+                        except Exception:
+                            pass
+                        _merge_doc(merged_files, {
+                            'name': (od.get('folder_label') or 'OneDrive Folder'),
+                            'url': folder_path,
+                            'uploaded_at': od.get('last_scan_at') or od.get('created_at') or '',
+                            'source': 'onedrive',
+                            'type': 'folder',
+                        })
+        except Exception:
+            pass
+
+        if '_uploaded_files_seen' in data:
+            try:
+                del data['_uploaded_files_seen']
+            except Exception:
+                pass
+        if merged_files:
+            data['uploaded_files'] = merged_files
+
         return jsonify({'ok': True, 'data': data})
     finally:
         try:
@@ -23743,8 +30718,35 @@ def sync_checklist_tasks(team, g_id):
     """Upsert checklist tasks into bid_checklists for a team (dedupe by task name)."""
     data = request.get_json(silent=True) or {}
     tasks = data.get('tasks') or []
-    stage_name = (team or '').strip().lower()
-    if not stage_name or not tasks:
+    stage_name = _normalize_department_key((team or '').strip().lower()) or (team or '').strip().lower()
+    if not stage_name:
+        return jsonify({'ok': True, 'inserted': 0, 'updated': 0})
+
+    if not isinstance(tasks, list):
+        tasks = []
+
+    # Ensure mandatory defaults for Accounts & Finance when this department is selected.
+    if stage_name == 'accounts_finance':
+        mandatory = [
+            {'text': 'PO Read', 'notes': 'Review purchase order details and terms', 'priority': 'high'},
+            {'text': 'Payment Receipt', 'notes': 'Collect and verify payment receipt documents', 'priority': 'high'},
+        ]
+        seen = set()
+        merged = []
+        for t in tasks + mandatory:
+            if not isinstance(t, dict):
+                continue
+            name = (t.get('text') or '').strip()
+            if not name:
+                continue
+            key = name.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(t)
+        tasks = merged
+
+    if not tasks:
         return jsonify({'ok': True, 'inserted': 0, 'updated': 0})
     inserted = 0
     updated = 0
@@ -23844,6 +30846,29 @@ def sync_checklist_tasks(team, g_id):
 
 def _load_assigned_tasks_for_department(dept_key: str, limit: int = 200):
     _ensure_bid_assign_meta_table()
+    dept_key_norm = _normalize_department_key(dept_key or '') or (dept_key or '').strip().lower()
+
+    def _gid_key(value):
+        try:
+            return int(value)
+        except Exception:
+            return value
+
+    def _norm_dept(value):
+        return _normalize_department_key(value or '') or str(value or '').strip().lower().replace(' ', '_')
+
+    alias_map = {
+        'engineering_team': ('engineering_team', 'engineering team'),
+        'procurement_team': ('procurement_team', 'procurement team', 'procurement'),
+        'accounts_finance': ('accounts_finance', 'accounts finance', 'accounts & finance', 'accounts', 'finance', 'accounting'),
+        'business': ('business', 'business dev', 'business development'),
+        'design': ('design', 'marketing'),
+        'operations': ('operations', 'operation', 'ops'),
+        'engineer': ('engineer', 'engineering', 'site engineer', 'site_engineer', 'site manager'),
+    }
+    dept_aliases = tuple(dict.fromkeys([*(alias_map.get(dept_key_norm, (dept_key_norm,))), dept_key_norm]))
+    use_won_scope = dept_key_norm in ('engineering_team', 'procurement_team', 'accounts_finance')
+
     cur = mysql.connection.cursor(DictCursor)
     try:
         cur.execute(
@@ -23864,9 +30889,127 @@ def _load_assigned_tasks_for_department(dept_key: str, limit: int = 200):
         except Exception:
             pass
 
+    checklist_map = {}
+    checklist_gids = set()
+    checklist_cur = mysql.connection.cursor(DictCursor)
+    try:
+        aliases_ph = ",".join(["%s"] * len(dept_aliases))
+        if use_won_scope:
+            checklist_cur.execute(
+                f"""
+                SELECT
+                    wpc.id,
+                    wpc.source_task_id,
+                    wpc.g_id,
+                    wpc.task_code,
+                    wpc.task_name,
+                    wpc.description,
+                    wpc.status,
+                    wpc.priority,
+                    wpc.due_date,
+                    wpc.department_key,
+                    wpc.progress_pct,
+                    wpc.assigned_to,
+                    wpc.attachment_path,
+                    e.name AS assigned_employee_name,
+                    e.email AS employee_email
+                FROM won_project_checklists wpc
+                LEFT JOIN employees e ON e.id = wpc.assigned_to
+                WHERE LOWER(COALESCE(wpc.department_key,'')) IN ({aliases_ph})
+                ORDER BY wpc.created_at DESC, wpc.id DESC
+                """,
+                tuple(dept_aliases),
+            )
+        else:
+            try:
+                checklist_cur.execute(
+                    f"""
+                    SELECT
+                        bc.id,
+                        NULL AS source_task_id,
+                        bc.g_id,
+                        bc.task_code,
+                        bc.task_name,
+                        bc.description,
+                        bc.status,
+                        bc.priority,
+                        bc.due_date,
+                        LOWER(COALESCE(bc.stage,'')) AS department_key,
+                        bc.progress_pct,
+                        bc.assigned_to,
+                        bc.attachment_path,
+                        e.name AS assigned_employee_name,
+                        e.email AS employee_email
+                    FROM bid_checklists bc
+                    LEFT JOIN employees e ON e.id = bc.assigned_to
+                    WHERE LOWER(COALESCE(bc.stage,'')) IN ({aliases_ph})
+                      AND bc.team_archive IS NULL
+                    ORDER BY bc.created_at DESC, bc.id DESC
+                    """,
+                    tuple(dept_aliases),
+                )
+            except Exception:
+                checklist_cur.execute(
+                    f"""
+                    SELECT
+                        bc.id,
+                        NULL AS source_task_id,
+                        bc.g_id,
+                        bc.task_code,
+                        bc.task_name,
+                        bc.description,
+                        bc.status,
+                        bc.priority,
+                        bc.due_date,
+                        LOWER(COALESCE(bc.stage,'')) AS department_key,
+                        bc.progress_pct,
+                        bc.assigned_to,
+                        bc.attachment_path,
+                        e.name AS assigned_employee_name,
+                        e.email AS employee_email
+                    FROM bid_checklists bc
+                    LEFT JOIN employees e ON e.id = bc.assigned_to
+                    WHERE LOWER(COALESCE(bc.stage,'')) IN ({aliases_ph})
+                    ORDER BY bc.created_at DESC, bc.id DESC
+                    """,
+                    tuple(dept_aliases),
+                )
+
+        for tr in (checklist_cur.fetchall() or []):
+            gid = _gid_key(tr.get('g_id'))
+            if not gid:
+                continue
+            checklist_gids.add(gid)
+            checklist_map.setdefault(gid, []).append({
+                'id': tr.get('source_task_id') or tr.get('id'),
+                'task_code': tr.get('task_code') or '',
+                'task_name': tr.get('task_name') or 'Task',
+                'description': tr.get('description') or '',
+                'status': normalize_task_status(tr.get('status') or ''),
+                'priority': tr.get('priority') or '',
+                'due_date': tr.get('due_date') or '',
+                'stage': tr.get('department_key') or '',
+                'department': tr.get('department_key') or '',
+                'progress_pct': tr.get('progress_pct'),
+                'assigned_to': tr.get('assigned_to'),
+                'assigned_employee_name': tr.get('assigned_employee_name') or '',
+                'employee_email': tr.get('employee_email') or '',
+                'attachment': tr.get('attachment_path') or '',
+            })
+    except Exception:
+        checklist_map = {}
+        checklist_gids = set()
+    finally:
+        try:
+            checklist_cur.close()
+        except Exception:
+            pass
+
+    all_gids = set([_gid_key(r.get('g_id')) for r in rows if r.get('g_id')]) | checklist_gids
+
     rfp_files_map = {}
     try:
-        g_ids = [r.get('g_id') for r in rows if r.get('g_id')]
+        g_ids = [g for g in all_gids if g]
         if g_ids:
             rfp_cur = mysql.connection.cursor(DictCursor)
             try:
@@ -23881,11 +31024,11 @@ def _load_assigned_tasks_for_department(dept_key: str, limit: int = 200):
                     """,
                     tuple(g_ids),
                 )
-                for row in rfp_cur.fetchall() or []:
-                    g_id = row.get('g_id')
-                    if not g_id:
+                for row in (rfp_cur.fetchall() or []):
+                    gid = _gid_key(row.get('g_id'))
+                    if not gid:
                         continue
-                    rfp_files_map.setdefault(g_id, []).append({
+                    rfp_files_map.setdefault(gid, []).append({
                         'id': row.get('id'),
                         'filename': row.get('original_filename') or row.get('filename') or 'Document',
                         'uploaded_at': row.get('uploaded_at'),
@@ -23900,26 +31043,50 @@ def _load_assigned_tasks_for_department(dept_key: str, limit: int = 200):
 
     task_files_map = {}
     try:
-        g_ids = [r.get('g_id') for r in rows if r.get('g_id')]
+        g_ids = [g for g in all_gids if g]
         if g_ids:
             task_cur = mysql.connection.cursor(DictCursor)
             try:
                 placeholders = ",".join(["%s"] * len(g_ids))
-                task_cur.execute(
-                    f"""
-                    SELECT id, g_id
-                    FROM bid_checklists
-                    WHERE g_id IN ({placeholders})
-                      AND team_archive IS NULL
-                    """,
-                    tuple(g_ids),
-                )
+                alias_placeholders = ",".join(["%s"] * len(dept_aliases))
+                if use_won_scope:
+                    task_cur.execute(
+                        f"""
+                        SELECT COALESCE(source_task_id, id) AS id, g_id
+                        FROM won_project_checklists
+                        WHERE g_id IN ({placeholders})
+                          AND LOWER(COALESCE(department_key,'')) IN ({alias_placeholders})
+                        """,
+                        tuple([*g_ids, *dept_aliases]),
+                    )
+                else:
+                    try:
+                        task_cur.execute(
+                            f"""
+                            SELECT id, g_id
+                            FROM bid_checklists
+                            WHERE g_id IN ({placeholders})
+                              AND LOWER(COALESCE(stage,'')) IN ({alias_placeholders})
+                              AND team_archive IS NULL
+                            """,
+                            tuple([*g_ids, *dept_aliases]),
+                        )
+                    except Exception:
+                        task_cur.execute(
+                            f"""
+                            SELECT id, g_id
+                            FROM bid_checklists
+                            WHERE g_id IN ({placeholders})
+                              AND LOWER(COALESCE(stage,'')) IN ({alias_placeholders})
+                            """,
+                            tuple([*g_ids, *dept_aliases]),
+                        )
                 task_rows = task_cur.fetchall() or []
                 task_ids = []
                 task_id_to_gid = {}
                 for row in task_rows:
                     tid = row.get('id')
-                    gid = row.get('g_id')
+                    gid = _gid_key(row.get('g_id'))
                     if not tid or not gid:
                         continue
                     task_ids.append(tid)
@@ -23937,7 +31104,7 @@ def _load_assigned_tasks_for_department(dept_key: str, limit: int = 200):
                         """,
                         tuple(task_ids),
                     )
-                    for row in task_cur.fetchall() or []:
+                    for row in (task_cur.fetchall() or []):
                         tid = row.get('task_id')
                         gid = task_id_to_gid.get(tid)
                         if not gid:
@@ -23958,7 +31125,7 @@ def _load_assigned_tasks_for_department(dept_key: str, limit: int = 200):
                         """,
                         tuple(task_ids),
                     )
-                    for row in task_cur.fetchall() or []:
+                    for row in (task_cur.fetchall() or []):
                         tid = row.get('task_id')
                         gid = task_id_to_gid.get(tid)
                         if not gid:
@@ -23979,6 +31146,7 @@ def _load_assigned_tasks_for_department(dept_key: str, limit: int = 200):
         task_files_map = {}
 
     items = []
+    included_gids = set()
     update_cur = mysql.connection.cursor(DictCursor)
     updated_any = False
     for r in rows:
@@ -23986,26 +31154,37 @@ def _load_assigned_tasks_for_department(dept_key: str, limit: int = 200):
             meta = json.loads(r.get('meta_json') or "{}")
         except Exception:
             meta = {}
-        # Skip placeholder rows without a valid bid id or name
-        try:
-            if not r.get('g_id'):
-                continue
-        except Exception:
+        gid = _gid_key(r.get('g_id'))
+        if not gid:
             continue
         scope_text = r.get('scope') or meta.get('scope') or ''
         type_text = r.get('type') or meta.get('type') or ''
         try:
-            ik_code = _ensure_ik_project_code(update_cur, int(r.get('g_id')), meta, scope_text, type_text)
+            ik_code = _ensure_ik_project_code(update_cur, int(gid), meta, scope_text, type_text)
             if ik_code:
                 updated_any = True
         except Exception:
             ik_code = meta.get('ik_project_code') or ''
-        departments = meta.get('departments') or []
-        if dept_key not in departments:
-            continue
-        # Filter checklist to this department only
+
+        raw_depts = meta.get('departments') or []
+        dept_set = {_norm_dept(d) for d in raw_depts if d}
+        meta_has_dept = dept_key_norm in dept_set
+
         checklist = meta.get('checklist') or []
-        dept_checklist = [c for c in checklist if not c.get('dept') or c.get('dept') == dept_key]
+        dept_checklist = []
+        for c in checklist:
+            c_dept = _norm_dept(c.get('dept') or c.get('stage') or c.get('department') or '')
+            if not c_dept or c_dept == dept_key_norm:
+                cc = dict(c)
+                cc['status'] = normalize_task_status(cc.get('status') or cc.get('state') or '')
+                dept_checklist.append(cc)
+        db_checklist = checklist_map.get(gid) or []
+
+        # Strictly use won-project checklist rows to avoid mixing bid assignment
+        # metadata with execution task data.
+        if not db_checklist:
+            continue
+
         meta_files = []
         try:
             raw_files = meta.get('uploaded_files') or []
@@ -24028,27 +31207,107 @@ def _load_assigned_tasks_for_department(dept_key: str, limit: int = 200):
             meta_files = []
 
         items.append({
-              'g_id': r.get('g_id'),
-              'bid_id': r.get('bid_id') or r.get('id'),
-              'name': r.get('b_name') or meta.get('name') or 'Bid',
-              'company': r.get('company') or r.get('comp_name') or '',
-              'state': r.get('bid_state') or r.get('state') or '',
-              'due_date': r.get('due_date') or '',
-              'scope': scope_text,
-              'type': type_text,
-              'summary': r.get('bid_summary') or r.get('summary') or meta.get('summary') or '',
-              'ik_project_code': ik_code or meta.get('ik_project_code') or '',
-              'departments': departments,
-              'start_date': meta.get('start_date') or '',
-              'assign_due_date': meta.get('due_date') or '',
-              'notes': meta.get('notes') or '',
-              'project_activity': meta.get('project_activity') or [],
+            'g_id': gid,
+            'bid_id': r.get('bid_id') or r.get('id'),
+            'name': r.get('b_name') or meta.get('name') or 'Bid',
+            'company': r.get('company') or r.get('comp_name') or '',
+            'state': r.get('bid_state') or r.get('state') or '',
+            'due_date': r.get('due_date') or '',
+            'scope': scope_text,
+            'type': type_text,
+            'summary': r.get('bid_summary') or r.get('summary') or meta.get('summary') or '',
+            'ik_project_code': ik_code or meta.get('ik_project_code') or '',
+            'departments': raw_depts,
+            'start_date': meta.get('start_date') or '',
+            'assign_due_date': meta.get('due_date') or '',
+            'notes': meta.get('notes') or '',
+            'project_activity': meta.get('project_activity') or [],
             'progress': meta.get('progress') or '',
             'priority': meta.get('priority') or '',
-            'checklist': dept_checklist,
-            'rfp_files': meta_files or rfp_files_map.get(r.get('g_id'), []),
-            'task_files': task_files_map.get(r.get('g_id'), []),
+            'checklist': db_checklist,
+            'rfp_files': meta_files or rfp_files_map.get(gid, []),
+            'task_files': task_files_map.get(gid, []),
         })
+        included_gids.add(gid)
+
+    missing_gids = [g for g in checklist_gids if g and g not in included_gids]
+    if missing_gids:
+        fetch_cur = mysql.connection.cursor(DictCursor)
+        try:
+            ph = ",".join(["%s"] * len(missing_gids))
+            fetch_cur.execute(
+                f"""
+                SELECT gb.g_id,
+                       gb.id AS incoming_id,
+                       gb.b_name,
+                       gb.company,
+                       gb.state,
+                       gb.due_date,
+                       gb.scope,
+                       gb.type,
+                       gb.summary,
+                       bi.id AS bid_id,
+                       bi.b_name AS bi_name,
+                       bi.comp_name,
+                       bi.state AS bi_state,
+                       bi.summary AS bi_summary,
+                       bam.data AS meta_json
+                FROM go_bids gb
+                LEFT JOIN bid_incoming bi ON bi.id = gb.id
+                LEFT JOIN bid_assign_meta bam ON bam.g_id = gb.g_id
+                WHERE gb.g_id IN ({ph})
+                """,
+                tuple(missing_gids),
+            )
+            for r in (fetch_cur.fetchall() or []):
+                gid = _gid_key(r.get('g_id'))
+                if not gid or gid in included_gids:
+                    continue
+                try:
+                    meta = json.loads(r.get('meta_json') or "{}")
+                except Exception:
+                    meta = {}
+                scope_text = r.get('scope') or meta.get('scope') or ''
+                type_text = r.get('type') or meta.get('type') or ''
+                try:
+                    ik_code = _ensure_ik_project_code(update_cur, int(gid), meta, scope_text, type_text)
+                    if ik_code:
+                        updated_any = True
+                except Exception:
+                    ik_code = meta.get('ik_project_code') or ''
+                items.append({
+                    'g_id': gid,
+                    'bid_id': r.get('bid_id') or r.get('incoming_id'),
+                    'name': r.get('b_name') or r.get('bi_name') or meta.get('name') or 'Bid',
+                    'company': r.get('company') or r.get('comp_name') or '',
+                    'state': r.get('state') or r.get('bi_state') or '',
+                    'due_date': r.get('due_date') or '',
+                    'scope': scope_text,
+                    'type': type_text,
+                    'summary': r.get('summary') or r.get('bi_summary') or meta.get('summary') or '',
+                    'ik_project_code': ik_code or meta.get('ik_project_code') or '',
+                    'departments': meta.get('departments') or [],
+                    'start_date': meta.get('start_date') or '',
+                    'assign_due_date': meta.get('due_date') or '',
+                    'notes': meta.get('notes') or '',
+                    'project_activity': meta.get('project_activity') or [],
+                    'progress': meta.get('progress') or '',
+                    'priority': meta.get('priority') or '',
+                    'checklist': checklist_map.get(gid, []),
+                    'rfp_files': rfp_files_map.get(gid, []),
+                    'task_files': task_files_map.get(gid, []),
+                })
+                included_gids.add(gid)
+        finally:
+            try:
+                fetch_cur.close()
+            except Exception:
+                pass
+
+    # Execution departments are already sourced from won_project_checklists.
+    # Do not apply estimate-status gating here, otherwise valid assigned tasks
+    # disappear from manager/employee pages.
+
     if updated_any:
         try:
             mysql.connection.commit()
@@ -24247,22 +31506,25 @@ def _load_assigned_projects_for_manager(user_id: int, limit: int = 200):
                 task_cur.execute(
                     f"""
                     SELECT
-                        bc.id,
-                        bc.g_id,
-                        bc.task_name,
-                        bc.description,
-                        bc.status,
-                        bc.priority,
-                        bc.due_date,
-                        bc.stage,
-                        bc.assigned_to,
-                        bc.attachment_path,
+                        wpc.id,
+                        wpc.source_task_id,
+                        wpc.g_id,
+                        wpc.task_code,
+                        wpc.task_name,
+                        wpc.description,
+                        wpc.status,
+                        wpc.priority,
+                        wpc.due_date,
+                        wpc.department_key AS stage,
+                        wpc.progress_pct,
+                        wpc.assigned_to,
+                        wpc.attachment_path,
                         e.name AS assigned_employee_name,
                         e.email AS employee_email
-                    FROM bid_checklists bc
-                    LEFT JOIN employees e ON e.id = bc.assigned_to
-                    WHERE g_id IN ({placeholders})
-                      AND team_archive IS NULL
+                    FROM won_project_checklists wpc
+                    LEFT JOIN employees e ON e.id = wpc.assigned_to
+                    WHERE wpc.g_id IN ({placeholders})
+                    ORDER BY wpc.created_at DESC, wpc.id DESC
                     """,
                     tuple(g_ids),
                 )
@@ -24272,16 +31534,22 @@ def _load_assigned_projects_for_manager(user_id: int, limit: int = 200):
                 for row in task_rows:
                     tid = row.get('id')
                     gid = row.get('g_id')
-                    if not tid or not gid:
+                    if not gid:
                         continue
-                    task_ids.append(tid)
+                    if tid:
+                        task_ids.append(int(tid))
                     try:
                         gid_key = int(gid)
                     except Exception:
                         gid_key = gid
-                    task_id_to_gid[tid] = gid_key
+                    if tid:
+                        task_id_to_gid[int(tid)] = gid_key
                     checklist_map.setdefault(gid_key, []).append({
-                        'id': tid,
+                        # Keep execution task identity strictly on won_project_checklists.id
+                        # to avoid mixing bid-phase activity/status.
+                        'id': row.get('id'),
+                        'source_task_id': row.get('source_task_id'),
+                        'task_code': row.get('task_code') or '',
                         'task_name': row.get('task_name') or 'Task',
                         'description': row.get('description') or '',
                         'status': normalize_task_status(row.get('status') or ''),
@@ -24293,6 +31561,7 @@ def _load_assigned_projects_for_manager(user_id: int, limit: int = 200):
                         'employee_email': row.get('employee_email') or '',
                         'attachment': row.get('attachment_path') or '',
                     })
+                task_ids = sorted(set([int(t) for t in task_ids if t]))
                 if task_ids:
                     _ensure_task_work_files_table(task_cur)
                     _ensure_task_manager_attachments_table(task_cur)
@@ -24609,10 +31878,11 @@ def _load_assigned_projects_for_manager(user_id: int, limit: int = 200):
             'start_date': meta.get('start_date') or '',
             'assign_due_date': meta.get('due_date') or '',
             'notes': meta.get('notes') or '',
-            'project_activity': meta.get('project_activity') or [],
+            # PM dashboard project activity must reflect execution flow, not bid-phase meta activity.
+            'project_activity': [],
             'progress': meta.get('progress') or '',
             'priority': meta.get('priority') or '',
-            'checklist': checklist_map.get(g_key) or meta_checklist,
+            'checklist': checklist_map.get(g_key) or [],
             'rfp_files': merged_rfp_files,
             'task_files': task_files_map.get(g_key, []) or task_files_map.get(r.get('g_id'), []),
         })
@@ -25034,17 +32304,63 @@ def _load_assigned_tasks_for_employee(dept_key: str, employee_id: int | None, li
     if not employee_id:
         return []
     dept_key_norm = _normalize_department_key(dept_key or '') or (dept_key or '').strip().lower()
+    won_scope_key = 'engineering_team' if dept_key_norm == 'engineer' else dept_key_norm
     items = _load_assigned_tasks_for_department(dept_key_norm or dept_key, limit)
     cur = mysql.connection.cursor(DictCursor)
+    use_won_scope = won_scope_key in ('engineering_team', 'procurement_team', 'accounts_finance')
     try:
-        cur.execute(
-            """
-            SELECT DISTINCT g_id
-            FROM bid_checklists
-            WHERE assigned_to = %s
-            """,
-            (int(employee_id),),
-        )
+        if use_won_scope:
+            cur.execute(
+                """
+                SELECT DISTINCT g_id
+                FROM won_project_checklists
+                WHERE assigned_to = %s
+                """,
+                (int(employee_id),),
+            )
+        else:
+            if dept_key_norm:
+                try:
+                    cur.execute(
+                        """
+                        SELECT DISTINCT g_id
+                        FROM bid_checklists
+                        WHERE assigned_to = %s
+                          AND LOWER(COALESCE(stage,''))=%s
+                          AND team_archive IS NULL
+                        """,
+                        (int(employee_id), str(dept_key_norm).strip().lower()),
+                    )
+                except Exception:
+                    cur.execute(
+                        """
+                        SELECT DISTINCT g_id
+                        FROM bid_checklists
+                        WHERE assigned_to = %s
+                          AND LOWER(COALESCE(stage,''))=%s
+                        """,
+                        (int(employee_id), str(dept_key_norm).strip().lower()),
+                    )
+            else:
+                try:
+                    cur.execute(
+                        """
+                        SELECT DISTINCT g_id
+                        FROM bid_checklists
+                        WHERE assigned_to = %s
+                          AND team_archive IS NULL
+                        """,
+                        (int(employee_id),),
+                    )
+                except Exception:
+                    cur.execute(
+                        """
+                        SELECT DISTINCT g_id
+                        FROM bid_checklists
+                        WHERE assigned_to = %s
+                        """,
+                        (int(employee_id),),
+                    )
         g_ids = {int(r.get('g_id')) for r in (cur.fetchall() or []) if r.get('g_id')}
     except Exception:
         g_ids = set()
@@ -25057,7 +32373,25 @@ def _load_assigned_tasks_for_employee(dept_key: str, employee_id: int | None, li
         return []
     filtered = [it for it in (items or []) if it.get('g_id') in g_ids]
     if filtered:
-        return filtered
+        employee_filtered = []
+        for it in (filtered or []):
+            checklist = it.get('checklist') or []
+            own_tasks = []
+            for t in checklist:
+                try:
+                    at = t.get('assigned_to')
+                    at_int = int(at) if at is not None and str(at).strip() != '' else None
+                except Exception:
+                    at_int = None
+                if at_int is not None and at_int == int(employee_id):
+                    own_tasks.append(t)
+            if not own_tasks:
+                continue
+            it2 = dict(it)
+            it2['checklist'] = own_tasks
+            employee_filtered.append(it2)
+        if employee_filtered:
+            return employee_filtered
 
     # Fallback: build minimal items directly from go_bids/bid_incoming when bid_assign_meta is empty.
     try:
@@ -25095,6 +32429,68 @@ def _load_assigned_tasks_for_employee(dept_key: str, employee_id: int | None, li
         except Exception:
             pass
 
+    checklist_map = {}
+    try:
+        if rows:
+            checklist_cur = mysql.connection.cursor(DictCursor)
+            try:
+                gids_list = [int(r.get('g_id')) for r in rows if r.get('g_id')]
+                if gids_list:
+                    gids_ph = ",".join(["%s"] * len(gids_list))
+                    params = [*gids_list, int(employee_id)]
+                    dept_where = ""
+                    if won_scope_key:
+                        dept_where = " AND LOWER(COALESCE(department_key,''))=%s"
+                        params.append(str(won_scope_key).strip().lower())
+                    checklist_cur.execute(
+                        f"""
+                        SELECT
+                            COALESCE(source_task_id, id) AS id,
+                            g_id,
+                            task_code,
+                            task_name,
+                            description,
+                            status,
+                            priority,
+                            due_date,
+                            department_key,
+                            progress_pct,
+                            assigned_to,
+                            attachment_path
+                        FROM won_project_checklists
+                        WHERE g_id IN ({gids_ph})
+                          AND assigned_to=%s
+                          {dept_where}
+                        ORDER BY created_at DESC, id DESC
+                        """,
+                        tuple(params),
+                    )
+                    for tr in (checklist_cur.fetchall() or []):
+                        gid = tr.get('g_id')
+                        if not gid:
+                            continue
+                        checklist_map.setdefault(int(gid), []).append({
+                            'id': tr.get('id'),
+                            'task_code': tr.get('task_code') or '',
+                            'task_name': tr.get('task_name') or 'Task',
+                            'description': tr.get('description') or '',
+                            'status': normalize_task_status(tr.get('status') or ''),
+                            'priority': tr.get('priority') or '',
+                            'due_date': tr.get('due_date') or '',
+                            'stage': tr.get('department_key') or '',
+                            'department': tr.get('department_key') or '',
+                            'progress_pct': tr.get('progress_pct'),
+                            'assigned_to': tr.get('assigned_to'),
+                            'attachment': tr.get('attachment_path') or '',
+                        })
+            finally:
+                try:
+                    checklist_cur.close()
+                except Exception:
+                    pass
+    except Exception:
+        checklist_map = {}
+
     items = []
     update_cur = mysql.connection.cursor(DictCursor)
     updated_any = False
@@ -25120,6 +32516,7 @@ def _load_assigned_tasks_for_employee(dept_key: str, employee_id: int | None, li
             'priority': 'normal',
             'ik_project_code': ik_code or '',
             'project_activity': [],
+            'checklist': checklist_map.get(int(r.get('g_id') or 0), []),
             'rfp_files': [],
             'task_files': [],
         })
@@ -25174,21 +32571,81 @@ def _render_employee_assigned_tasks(dept_key: str, employee_id: int | None, titl
 
     try:
         cur = mysql.connection.cursor(DictCursor)
-        cur.execute(
-            """
-            SELECT g_id, status
-            FROM bid_checklists
-            WHERE assigned_to = %s
-              AND (%s = '' OR LOWER(COALESCE(stage,'')) = %s)
-            """,
-            (int(employee_id or 0), dept_key or '', dept_key or ''),
-        )
-        task_rows = cur.fetchall() or []
+        dept_key_norm = _normalize_department_key(dept_key or '')
+        won_scope_key = 'engineering_team' if dept_key_norm == 'engineer' else dept_key_norm
+        use_won_scope = won_scope_key in ('engineering_team', 'procurement_team', 'accounts_finance')
+        if use_won_scope:
+            cur.execute(
+                """
+                SELECT g_id, status, department_key
+                FROM won_project_checklists
+                WHERE assigned_to = %s
+                """,
+                (int(employee_id or 0),),
+            )
+        else:
+            try:
+                cur.execute(
+                    """
+                    SELECT g_id, status, stage AS department_key
+                    FROM bid_checklists
+                    WHERE assigned_to = %s
+                      AND team_archive IS NULL
+                    """,
+                    (int(employee_id or 0),),
+                )
+            except Exception:
+                cur.execute(
+                    """
+                    SELECT g_id, status, stage AS department_key
+                    FROM bid_checklists
+                    WHERE assigned_to = %s
+                    """,
+                    (int(employee_id or 0),),
+                )
+        task_rows_all = cur.fetchall() or []
+        if dept_key_norm:
+            task_rows = []
+            dept_aliases = set(_department_aliases_for_compact(won_scope_key or dept_key_norm))
+            for t in (task_rows_all or []):
+                dept_norm = _normalize_department_key(t.get('department_key') or '')
+                row_aliases = set(_department_aliases_for_compact(dept_norm))
+                if not dept_aliases or not row_aliases or (dept_aliases & row_aliases):
+                    task_rows.append(t)
+        else:
+            task_rows = task_rows_all
+        if not task_rows and (items or []):
+            fallback_rows = []
+            for it in (items or []):
+                gid = it.get('g_id')
+                for t in (it.get('checklist') or []):
+                    at = t.get('assigned_to')
+                    try:
+                        at_int = int(at) if at is not None and str(at).strip() != '' else None
+                    except Exception:
+                        at_int = None
+                    if at_int is not None and int(employee_id or 0) != at_int:
+                        continue
+                    fallback_rows.append({
+                        'g_id': gid,
+                        'status': t.get('status') or '',
+                        'department_key': t.get('department') or t.get('stage') or dept_key_norm,
+                    })
+            if fallback_rows:
+                task_rows = fallback_rows
         total_tasks = len(task_rows)
-        pending_tasks = len([t for t in task_rows if (t.get('status') or '').lower() in ('pending', 'rejected')])
-        in_progress_tasks = len([t for t in task_rows if (t.get('status') or '').lower() in ('in_progress', 'submitted')])
-        completed_tasks = len([t for t in task_rows if (t.get('status') or '').lower() == 'completed'])
-        total_bids = len({t.get('g_id') for t in task_rows if t.get('g_id')})
+        pending_tasks = 0
+        in_progress_tasks = 0
+        completed_tasks = 0
+        for t in (task_rows or []):
+            st = normalize_task_status(t.get('status') or '')
+            if st == 'completed':
+                completed_tasks += 1
+            elif st in ('in_progress', 'submitted'):
+                in_progress_tasks += 1
+            else:
+                pending_tasks += 1
+        total_bids = len({t.get('g_id') for t in task_rows if t.get('g_id')}) or len({it.get('g_id') for it in (items or []) if it.get('g_id')})
         approvals_pending = 0
         try:
             _ensure_document_approvals_table(cur)
@@ -25223,6 +32680,7 @@ def _render_employee_assigned_tasks(dept_key: str, employee_id: int | None, titl
             pass
 
     kpis = {
+        'total_projects': total_bids,
         'total_bids': total_bids,
         'total_tasks': total_tasks,
         'pending_tasks': pending_tasks,
@@ -25283,11 +32741,39 @@ def _render_assigned_tasks(
     sidebar_mode: str | None = None,
     assigned_tasks_base_url_override: str | None = None,
 ):
-    if not current_user.is_admin and not check_module_access_db('assigned_tasks'):
-        return render_template('access_denied.html', message="You don't have access to Assigned Tasks."), 403
-    items = _load_assigned_tasks_for_department(dept_key)
     role_raw = (getattr(current_user, 'role', '') or '').strip().lower().replace('_', ' ')
     role_compact = role_raw.replace(' ', '')
+    manager_like_roles = {
+        'manager',
+        'businessmanager',
+        'designmanager',
+        'operationmanager',
+        'operationsmanager',
+        'sitemanager',
+        'engineeringmanager',
+        'procurementmanager',
+        'accountsmanager',
+        'financemanager',
+        'accountsfinancemanager',
+        'projectmanager',
+    }
+    has_scoped_manager_role = False
+    try:
+        access_rows = _fetch_user_access_rows(int(current_user.id))
+        has_scoped_manager_role = any((r.get('role') or '').strip().lower() == 'manager' for r in (access_rows or []))
+    except Exception:
+        has_scoped_manager_role = False
+    can_access_assigned_tasks = bool(
+        getattr(current_user, 'is_admin', False)
+        or getattr(current_user, 'is_supervisor', False)
+        or check_module_access_db('assigned_tasks')
+        or role_compact in manager_like_roles
+        or has_scoped_manager_role
+    )
+    if not can_access_assigned_tasks:
+        return render_template('access_denied.html', message="You don't have access to Assigned Tasks."), 403
+
+    items = []
     admin_like = bool(
         getattr(current_user, 'is_admin', False)
         or getattr(current_user, 'is_supervisor', False)
@@ -25336,11 +32822,22 @@ def _render_assigned_tasks(
         else:
             allowed_dept_keys = [dept_key]
 
+    # Strict guard: users can only access departments in their resolved scope.
+    # Prevent URL-forced access like ?team=engineering_team for a site manager.
+    if not admin_like and allowed_dept_keys and dept_key not in allowed_dept_keys:
+        return render_template('access_denied.html', message="You don't have access to this department."), 403
+
     can_switch_dept = bool(len(allowed_dept_keys) > 1)
+    # For execution/project pages, keep Site Engineer (bid phase) separate.
+    if dept_key in ('engineering_team', 'procurement_team', 'accounts_finance'):
+        allowed_dept_keys = [dept_key]
+        can_switch_dept = False
     if assigned_tasks_base_url_override:
         assigned_tasks_base_url = assigned_tasks_base_url_override if can_switch_dept else None
     else:
         assigned_tasks_base_url = url_for('manager_assigned_tasks') if can_switch_dept else None
+
+    items = _load_assigned_tasks_for_department(dept_key)
 
     # Compute simple department metrics (counts of assigned bids per department)
     try:
@@ -25395,11 +32892,11 @@ def _render_assigned_tasks(
             if bid_date == today:
                 today_bids += 1
             for t in checklist:
-                status = (t.get('status') or t.get('state') or t.get('progress') or '').strip().lower()
+                status = normalize_task_status(t.get('status') or t.get('state') or t.get('progress') or '')
                 due = _parse_date(t.get('due_date') or t.get('assign_due_date') or '')
-                if status in ('done', 'completed', 'submitted'):
+                if status == 'completed':
                     completed_tasks += 1
-                elif status in ('in_progress', 'in progress'):
+                elif status in ('in_progress', 'submitted'):
                     in_progress_tasks += 1
                 else:
                     pending_tasks += 1
@@ -25435,6 +32932,7 @@ def _render_assigned_tasks(
             approvals_pending = 0
 
         kpis = {
+            'total_projects': total_bids,
             'total_bids': total_bids,
             'total_tasks': total_tasks,
             'pending_tasks': pending_tasks,
@@ -25449,6 +32947,7 @@ def _render_assigned_tasks(
         }
     except Exception:
         kpis = {
+            'total_projects': 0,
             'total_bids': 0,
             'total_tasks': 0,
             'pending_tasks': 0,
@@ -25482,7 +32981,33 @@ def _render_assigned_tasks(
 
 
 def _render_team_lead_assigned_tasks(dept_key: str, template_name: str, title: str):
-    if not current_user.is_admin and not check_module_access_db('assigned_tasks'):
+    role_norm = (get_user_role() or getattr(current_user, 'role', '') or '').strip().lower().replace('_', ' ')
+    is_team_lead_role = _normalize_role_key(role_norm) == 'teamlead' or role_norm in (
+        'team lead', 'teamlead', 'business dev', 'design', 'operations', 'site engineer', 'engineering'
+    )
+    has_team_lead_roster_access = False
+    if not (current_user.is_admin or check_module_access_db('assigned_tasks') or is_team_lead_role):
+        try:
+            cur = mysql.connection.cursor(DictCursor)
+            cur.execute(
+                """
+                SELECT 1
+                FROM team_leads
+                WHERE LOWER(COALESCE(email,''))=LOWER(%s)
+                  AND COALESCE(is_active, 1)=1
+                LIMIT 1
+                """,
+                ((getattr(current_user, 'email', '') or '').strip(),),
+            )
+            has_team_lead_roster_access = bool(cur.fetchone())
+        except Exception:
+            has_team_lead_roster_access = False
+        finally:
+            try:
+                cur.close()
+            except Exception:
+                pass
+    if not (current_user.is_admin or check_module_access_db('assigned_tasks') or is_team_lead_role or has_team_lead_roster_access):
         return render_template('access_denied.html', message="You don't have access to Assigned Tasks."), 403
     email = (getattr(current_user, 'email', '') or '').strip()
     items = _load_assigned_tasks_for_team_lead(dept_key, email)
@@ -25538,11 +33063,11 @@ def _render_team_lead_assigned_tasks(dept_key: str, template_name: str, title: s
             if bid_date == today:
                 today_bids += 1
             for t in checklist:
-                status = (t.get('status') or t.get('state') or t.get('progress') or '').strip().lower()
+                status = normalize_task_status(t.get('status') or t.get('state') or t.get('progress') or '')
                 due = _parse_date(t.get('due_date') or t.get('assign_due_date') or '')
-                if status in ('done', 'completed', 'submitted'):
+                if status == 'completed':
                     completed_tasks += 1
-                elif status in ('in_progress', 'in progress'):
+                elif status in ('in_progress', 'submitted'):
                     in_progress_tasks += 1
                 else:
                     pending_tasks += 1
@@ -25572,6 +33097,7 @@ def _render_team_lead_assigned_tasks(dept_key: str, template_name: str, title: s
             approvals_pending = 0
 
         kpis = {
+            'total_projects': total_bids,
             'total_bids': total_bids,
             'total_tasks': total_tasks,
             'pending_tasks': pending_tasks,
@@ -25586,6 +33112,7 @@ def _render_team_lead_assigned_tasks(dept_key: str, template_name: str, title: s
         }
     except Exception:
         kpis = {
+            'total_projects': 0,
             'total_bids': 0,
             'total_tasks': 0,
             'pending_tasks': 0,
@@ -25696,13 +33223,45 @@ def team_lead_assigned_tasks(team):
         access_rows = []
     allowed = False
     for r in (access_rows or []):
-        if (r.get('role') or '').strip().lower() != 'teamlead':
+        role_key = _normalize_role_key(r.get('role') or '')
+        if role_key != 'teamlead':
             continue
         mapped = _team_key_from_access(r.get('department_key'))
         if mapped == team_key:
             allowed = True
             break
         if mapped and mapped in allowed_team_keys:
+            return redirect(url_for('team_lead_assigned_tasks', team=mapped))
+    # Fallback: allow active team leads from team_leads roster even when
+    # user_company_access rows are missing or not normalized yet.
+    if not allowed:
+        tl_dept = None
+        try:
+            cur = mysql.connection.cursor(DictCursor)
+            cur.execute(
+                """
+                SELECT department
+                FROM team_leads
+                WHERE LOWER(COALESCE(email,''))=LOWER(%s)
+                  AND COALESCE(is_active, 1)=1
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                ((getattr(current_user, 'email', '') or '').strip(),),
+            )
+            rr = cur.fetchone() or {}
+            tl_dept = rr.get('department')
+        except Exception:
+            tl_dept = None
+        finally:
+            try:
+                cur.close()
+            except Exception:
+                pass
+        mapped = _team_key_from_access(tl_dept)
+        if mapped == team_key:
+            allowed = True
+        elif mapped and mapped in allowed_team_keys:
             return redirect(url_for('team_lead_assigned_tasks', team=mapped))
     if not allowed:
         return render_template('access_denied.html', message="You don't have access to Team Lead Assigned Tasks."), 403
@@ -25718,6 +33277,17 @@ def api_bid_tasks(team, g_id):
     """
     scope = (request.args.get('scope') or '').strip().lower()
     want_all = scope in ('all', '*')
+    team_dept_aliases = {
+        'business': ('business', 'business_dev', 'business development'),
+        'design': ('design', 'marketing'),
+        'operations': ('operations', 'operation', 'ops'),
+        'engineer': ('engineer', 'engineering', 'site_engineer', 'site engineer', 'site manager'),
+        'engineering_team': ('engineering_team', 'engineering team'),
+        'procurement_team': ('procurement_team', 'procurement'),
+        'accounts_finance': ('accounts_finance', 'accounts finance', 'accounts', 'finance', 'accounting'),
+    }
+    team_aliases = tuple(dict.fromkeys([a.strip().lower() for a in team_dept_aliases.get(team, (team,)) if a]))
+    use_won_scope = team in ('engineering_team', 'procurement_team', 'accounts_finance')
     # Allow broader view for managers/admins
     try:
         role_raw = (getattr(current_user, 'role', '') or '').strip().lower().replace('_', ' ')
@@ -25729,6 +33299,9 @@ def api_bid_tasks(team, g_id):
     want_all = bool(want_all and can_view_all)
 
     cur = mysql.connection.cursor(DictCursor)
+    if use_won_scope:
+        # Keep project execution data isolated from bid-phase checklist mirroring.
+        pass
     
     # Allow access if bid is in this team OR there are tasks for this team's stage
     try:
@@ -25743,30 +33316,109 @@ def api_bid_tasks(team, g_id):
     # "All teams" view for managers: skip team-gating entirely, only filter by g_id.
     if want_all:
         try:
-            for stage in ('business', 'design', 'operations', 'engineer'):
-                _backfill_task_codes_for_stage(cur, stage)
-            cur.execute(
-                """
-                SELECT bc.*, e.name as assigned_employee_name, e.email as employee_email, e.department
-                FROM bid_checklists bc
-                LEFT JOIN employees e ON bc.assigned_to = e.id
-                WHERE bc.g_id = %s
-                  AND bc.team_archive IS NULL
-                ORDER BY
-                    LOWER(COALESCE(bc.stage, '')) ASC,
-                    bc.priority DESC,
-                    bc.created_at ASC
-                """,
-                (g_id,),
-            )
+            if use_won_scope:
+                cur.execute(
+                    """
+                    SELECT
+                        COALESCE(wpc.source_task_id, wpc.id) AS id,
+                        wpc.id AS checklist_id,
+                        wpc.source_task_id AS source_task_id,
+                        wpc.g_id,
+                        wpc.task_code,
+                        wpc.task_name,
+                        wpc.description,
+                        wpc.status,
+                        wpc.priority,
+                        wpc.due_date,
+                        wpc.progress_pct,
+                        wpc.assigned_to,
+                        wpc.department_key AS stage,
+                        wpc.department_key AS department,
+                        wpc.attachment_path,
+                        wpc.created_at,
+                        wpc.updated_at,
+                        e.name as assigned_employee_name,
+                        e.email as employee_email,
+                        e.department
+                    FROM won_project_checklists wpc
+                    LEFT JOIN employees e ON wpc.assigned_to = e.id
+                    WHERE wpc.g_id = %s
+                    ORDER BY
+                        LOWER(COALESCE(wpc.department_key, '')) ASC,
+                        wpc.priority DESC,
+                        wpc.created_at ASC
+                    """,
+                    (g_id,),
+                )
+            else:
+                try:
+                    cur.execute(
+                        """
+                        SELECT
+                            bc.id AS id,
+                            bc.g_id,
+                            bc.task_code,
+                            bc.task_name,
+                            bc.description,
+                            bc.status,
+                            bc.priority,
+                            bc.due_date,
+                            bc.progress_pct,
+                            bc.assigned_to,
+                            bc.stage AS stage,
+                            bc.stage AS department,
+                            bc.attachment_path,
+                            bc.created_at,
+                            bc.updated_at,
+                            e.name as assigned_employee_name,
+                            e.email as employee_email,
+                            e.department
+                        FROM bid_checklists bc
+                        LEFT JOIN employees e ON bc.assigned_to = e.id
+                        WHERE bc.g_id = %s
+                          AND bc.team_archive IS NULL
+                        ORDER BY
+                            LOWER(COALESCE(bc.stage, '')) ASC,
+                            bc.priority DESC,
+                            bc.created_at ASC
+                        """,
+                        (g_id,),
+                    )
+                except Exception:
+                    cur.execute(
+                        """
+                        SELECT
+                            bc.id AS id,
+                            bc.g_id,
+                            bc.task_code,
+                            bc.task_name,
+                            bc.description,
+                            bc.status,
+                            bc.priority,
+                            bc.due_date,
+                            bc.progress_pct,
+                            bc.assigned_to,
+                            bc.stage AS stage,
+                            bc.stage AS department,
+                            bc.attachment_path,
+                            bc.created_at,
+                            bc.updated_at,
+                            e.name as assigned_employee_name,
+                            e.email as employee_email,
+                            e.department
+                        FROM bid_checklists bc
+                        LEFT JOIN employees e ON bc.assigned_to = e.id
+                        WHERE bc.g_id = %s
+                        ORDER BY
+                            LOWER(COALESCE(bc.stage, '')) ASC,
+                            bc.priority DESC,
+                            bc.created_at ASC
+                        """,
+                        (g_id,),
+                    )
             tasks = cur.fetchall()
         except Exception:
             tasks = []
-        try:
-            _assign_missing_task_codes(cur, tasks)
-            mysql.connection.commit()
-        except Exception:
-            mysql.connection.rollback()
         # Load related activity + files for each task (same as team-scoped view)
         task_ids = [t['id'] for t in tasks if t.get('id')]
         # Attach team lead assignments (no employee row required)
@@ -25835,31 +33487,31 @@ def api_bid_tasks(team, g_id):
             # Load uploaded work files
             try:
                 cur.execute(f"""
-                SELECT twf.*, e.name as employee_name, e.email as employee_email, da.status as approval_status, da.decision_note as decision_note
-                FROM task_work_files twf
-                LEFT JOIN employees e ON twf.employee_id = e.id
-                LEFT JOIN document_approvals da ON da.source_table='task_work_files' AND da.source_id=twf.id
-                WHERE twf.task_id IN ({placeholders})
-                ORDER BY twf.uploaded_at DESC
-            """, tuple(task_ids))
+                    SELECT twf.*, e.name as employee_name, e.email as employee_email, da.status as approval_status, da.decision_note as decision_note
+                    FROM task_work_files twf
+                    LEFT JOIN employees e ON twf.employee_id = e.id
+                    LEFT JOIN document_approvals da ON da.source_table='task_work_files' AND da.source_id=twf.id
+                    WHERE twf.task_id IN ({placeholders})
+                    ORDER BY twf.uploaded_at DESC
+                """, tuple(task_ids))
                 all_files = cur.fetchall()
                 files_map = {}
                 for f in all_files:
                     tid = f['task_id']
                     if tid not in files_map:
                         files_map[tid] = []
-                files_map[tid].append({
-                    'id': f['id'],
-                    'filename': f['original_filename'],
-                    'description': f.get('description', ''),
-                    'employee_name': f.get('employee_name', ''),
-                    'employee_email': f.get('employee_email', ''),
-                    'uploaded_at': f['uploaded_at'].strftime('%Y-%m-%d %H:%M') if f.get('uploaded_at') else '',
-                    'download_url': f"/task/file/{f['id']}/download",
-                    'approval_status': ((f.get('approval_status') or '').strip().lower() or None),
-                    'approval_target': f.get('approval_target') or 'admin',
-                    'decision_note': f.get('decision_note') or ''
-                })
+                    files_map[tid].append({
+                        'id': f['id'],
+                        'filename': f['original_filename'],
+                        'description': f.get('description', ''),
+                        'employee_name': f.get('employee_name', ''),
+                        'employee_email': f.get('employee_email', ''),
+                        'uploaded_at': f['uploaded_at'].strftime('%Y-%m-%d %H:%M') if f.get('uploaded_at') else '',
+                        'download_url': f"/task/file/{f['id']}/download",
+                        'approval_status': ((f.get('approval_status') or '').strip().lower() or None),
+                        'approval_target': f.get('approval_target') or 'admin',
+                        'decision_note': f.get('decision_note') or ''
+                    })
                 for t in tasks:
                     t['employee_files'] = files_map.get(t['id'], [])
             except Exception:
@@ -25882,16 +33534,16 @@ def api_bid_tasks(team, g_id):
                     tid = f['task_id']
                     if tid not in manager_files_map:
                         manager_files_map[tid] = []
-                manager_files_map[tid].append({
-                    'id': f['id'],
-                    'filename': f.get('original_filename', f.get('filename', 'File')),
-                    'manager_email': f.get('manager_email', 'Manager'),
-                    'uploaded_at': f['uploaded_at'].strftime('%Y-%m-%d %H:%M') if f.get('uploaded_at') else '',
-                    'download_url': f"/task/manager-file/{f['id']}/download",
-                    'approval_status': ((f.get('approval_status') or '').strip().lower() or None),
-                    'approval_target': f.get('approval_target') or 'admin',
-                    'decision_note': f.get('decision_note') or ''
-                })
+                    manager_files_map[tid].append({
+                        'id': f['id'],
+                        'filename': f.get('original_filename', f.get('filename', 'File')),
+                        'manager_email': f.get('manager_email', 'Manager'),
+                        'uploaded_at': f['uploaded_at'].strftime('%Y-%m-%d %H:%M') if f.get('uploaded_at') else '',
+                        'download_url': f"/task/manager-file/{f['id']}/download",
+                        'approval_status': ((f.get('approval_status') or '').strip().lower() or None),
+                        'approval_target': f.get('approval_target') or 'admin',
+                        'decision_note': f.get('decision_note') or ''
+                    })
                 for t in tasks:
                     t['manager_files'] = manager_files_map.get(t['id'], [])
             except Exception:
@@ -25918,8 +33570,29 @@ def api_bid_tasks(team, g_id):
         cur.close()
         return jsonify({'tasks': tasks})
 
-    cur.execute("SELECT 1 FROM bid_checklists WHERE g_id=%s AND LOWER(COALESCE(stage,''))=%s LIMIT 1", (g_id, team))
-    has_team_tasks = cur.fetchone() is not None
+    has_team_tasks = False
+    try:
+        if team_aliases:
+            team_aliases_ph = ",".join(["%s"] * len(team_aliases))
+            if use_won_scope:
+                cur.execute(
+                    f"SELECT 1 FROM won_project_checklists WHERE g_id=%s AND LOWER(COALESCE(department_key,'')) IN ({team_aliases_ph}) LIMIT 1",
+                    tuple([int(g_id), *team_aliases]),
+                )
+            else:
+                try:
+                    cur.execute(
+                        f"SELECT 1 FROM bid_checklists WHERE g_id=%s AND LOWER(COALESCE(stage,'')) IN ({team_aliases_ph}) AND team_archive IS NULL LIMIT 1",
+                        tuple([int(g_id), *team_aliases]),
+                    )
+                except Exception:
+                    cur.execute(
+                        f"SELECT 1 FROM bid_checklists WHERE g_id=%s AND LOWER(COALESCE(stage,'')) IN ({team_aliases_ph}) LIMIT 1",
+                        tuple([int(g_id), *team_aliases]),
+                    )
+            has_team_tasks = cur.fetchone() is not None
+    except Exception:
+        has_team_tasks = False
     if not bid and not has_team_tasks:
         cur.close()
         return jsonify({'tasks': []})
@@ -25927,49 +33600,94 @@ def api_bid_tasks(team, g_id):
         cur.close()
         return jsonify({'tasks': []})
     
-    # Get checklist items for this bid for this team:
-    # - Prefer stage-based filtering (bc.stage == team) so BDM-created tasks for a team show up correctly.
-    # - Keep a legacy fallback for old rows missing stage: filter by creator role set.
-    roles_for_team = {
-        'business': ('business dev', 'business', 'bdm', 'business_manager'),
-        'design': ('design', 'design_manager', 'business_manager'),
-        'operations': ('operations', 'operation_manager', 'operations_manager', 'business_manager'),
-        'engineer': ('site manager', 'engineer', 'site_manager', 'business_manager'),
-    }
-    acceptable_roles = roles_for_team.get(team, (team, 'business_manager'))
-    placeholders = ','.join(['%s'] * len(acceptable_roles))
-    try:
-        _backfill_task_codes_for_stage(cur, team)
-    except Exception:
-        pass
-    cur.execute(f"""
-        SELECT bc.*, e.name as assigned_employee_name, e.email as employee_email, e.department
-        FROM bid_checklists bc
-        LEFT JOIN employees e ON bc.assigned_to = e.id
-        LEFT JOIN users u ON bc.created_by = u.id
-        WHERE bc.g_id = %s 
-        AND (
-            (
-                LOWER(COALESCE(bc.stage,'')) = %s
-                AND bc.team_archive IS NULL
-            )
-            OR (
-                bc.team_archive = %s
-            )
-            OR (
-                (COALESCE(bc.stage,'') = '' OR bc.stage IS NULL)
-                AND u.role IN ({placeholders})
-                AND bc.team_archive IS NULL
-            )
-        )
-        ORDER BY bc.priority DESC, bc.created_at ASC
-    """, (g_id, team, team, *acceptable_roles))
+    dept_aliases = team_aliases or tuple([team])
+    dept_placeholders = ','.join(['%s'] * len(dept_aliases))
+    if use_won_scope:
+        cur.execute(f"""
+            SELECT
+                COALESCE(wpc.source_task_id, wpc.id) AS id,
+                wpc.id AS checklist_id,
+                wpc.source_task_id AS source_task_id,
+                wpc.g_id,
+                wpc.task_code,
+                wpc.task_name,
+                wpc.description,
+                wpc.status,
+                wpc.priority,
+                wpc.due_date,
+                wpc.progress_pct,
+                wpc.assigned_to,
+                wpc.department_key AS stage,
+                wpc.department_key AS department,
+                wpc.attachment_path,
+                wpc.created_at,
+                wpc.updated_at,
+                e.name as assigned_employee_name,
+                e.email as employee_email,
+                e.department
+            FROM won_project_checklists wpc
+            LEFT JOIN employees e ON wpc.assigned_to = e.id
+            WHERE wpc.g_id = %s
+              AND LOWER(COALESCE(wpc.department_key,'')) IN ({dept_placeholders})
+            ORDER BY wpc.priority DESC, wpc.created_at ASC
+        """, tuple([int(g_id), *dept_aliases]))
+    else:
+        try:
+            cur.execute(f"""
+                SELECT
+                    bc.id AS id,
+                    bc.g_id,
+                    bc.task_code,
+                    bc.task_name,
+                    bc.description,
+                    bc.status,
+                    bc.priority,
+                    bc.due_date,
+                    bc.progress_pct,
+                    bc.assigned_to,
+                    bc.stage AS stage,
+                    bc.stage AS department,
+                    bc.attachment_path,
+                    bc.created_at,
+                    bc.updated_at,
+                    e.name as assigned_employee_name,
+                    e.email as employee_email,
+                    e.department
+                FROM bid_checklists bc
+                LEFT JOIN employees e ON bc.assigned_to = e.id
+                WHERE bc.g_id = %s
+                  AND LOWER(COALESCE(bc.stage,'')) IN ({dept_placeholders})
+                  AND bc.team_archive IS NULL
+                ORDER BY bc.priority DESC, bc.created_at ASC
+            """, tuple([int(g_id), *dept_aliases]))
+        except Exception:
+            cur.execute(f"""
+                SELECT
+                    bc.id AS id,
+                    bc.g_id,
+                    bc.task_code,
+                    bc.task_name,
+                    bc.description,
+                    bc.status,
+                    bc.priority,
+                    bc.due_date,
+                    bc.progress_pct,
+                    bc.assigned_to,
+                    bc.stage AS stage,
+                    bc.stage AS department,
+                    bc.attachment_path,
+                    bc.created_at,
+                    bc.updated_at,
+                    e.name as assigned_employee_name,
+                    e.email as employee_email,
+                    e.department
+                FROM bid_checklists bc
+                LEFT JOIN employees e ON bc.assigned_to = e.id
+                WHERE bc.g_id = %s
+                  AND LOWER(COALESCE(bc.stage,'')) IN ({dept_placeholders})
+                ORDER BY bc.priority DESC, bc.created_at ASC
+            """, tuple([int(g_id), *dept_aliases]))
     tasks = cur.fetchall()
-    try:
-        _assign_missing_task_codes(cur, tasks, team)
-        mysql.connection.commit()
-    except Exception:
-        mysql.connection.rollback()
     # Attach team lead assignments (no employee row required)
     try:
         _ensure_task_team_lead_assignments_table(cur)
@@ -26068,24 +33786,24 @@ def api_bid_tasks(team, g_id):
                 tid = f['task_id']
                 if tid not in files_map:
                     files_map[tid] = []
-                    files_map[tid].append({
-                        'id': f['id'],
-                        'filename': f['original_filename'],
-                        'description': f.get('description', ''),
-                        'employee_name': f.get('employee_name', ''),
-                        'employee_email': f.get('employee_email', ''),
-                        'uploaded_at': f['uploaded_at'].strftime('%Y-%m-%d %H:%M') if f.get('uploaded_at') else '',
-                        'download_url': f"/task/file/{f['id']}/download",
-                        'approval_status': ((f.get('approval_status') or '').strip().lower() or None),
-                        'approval_target': f.get('approval_target') or 'admin',
-                        'decision_note': f.get('decision_note') or ''
-                    })
+                files_map[tid].append({
+                    'id': f['id'],
+                    'filename': f['original_filename'],
+                    'description': f.get('description', ''),
+                    'employee_name': f.get('employee_name', ''),
+                    'employee_email': f.get('employee_email', ''),
+                    'uploaded_at': f['uploaded_at'].strftime('%Y-%m-%d %H:%M') if f.get('uploaded_at') else '',
+                    'download_url': f"/task/file/{f['id']}/download",
+                    'approval_status': ((f.get('approval_status') or '').strip().lower() or None),
+                    'approval_target': f.get('approval_target') or 'admin',
+                    'decision_note': f.get('decision_note') or ''
+                })
             for t in tasks:
                 t['employee_files'] = files_map.get(t['id'], [])
         except Exception:
             for t in tasks:
                 t['employee_files'] = []
-        
+
         # Load manager attachments
         try:
             try:
@@ -26106,16 +33824,16 @@ def api_bid_tasks(team, g_id):
                 tid = f['task_id']
                 if tid not in manager_files_map:
                     manager_files_map[tid] = []
-                    manager_files_map[tid].append({
-                        'id': f['id'],
-                        'filename': f.get('original_filename', f.get('filename', 'File')),
-                        'manager_email': f.get('manager_email', 'Manager'),
-                        'uploaded_at': f['uploaded_at'].strftime('%Y-%m-%d %H:%M') if f.get('uploaded_at') else '',
-                        'download_url': f"/task/manager-file/{f['id']}/download",
-                        'approval_status': ((f.get('approval_status') or '').strip().lower() or None),
-                        'approval_target': f.get('approval_target') or 'admin',
-                        'decision_note': f.get('decision_note') or ''
-                    })
+                manager_files_map[tid].append({
+                    'id': f['id'],
+                    'filename': f.get('original_filename', f.get('filename', 'File')),
+                    'manager_email': f.get('manager_email', 'Manager'),
+                    'uploaded_at': f['uploaded_at'].strftime('%Y-%m-%d %H:%M') if f.get('uploaded_at') else '',
+                    'download_url': f"/task/manager-file/{f['id']}/download",
+                    'approval_status': ((f.get('approval_status') or '').strip().lower() or None),
+                    'approval_target': f.get('approval_target') or 'admin',
+                    'decision_note': f.get('decision_note') or ''
+                })
             for t in tasks:
                 t['manager_files'] = manager_files_map.get(t['id'], [])
         except Exception:
@@ -33328,24 +41046,7 @@ def update_stage(bid_id):
         # Update go_bids state
         cur.execute("UPDATE go_bids SET state=%s WHERE g_id=%s", (new_stage, bid_id))
 
-        # Ensure tasks exist for all departments so they can work in parallel on this bid.
-        try:
-            team_stages = ['engineering_team', 'procurement_team', 'accounts_finance']
-            for st in team_stages:
-                cur.execute(
-                    """
-                    SELECT 1
-                    FROM bid_checklists
-                    WHERE g_id = %s AND LOWER(COALESCE(stage,'')) = %s
-                    LIMIT 1
-                    """,
-                    (bid_id, st),
-                )
-                exists = cur.fetchone() is not None
-                if not exists:
-                    generate_team_checklist(cur, bid_id, st)
-        except Exception:
-            pass
+        # No auto-seeding: bid tasks are created explicitly by users.
         
         # Upsert assignment so the next team still sees it
         cur.execute("SELECT a_id FROM bid_assign WHERE g_id=%s", (bid_id,))
@@ -34838,19 +42539,29 @@ if __name__ == '__main__':
             print(f"Role normalization skipped: {e}")
 
         # --------------------------------------------------------------------
-        # Migrate legacy Business/Design/Operations checklist stages to new teams
-        # and re-prefix task codes.
+        # Normalize bid checklist stages to bid-phase departments
+        # (business/design/operations/engineer) and re-prefix task codes.
         # --------------------------------------------------------------------
         try:
             stage_map = {
-                'business': 'engineering_team',
-                'design': 'procurement_team',
-                'operations': 'accounts_finance',
-                'operation': 'accounts_finance',
-                'ops': 'accounts_finance',
-                'site_engineer': 'engineering_team',
-                'engineer': 'engineering_team',
-                'site engineer': 'engineering_team',
+                # Canonical bid departments
+                'business': 'business',
+                'business dev': 'business',
+                'business development': 'business',
+                'design': 'design',
+                'marketing': 'design',
+                'design marketing': 'design',
+                'design & marketing': 'design',
+                'operations': 'operations',
+                'operation': 'operations',
+                'ops': 'operations',
+                'site_engineer': 'engineer',
+                'site engineer': 'engineer',
+                'site manager': 'engineer',
+                'engineer': 'engineer',
+                # Repair previously-mis-migrated bid rows
+                'engineering team': 'engineer',
+                'engineering_team': 'engineer',
             }
 
             def _norm_stage(value: str) -> str:
@@ -34886,11 +42597,11 @@ if __name__ == '__main__':
             except Exception:
                 pass
 
-            # Re-prefix task codes for the new departments
+            # Re-prefix task codes for canonical bid departments
             try:
                 cur.execute("SELECT DISTINCT g_id FROM bid_checklists WHERE COALESCE(g_id,0) > 0")
                 g_ids = [r.get('g_id') for r in (cur.fetchall() or []) if r.get('g_id')]
-                new_stages = ['engineering_team', 'procurement_team', 'accounts_finance']
+                new_stages = ['business', 'design', 'operations', 'engineer']
                 for g_id in g_ids:
                     for stage_key in new_stages:
                         prefix, _ = _task_code_prefix(stage_key)
@@ -34926,7 +42637,7 @@ if __name__ == '__main__':
                 mysql.connection.rollback()
             except Exception:
                 pass
-            print(f"Legacy stage migration skipped: {e}")
+            print(f"Bid stage normalization skipped: {e}")
 
         # --------------------------------------------------------------------
         # Seed department-scoped dummy users for new departments (if missing)
